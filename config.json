@@ -1,0 +1,71 @@
+{
+  "auto_order": {
+    "dry_run": true,
+    "enabled": false,
+    "password": "yyc931121",
+    "payment_method": "cod",
+    "username": "yyc285184831@gmail.com"
+  },
+  "notifications": {
+    "desktop_enabled": true,
+    "discord": {
+      "enabled": true,
+      "webhook_url": "https://discord.com/api/webhooks/1561738061996490913/nDehAHX3WkZabSNA_2e6BwnfMSQt5mjMu4HSyJIhS3R3sXvJShQ6RAUrE_zQrs31pYK3"
+    },
+    "email": {
+      "enabled": true,
+      "receiver_email": "yyc285184831@gmail.com",
+      "smtp_host": "smtp.gmail.com",
+      "smtp_password": "lizy jhpl etnx sbrm",
+      "smtp_port": 587,
+      "smtp_user": "yyc285184831@gmail.com",
+      "use_ssl": false
+    },
+    "line": {
+      "enabled": false,
+      "token": ""
+    },
+    "sound_enabled": true
+  },
+  "schedule": {
+    "burst_duration_sec": 180,
+    "burst_interval_sec": 2,
+    "drop_times": [
+      "21:00:00",
+      "21:05:00"
+    ],
+    "enabled": true,
+    "interval_enabled": true,
+    "interval_minutes": 5
+  },
+  "watches": [
+    {
+      "id": "w_1792415272992",
+      "name": "DearSDティアラ",
+      "keywords": [
+        "DearSD",
+        "ティアラ"
+      ],
+      "exclude_keywords": [],
+      "min_price": 50000,
+      "max_price": 100000,
+      "search_mode": "both",
+      "match_mode": "all",
+      "enabled": true
+    },
+    {
+      "id": "w_1792423165497",
+      "name": "幼SDまい",
+      "keywords": [
+        "幼SD",
+        "まい"
+      ],
+      "exclude_keywords": [],
+      "min_price": 20000,
+      "max_price": 50000,
+      "search_mode": "both",
+      "match_mode": "all",
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  dollyteria:
+    build: .
+    container_name: dollyteria-monitor
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - HOST=0.0.0.0
+      - TZ=Asia/Tokyo
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data

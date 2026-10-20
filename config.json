@@ -1,10 +1,10 @@
 {
   "auto_order": {
-    "dry_run": true,
-    "enabled": false,
+    "username": "yyc285184831@gmail.com",
     "password": "yyc931121",
-    "payment_method": "cod",
-    "username": "yyc285184831@gmail.com"
+    "dry_run": true,
+    "enabled": true,
+    "payment_method": "store_pickup"
   },
   "notifications": {
     "desktop_enabled": true,

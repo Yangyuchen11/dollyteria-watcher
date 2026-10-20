@@ -121,6 +121,18 @@ class DollyteriaMonitor:
                     return cfg
             except Exception as e:
                 logger.error(f"读取配置文件失败，使用默认配置: {e}")
+        elif os.path.exists("config.example.json"):
+            try:
+                with open("config.example.json", "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    for k, v in DEFAULT_CONFIG.items():
+                        if k not in cfg:
+                            cfg[k] = v
+                    self._save_config(cfg)
+                    logger.info(f"已自动从 config.example.json 模版初始化新配置: {CONFIG_PATH}")
+                    return cfg
+            except Exception as e:
+                logger.error(f"从模板读取配置失败: {e}")
         self._save_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG
 

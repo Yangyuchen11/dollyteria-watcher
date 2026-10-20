@@ -1,0 +1,55 @@
+{
+  "watches": [
+    {
+      "id": "w_sample_1",
+      "name": "DearSD 娃娃",
+      "keywords": [
+        "DearSD"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 0,
+      "search_mode": "both",
+      "match_mode": "all",
+      "enabled": true
+    }
+  ],
+  "schedule": {
+    "drop_times": [
+      "20:00:00",
+      "21:00:00"
+    ],
+    "burst_duration_sec": 180,
+    "burst_interval_sec": 2.0,
+    "interval_enabled": true,
+    "interval_minutes": 5
+  },
+  "notifications": {
+    "sound_enabled": true,
+    "desktop_enabled": true,
+    "discord": {
+      "enabled": false,
+      "webhook_url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+    },
+    "email": {
+      "enabled": false,
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "smtp_user": "your_email@gmail.com",
+      "smtp_password": "your_16_digit_app_password",
+      "receiver_email": "your_email@gmail.com",
+      "use_ssl": false
+    },
+    "line": {
+      "enabled": false,
+      "token": ""
+    }
+  },
+  "auto_order": {
+    "enabled": false,
+    "dry_run": true,
+    "payment_method": "cod",
+    "username": "your_dollyteria_email@gmail.com",
+    "password": "your_dollyteria_password"
+  }
+}

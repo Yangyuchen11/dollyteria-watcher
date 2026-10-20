@@ -189,7 +189,7 @@ dollyteria/
 sudo apt-get update && sudo apt-get install -y git
 
 # 2. 克隆项目仓库至服务器
-git clone <您的GitHub私有仓库地址> dollyteria
+git clone https://github.com/Yangyuchen11/dollyteria-watcher.git dollyteria
 cd dollyteria
 ```
 
@@ -229,5 +229,5 @@ bash deploy.sh status    # 查看容器当前运行状态与端口
 2. **抢购黄金 3 分钟**：
    - Dollyteria 每次上新一般需要 1~3 分钟才能将全部商品上传完毕。系统已设置在命中预设时刻（如 `21:00:00`）时，自动进行 180 秒的高频抓取，确保每一批上传的商品都不会漏掉。
 3. **多端协同提醒**：
-   - 部署在 Zeabur 后，通过配置 **Discord Webhook** 与 **邮件 (SMTP)** 通知，即便出门在外，手机也能在商品上架的第一秒收到包含大图与直达链接的高级卡片推送！
+   - 部署在腾讯云 Lighthouse 后，通过配置 **Discord Webhook** 与 **邮件 (SMTP)** 通知，即便出门在外，手机也能在商品上架的第一秒收到包含大图与直达链接的高级卡片推送！
 

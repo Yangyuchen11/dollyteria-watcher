@@ -200,6 +200,72 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             "message": f"基准线建立成功，已收录 {len(monitor.state.get('seen_ids', []))} 件当前在售商品，后续仅提醒新上架/新补货商品",
         })
 
+    # ==================== 商品全量档案与收录 API ====================
+    @app.route("/api/archive/stats")
+    def api_archive_stats():
+        return jsonify(monitor.archiver.get_status())
+
+    @app.route("/api/archive/crawler/start", methods=["POST"])
+    def api_archive_crawler_start():
+        data = request.json or {}
+        start_page = data.get("start_page")
+        if start_page is not None and str(start_page).isdigit():
+            start_page = int(start_page)
+        else:
+            start_page = None
+        delay = float(data.get("delay", 1.2))
+        res = monitor.archiver.start(start_page=start_page, delay=delay)
+        return jsonify(res)
+
+    @app.route("/api/archive/crawler/pause", methods=["POST"])
+    def api_archive_crawler_pause():
+        return jsonify(monitor.archiver.pause())
+
+    @app.route("/api/archive/crawler/resume", methods=["POST"])
+    def api_archive_crawler_resume():
+        return jsonify(monitor.archiver.resume())
+
+    @app.route("/api/archive/crawler/stop", methods=["POST"])
+    def api_archive_crawler_stop():
+        return jsonify(monitor.archiver.stop())
+
+    @app.route("/api/archive/products")
+    def api_archive_products():
+        kw = request.args.get("keyword", "").strip()
+        in_stock = request.args.get("in_stock", "all").strip()
+        sort_by = request.args.get("sort_by", "updated_desc").strip()
+        try:
+            page = int(request.args.get("page", 1))
+        except ValueError:
+            page = 1
+        try:
+            page_size = int(request.args.get("page_size", 30))
+        except ValueError:
+            page_size = 30
+        res = monitor.archive_db.query_products(
+            keyword=kw,
+            in_stock=in_stock,
+            sort_by=sort_by,
+            page=page,
+            page_size=page_size,
+        )
+        return jsonify(res)
+
+    @app.route("/api/archive/apply_baseline", methods=["POST"])
+    def api_archive_apply_baseline():
+        count = monitor.apply_archive_baseline()
+        return jsonify({
+            "status": "ok",
+            "message": f"成功将档案库中 {count} 件在售商品同步为监控基准线！",
+            "count": count,
+            "total_baseline": len(monitor.state.get("seen_ids", []))
+        })
+
+    @app.route("/api/archive/clear", methods=["POST"])
+    def api_archive_clear():
+        monitor.archive_db.clear_archive()
+        return jsonify({"status": "ok", "message": "商品归档数据库已清空"})
+
     @app.route("/api/history")
     def api_history():
         return jsonify(monitor.state.get("history", []))

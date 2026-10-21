@@ -9,6 +9,8 @@ import datetime
 import logging
 from typing import List, Dict, Set, Optional
 from core.scraper import DollyteriaScraper
+from core.archive_db import DollyteriaArchiveDB
+from core.archiver import DollyteriaArchiver
 from notifiers.manager import NotifierManager
 from hooks.auto_order import AutoOrderHook
 
@@ -19,6 +21,7 @@ if DATA_DIR:
     os.makedirs(DATA_DIR, exist_ok=True)
     CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
     STATE_PATH = os.path.join(DATA_DIR, "state.json")
+    ARCHIVE_DB_PATH = os.path.join(DATA_DIR, "archive.db")
     # 若挂载的持久化目录中尚无配置文件，自动从项目根目录复制一份已有的模版
     default_template = os.path.abspath("config.json")
     if not os.path.exists(CONFIG_PATH) and os.path.exists(default_template):
@@ -31,6 +34,7 @@ if DATA_DIR:
 else:
     CONFIG_PATH = os.path.abspath(os.environ.get("CONFIG_PATH", "config.json"))
     STATE_PATH = os.path.abspath(os.environ.get("STATE_PATH", "data/state.json"))
+    ARCHIVE_DB_PATH = os.path.abspath(os.environ.get("ARCHIVE_DB_PATH", "data/archive.db"))
 
 DEFAULT_CONFIG = {
     "watches": [
@@ -95,6 +99,8 @@ DEFAULT_CONFIG = {
 class DollyteriaMonitor:
     def __init__(self):
         self.scraper = DollyteriaScraper()
+        self.archive_db = DollyteriaArchiveDB(ARCHIVE_DB_PATH)
+        self.archiver = DollyteriaArchiver(self.archive_db, self.scraper)
         self.config = self._load_config()
         self.state = self._load_state()
 
@@ -183,9 +189,9 @@ class DollyteriaMonitor:
     def _save_state(self):
         try:
             os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-            # 保留最近 2000 个 seen_id
-            if len(self.state.get("seen_ids", [])) > 2000:
-                self.state["seen_ids"] = self.state["seen_ids"][-2000:]
+            # 保留最近 80000 个 seen_id
+            if len(self.state.get("seen_ids", [])) > 80000:
+                self.state["seen_ids"] = self.state["seen_ids"][-80000:]
             # 保留最近 100 条历史记录
             if len(self.state.get("history", [])) > 100:
                 self.state["history"] = self.state["history"][:100]
@@ -224,6 +230,8 @@ class DollyteriaMonitor:
             items = self.scraper.fetch_new_arrivals(num=100, in_stock_only=True)
             for it in items:
                 seen_set.add(it["id"])
+            if items:
+                self.archive_db.upsert_batch(items)
 
             # 抓取所有监控规则的搜索结果第 1 页
             for rule in self.config.get("watches", []):
@@ -237,17 +245,38 @@ class DollyteriaMonitor:
                         search_items = self.scraper.search_products(combined_kw, num=100, page=1, in_stock_only=True)
                         for sit in search_items:
                             seen_set.add(sit["id"])
+                        if search_items:
+                            self.archive_db.upsert_batch(search_items)
                 else:
                     for kw in keywords:
                         search_items = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
                         for sit in search_items:
                             seen_set.add(sit["id"])
+                        if search_items:
+                            self.archive_db.upsert_batch(search_items)
+
+            # 如果归档库已有在售商品，也一并加入基准线
+            archive_in_stock = self.archive_db.get_in_stock_ids()
+            for aid in archive_in_stock:
+                seen_set.add(aid)
 
             self.state["seen_ids"] = list(seen_set)
             self._save_state()
             logger.info(f"基准线建立完毕！已记录 {len(seen_set)} 件已有商品，后续仅提醒新上架/新补货商品。")
         except Exception as e:
             logger.error(f"建立基准线时异常: {e}")
+
+    def apply_archive_baseline(self) -> int:
+        """将归档数据库中所有在售商品同步为监控基准线"""
+        in_stock_ids = self.archive_db.get_in_stock_ids()
+        if not in_stock_ids:
+            return 0
+        seen_set = set(self.state.get("seen_ids", []))
+        seen_set.update(in_stock_ids)
+        self.state["seen_ids"] = list(seen_set)
+        self._save_state()
+        logger.info(f"已将归档库中 {len(in_stock_ids)} 件在售商品同步为监控基准线，当前基准总数: {len(seen_set)}")
+        return len(in_stock_ids)
 
     def _matches_rule(self, item: Dict, rule: Dict) -> bool:
         """检查单件商品是否完全命中规则"""
@@ -349,6 +378,12 @@ class DollyteriaMonitor:
                             res = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
                             for it in res:
                                 pool_items[it["id"]] = it
+            # 同步本次巡检到的商品至归档数据库
+            if pool_items:
+                try:
+                    self.archive_db.upsert_batch(list(pool_items.values()))
+                except Exception as e:
+                    logger.warning(f"同步巡检商品至归档库失败: {e}")
 
             # 3. 对抓取到的全部候选商品逐条匹配规则
             for it_id, item in pool_items.items():

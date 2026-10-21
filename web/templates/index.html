@@ -122,6 +122,9 @@
                 <button class="tab-btn" data-tab="tab-security">
                     <span>🔐 访问安全与密码</span>
                 </button>
+                <button class="tab-btn" data-tab="tab-archive">
+                    <span>📦 数据收录与档案</span>
+                </button>
             </div>
 
             <!-- Tab 1: 监控规则 -->
@@ -573,6 +576,157 @@
                             <li><strong>数据永久持久化</strong>: 您的所有监控任务、账号凭据以及已发现的商品历史均保存在服务器 <code>./data</code> 目录中，容器重启或更新代码绝不丢失数据。</li>
                         </ul>
                     </div>
+                </div>
+            </div>
+
+            <!-- Tab 7: 数据收录与全站档案 -->
+            <div id="tab-archive" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">📦 Dollyteria 全站商品档案与收录</h2>
+                        <p class="pane-desc">支持全自动温和抓取全站所有在售与售罄商品（全站约 4 万件），建立个人行情档案并提供毫秒级搜索</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-sync-baseline-from-archive" class="btn btn-accent" title="将数据库中所有在售商品设为监控基准">
+                            <span>🎯 同步在售商品为监控基准</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 采集控制卡片 -->
+                <div class="settings-card glass archive-control-card">
+                    <div class="archive-stats-grid">
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">📚</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num" id="arch-stat-total">0</div>
+                                <div class="arch-stat-label">已收录总商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">🟢</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num text-success" id="arch-stat-in-stock">0</div>
+                                <div class="arch-stat-label">当前在售商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">⚪</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num text-muted" id="arch-stat-sold-out">0</div>
+                                <div class="arch-stat-label">历史已售罄商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">⏱️</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num" id="arch-stat-progress">0%</div>
+                                <div class="arch-stat-label" id="arch-stat-progress-sub">就绪待命</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 进度条容器 -->
+                    <div class="crawler-progress-wrap" id="crawler-progress-wrap">
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="crawler-progress-fill" style="width: 0%;"></div>
+                        </div>
+                        <div class="progress-bar-labels">
+                            <span id="crawler-progress-text">准备就绪 (全站约 40,500 件商品，单页 100 件平缓抓取)</span>
+                            <span id="crawler-speed-text">单页延时: 1.2s</span>
+                        </div>
+                    </div>
+
+                    <!-- 采集操作按钮与设置行 -->
+                    <div class="crawler-actions-row">
+                        <div class="crawler-btn-group">
+                            <button id="btn-crawler-start" class="btn btn-primary">
+                                <span>▶️ 开始全站收录</span>
+                            </button>
+                            <button id="btn-crawler-pause" class="btn btn-warning" style="display:none;">
+                                <span>⏸️ 暂停收录</span>
+                            </button>
+                            <button id="btn-crawler-resume" class="btn btn-success" style="display:none;">
+                                <span>▶️ 继续收录</span>
+                            </button>
+                            <button id="btn-crawler-stop" class="btn btn-danger" style="display:none;">
+                                <span>⏹️ 停止</span>
+                            </button>
+                        </div>
+                        <div class="crawler-config-inline">
+                            <label class="inline-label">单页抓取延时:</label>
+                            <select id="crawler-delay-select" class="form-select inline-select">
+                                <option value="1.0">1.0 秒 (稍快)</option>
+                                <option value="1.2" selected>1.2 秒 (推荐)</option>
+                                <option value="1.8">1.8 秒 (更安全)</option>
+                                <option value="2.5">2.5 秒 (极稳)</option>
+                            </select>
+                            <label class="inline-label" style="margin-left: 12px;">指定起始页:</label>
+                            <input type="number" id="crawler-start-page" class="form-control inline-input" min="1" placeholder="断点页(留空从头/续爬)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 档案商品搜索与过滤区 -->
+                <div class="archive-search-container glass">
+                    <div class="archive-search-bar">
+                        <div class="search-input-wrap">
+                            <span class="search-icon">🔍</span>
+                            <input type="text" id="archive-search-kw" class="form-control search-input" placeholder="输入关键词匹配 (例如: 幼SD、ティアラ、Blythe、或商品编号 S-26...)...">
+                            <button id="btn-archive-clear-search" class="btn-clear-search" title="清除关键词" style="display:none;">&times;</button>
+                        </div>
+                        <button id="btn-archive-search" class="btn btn-primary search-action-btn">
+                            <span>搜索档案</span>
+                        </button>
+                    </div>
+
+                    <div class="archive-filter-row">
+                        <div class="filter-group">
+                            <span class="filter-label">库存状态:</span>
+                            <div class="filter-chips" id="filter-stock-chips">
+                                <button class="filter-chip active" data-stock="all">全部商品</button>
+                                <button class="filter-chip" data-stock="1">🟢 仅在售</button>
+                                <button class="filter-chip" data-stock="0">⚪ 仅售罄</button>
+                            </div>
+                        </div>
+
+                        <div class="filter-group right-align">
+                            <span class="filter-label">排序方式:</span>
+                            <select id="archive-sort-select" class="form-select sort-select">
+                                <option value="updated_desc">最新更新时间 ↓</option>
+                                <option value="updated_asc">最早更新时间 ↑</option>
+                                <option value="price_asc">价格从低到高 ↑</option>
+                                <option value="price_desc">价格从高到低 ↓</option>
+                            </select>
+                            <span id="archive-match-count" class="match-count-badge">共 0 件匹配</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 商品展示网格 -->
+                <div id="archive-products-grid" class="archive-products-grid">
+                    <!-- 动态加载商品卡片 -->
+                </div>
+
+                <!-- 分页条 -->
+                <div id="archive-pagination" class="archive-pagination" style="display:none;">
+                    <button id="btn-arch-prev" class="btn btn-ghost pagination-btn">◀ 上一页</button>
+                    <div class="pagination-info">
+                        第 <span id="arch-page-current">1</span> / <span id="arch-page-total">1</span> 页
+                    </div>
+                    <button id="btn-arch-next" class="btn btn-ghost pagination-btn">下一页 ▶</button>
+                    <div class="pagination-jump">
+                        <span>跳转</span>
+                        <input type="number" id="input-arch-jump" class="form-control jump-input" min="1">
+                        <button id="btn-arch-jump" class="btn btn-ghost jump-btn">GO</button>
+                    </div>
+                </div>
+
+                <!-- 空状态展示 -->
+                <div id="archive-empty" class="feed-empty-state glass" style="display:none;">
+                    <div class="empty-icon">📦</div>
+                    <div class="empty-title">暂未收录商品或无匹配结果</div>
+                    <div class="empty-desc">您可以点击上方【开始全站收录】启动后台温和抓取，或调整搜索词与筛选条件重试。</div>
                 </div>
             </div>
         </main>

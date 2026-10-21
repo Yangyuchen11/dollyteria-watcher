@@ -330,6 +330,9 @@ function initTabs() {
                 elements.feedBadge.style.display = 'none';
                 elements.feedBadge.textContent = '0';
             }
+            if (tabId === 'tab-archive') {
+                onArchiveTabActive();
+            }
         });
     });
 }
@@ -340,6 +343,7 @@ function initMainApp() {
     isAppInitialized = true;
     try { loadConfig(); } catch (e) { console.error('loadConfig err:', e); }
     try { loadHistory(); } catch (e) { console.error('loadHistory err:', e); }
+    try { initArchiveModule(); } catch (e) { console.error('initArchiveModule err:', e); }
     try { initSSE(); } catch (e) { console.error('initSSE err:', e); }
     try {
         pollStatus();
@@ -1318,6 +1322,417 @@ function bindEvents() {
             const isPwd = elements.inputNewWebPassword.type === 'password';
             elements.inputNewWebPassword.type = isPwd ? 'text' : 'password';
             elements.btnToggleNewPwd.textContent = isPwd ? '🙈' : '👁️';
+        });
+    }
+}
+
+// ==================== 全站商品档案与收录模块 ====================
+const archiveState = {
+    page: 1,
+    pageSize: 30,
+    keyword: '',
+    inStock: 'all',
+    sortBy: 'updated_desc',
+    totalPages: 1,
+    totalCount: 0,
+    isLoading: false,
+    hasLoadedOnce: false,
+    crawlerPollTimer: null,
+};
+
+function onArchiveTabActive() {
+    pollArchiveCrawlerStatus();
+    if (!archiveState.hasLoadedOnce) {
+        loadArchiveProducts(1);
+    }
+    if (!archiveState.crawlerPollTimer) {
+        archiveState.crawlerPollTimer = setInterval(pollArchiveCrawlerStatus, 2000);
+    }
+}
+
+async function pollArchiveCrawlerStatus() {
+    try {
+        const res = await fetch('/api/archive/stats');
+        if (res.status === 401) return;
+        const data = await res.json();
+
+        // 统计数据
+        const stats = data.archive_stats || {};
+        const elTotal = document.getElementById('arch-stat-total');
+        const elInStock = document.getElementById('arch-stat-in-stock');
+        const elSoldOut = document.getElementById('arch-stat-sold-out');
+        const elProgress = document.getElementById('arch-stat-progress');
+        const elProgressSub = document.getElementById('arch-stat-progress-sub');
+        const elFill = document.getElementById('crawler-progress-fill');
+        const elProgressText = document.getElementById('crawler-progress-text');
+        const elSpeedText = document.getElementById('crawler-speed-text');
+
+        if (elTotal) elTotal.textContent = (stats.total || 0).toLocaleString();
+        if (elInStock) elInStock.textContent = (stats.in_stock || 0).toLocaleString();
+        if (elSoldOut) elSoldOut.textContent = (stats.sold_out || 0).toLocaleString();
+        if (elProgress) elProgress.textContent = `${data.progress_pct || 0}%`;
+
+        // 按钮元素
+        const btnStart = document.getElementById('btn-crawler-start');
+        const btnPause = document.getElementById('btn-crawler-pause');
+        const btnResume = document.getElementById('btn-crawler-resume');
+        const btnStop = document.getElementById('btn-crawler-stop');
+
+        const status = data.status || 'idle';
+        if (elProgressSub) {
+            const statusMap = {
+                'idle': '就绪待命',
+                'running': '⚡ 正在采集...',
+                'paused': '⏸️ 已暂停',
+                'finished': '✅ 采集完成',
+                'error': '❌ 异常中断',
+            };
+            elProgressSub.textContent = statusMap[status] || status;
+        }
+
+        if (elFill) {
+            elFill.style.width = `${Math.min(100, Math.max(0, data.progress_pct || 0))}%`;
+        }
+
+        if (elProgressText) {
+            if (status === 'running') {
+                elProgressText.textContent = `正在抓取第 ${data.current_page} / ${data.total_pages || '?'} 页 (累计抓取 ${data.total_scraped || 0} 件，新增 ${data.new_inserted || 0}，更新 ${data.updated_existing || 0})`;
+            } else if (status === 'paused') {
+                elProgressText.textContent = `任务暂停在第 ${data.current_page} / ${data.total_pages || '?'} 页 (随时可点击继续)`;
+            } else if (status === 'finished') {
+                elProgressText.textContent = `已完成全站爬取！共收录 ${stats.total || 0} 件商品 (在售: ${stats.in_stock || 0})`;
+            } else if (status === 'error') {
+                elProgressText.textContent = `采集出错: ${data.last_error || '网络或接口异常'}`;
+            } else {
+                elProgressText.textContent = `准备就绪 (全站约 40,500 件商品，单页 100 件平缓抓取)`;
+            }
+        }
+
+        if (elSpeedText) {
+            elSpeedText.textContent = `单页延时: ${data.delay_sec || 1.2}s`;
+        }
+
+        // 按钮显示状态联动
+        if (btnStart && btnPause && btnResume && btnStop) {
+            if (status === 'running') {
+                btnStart.style.display = 'none';
+                btnPause.style.display = 'inline-flex';
+                btnResume.style.display = 'none';
+                btnStop.style.display = 'inline-flex';
+            } else if (status === 'paused') {
+                btnStart.style.display = 'none';
+                btnPause.style.display = 'none';
+                btnResume.style.display = 'inline-flex';
+                btnStop.style.display = 'inline-flex';
+            } else {
+                btnStart.style.display = 'inline-flex';
+                btnPause.style.display = 'none';
+                btnResume.style.display = 'none';
+                btnStop.style.display = 'none';
+            }
+        }
+    } catch (e) {
+        console.error('pollArchiveCrawlerStatus error:', e);
+    }
+}
+
+async function loadArchiveProducts(page = 1) {
+    if (archiveState.isLoading) return;
+    archiveState.isLoading = true;
+    archiveState.hasLoadedOnce = true;
+    archiveState.page = Math.max(1, page);
+
+    const grid = document.getElementById('archive-products-grid');
+    const empty = document.getElementById('archive-empty');
+    const pagination = document.getElementById('archive-pagination');
+    const matchCount = document.getElementById('archive-match-count');
+
+    if (grid) {
+        grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted); font-size: 14px;">⏳ 正在检索档案库商品...</div>';
+    }
+
+    try {
+        const params = new URLSearchParams({
+            keyword: archiveState.keyword,
+            in_stock: archiveState.inStock,
+            sort_by: archiveState.sortBy,
+            page: String(archiveState.page),
+            page_size: String(archiveState.pageSize),
+        });
+
+        const res = await fetch(`/api/archive/products?${params.toString()}`);
+        if (res.status === 401) {
+            showLockScreen();
+            return;
+        }
+        const data = await res.json();
+
+        archiveState.totalPages = data.total_pages || 1;
+        archiveState.totalCount = data.total || 0;
+
+        if (matchCount) {
+            matchCount.textContent = `共 ${data.total.toLocaleString()} 件匹配`;
+        }
+
+        renderArchiveProducts(data.items || []);
+
+        if (pagination) {
+            if (data.total > 0 && data.total_pages > 1) {
+                pagination.style.display = 'flex';
+                const cur = document.getElementById('arch-page-current');
+                const tot = document.getElementById('arch-page-total');
+                const prevBtn = document.getElementById('btn-arch-prev');
+                const nextBtn = document.getElementById('btn-arch-next');
+                if (cur) cur.textContent = data.page;
+                if (tot) tot.textContent = data.total_pages;
+                if (prevBtn) prevBtn.disabled = data.page <= 1;
+                if (nextBtn) nextBtn.disabled = data.page >= data.total_pages;
+            } else {
+                pagination.style.display = 'none';
+            }
+        }
+
+        if (empty) {
+            empty.style.display = data.total === 0 ? 'block' : 'none';
+        }
+    } catch (e) {
+        console.error('loadArchiveProducts error:', e);
+        if (grid) grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #f87171;">检索异常: ${escapeHtml(e.message)}</div>`;
+    } finally {
+        archiveState.isLoading = false;
+    }
+}
+
+function renderArchiveProducts(items) {
+    const grid = document.getElementById('archive-products-grid');
+    if (!grid) return;
+
+    if (!items || items.length === 0) {
+        grid.innerHTML = '';
+        return;
+    }
+
+    grid.innerHTML = items.map(it => {
+        const isStock = it.is_in_stock;
+        const stockBadge = isStock
+            ? '<span class="arch-stock-badge in-stock">🟢 在售</span>'
+            : '<span class="arch-stock-badge sold-out">⚪ 已售罄</span>';
+
+        const imgSrc = it.img_url || 'https://www.dollyteria.com/html/template/default/img/common/no_image.gif';
+        const priceStr = it.price_str || `￥${(it.price || 0).toLocaleString()}`;
+        const modelStr = it.model_number ? escapeHtml(it.model_number) : '常规';
+
+        return `
+            <div class="arch-card">
+                <div class="arch-card-thumb-wrap">
+                    ${stockBadge}
+                    <img src="${escapeHtml(imgSrc)}"
+                         alt="${escapeHtml(it.title || '')}"
+                         class="arch-card-img"
+                         loading="lazy"
+                         onerror="this.onerror=null;this.src='https://www.dollyteria.com/html/template/default/img/common/no_image.gif'">
+                </div>
+                <div class="arch-card-body">
+                    <div class="arch-card-meta">
+                        <span class="arch-card-model" title="型号编号">${modelStr}</span>
+                        <span class="arch-card-id">#${escapeHtml(it.id)}</span>
+                    </div>
+                    <div class="arch-card-title" title="${escapeHtml(it.title || '')}">${escapeHtml(it.title || '无标题商品')}</div>
+                    <div class="arch-card-footer">
+                        <span class="arch-card-price">${escapeHtml(priceStr)}</span>
+                        <a href="${escapeHtml(it.url || '#')}" target="_blank" rel="noopener noreferrer" class="arch-card-link-btn">
+                            官网详情 ↗
+                        </a>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function initArchiveModule() {
+    // 启动采集
+    const btnStart = document.getElementById('btn-crawler-start');
+    if (btnStart) {
+        btnStart.addEventListener('click', async () => {
+            const delaySelect = document.getElementById('crawler-delay-select');
+            const startPageInput = document.getElementById('crawler-start-page');
+            const delay = delaySelect ? parseFloat(delaySelect.value) : 1.2;
+            const startPageVal = startPageInput ? startPageInput.value.trim() : '';
+
+            try {
+                showToast('正在启动全站后台采集...', 'info');
+                const res = await fetch('/api/archive/crawler/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        delay: delay,
+                        start_page: startPageVal ? parseInt(startPageVal) : null,
+                    }),
+                });
+                const data = await res.json();
+                showToast(data.message || '采集已启动');
+                pollArchiveCrawlerStatus();
+            } catch (err) {
+                showToast('启动采集失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 暂停采集
+    const btnPause = document.getElementById('btn-crawler-pause');
+    if (btnPause) {
+        btnPause.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/archive/crawler/pause', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || '采集已暂停');
+                pollArchiveCrawlerStatus();
+            } catch (err) {
+                showToast('暂停采集失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 继续采集
+    const btnResume = document.getElementById('btn-crawler-resume');
+    if (btnResume) {
+        btnResume.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/archive/crawler/resume', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || '采集已恢复');
+                pollArchiveCrawlerStatus();
+            } catch (err) {
+                showToast('恢复采集失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 停止采集
+    const btnStop = document.getElementById('btn-crawler-stop');
+    if (btnStop) {
+        btnStop.addEventListener('click', async () => {
+            if (!confirm('确定停止当前的爬取任务吗？已抓取的数据会安全保留在本地 SQLite 数据库中。')) return;
+            try {
+                const res = await fetch('/api/archive/crawler/stop', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || '采集已停止');
+                pollArchiveCrawlerStatus();
+            } catch (err) {
+                showToast('停止采集失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 同步档案库在售商品为监控基准
+    const btnSyncBaseline = document.getElementById('btn-sync-baseline-from-archive');
+    if (btnSyncBaseline) {
+        btnSyncBaseline.addEventListener('click', async () => {
+            if (!confirm('确定将档案数据库中所有在售商品同步为监控基准线吗？\n同步后，当前所有库存商品都不会触发报警，后续仅有全新上架或新补货时才会提醒。')) return;
+            try {
+                showToast('正在同步监控基准线...', 'info');
+                const res = await fetch('/api/archive/apply_baseline', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || '基准线同步成功！');
+                if (typeof fetchStatus === 'function') fetchStatus();
+            } catch (err) {
+                showToast('同步基准线失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 关键词搜索
+    const searchInput = document.getElementById('archive-search-kw');
+    const searchBtn = document.getElementById('btn-archive-search');
+    const clearBtn = document.getElementById('btn-archive-clear-search');
+
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            if (clearBtn) clearBtn.style.display = searchInput.value ? 'block' : 'none';
+        });
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                archiveState.keyword = searchInput.value.trim();
+                loadArchiveProducts(1);
+            }
+        });
+    }
+
+    if (searchBtn && searchInput) {
+        searchBtn.addEventListener('click', () => {
+            archiveState.keyword = searchInput.value.trim();
+            loadArchiveProducts(1);
+        });
+    }
+
+    if (clearBtn && searchInput) {
+        clearBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            clearBtn.style.display = 'none';
+            archiveState.keyword = '';
+            loadArchiveProducts(1);
+        });
+    }
+
+    // 库存状态过滤 Chip
+    const chips = document.querySelectorAll('#filter-stock-chips .filter-chip');
+    chips.forEach(chip => {
+        chip.addEventListener('click', () => {
+            chips.forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+            archiveState.inStock = chip.getAttribute('data-stock') || 'all';
+            loadArchiveProducts(1);
+        });
+    });
+
+    // 排序变更
+    const sortSelect = document.getElementById('archive-sort-select');
+    if (sortSelect) {
+        sortSelect.addEventListener('change', (e) => {
+            archiveState.sortBy = e.target.value;
+            loadArchiveProducts(1);
+        });
+    }
+
+    // 分页上一页 / 下一页
+    const btnPrev = document.getElementById('btn-arch-prev');
+    const btnNext = document.getElementById('btn-arch-next');
+    if (btnPrev) {
+        btnPrev.addEventListener('click', () => {
+            if (archiveState.page > 1) {
+                loadArchiveProducts(archiveState.page - 1);
+            }
+        });
+    }
+    if (btnNext) {
+        btnNext.addEventListener('click', () => {
+            if (archiveState.page < archiveState.totalPages) {
+                loadArchiveProducts(archiveState.page + 1);
+            }
+        });
+    }
+
+    // 页码跳转
+    const jumpInput = document.getElementById('input-arch-jump');
+    const jumpBtn = document.getElementById('btn-arch-jump');
+    const doJump = () => {
+        if (!jumpInput) return;
+        const val = parseInt(jumpInput.value);
+        if (!isNaN(val) && val >= 1 && val <= archiveState.totalPages) {
+            loadArchiveProducts(val);
+        } else {
+            showToast(`请输入 1 到 ${archiveState.totalPages} 之间的有效页码`, 'warning');
+        }
+    };
+    if (jumpBtn) jumpBtn.addEventListener('click', doJump);
+    if (jumpInput) {
+        jumpInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                doJump();
+            }
         });
     }
 }

@@ -39,7 +39,7 @@ EXPOSE 5000
 
 # 健康检查 (方便容器平台自动检测服务存活健康状态)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://127.0.0.1:${PORT:-5000}/api/status || exit 1
+    CMD curl -f http://127.0.0.1:${PORT:-5000}/health || exit 1
 
 # 容器启动命令
 CMD ["python", "main.py", "--host", "0.0.0.0", "--no-browser"]

@@ -61,9 +61,10 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
 
     @app.before_request
     def enforce_authentication():
-        # 放行静态文件与鉴权相关接口
+        # 放行静态文件、健康检查与鉴权相关接口
         if request.path.startswith("/static/") or request.path in [
             "/favicon.ico",
+            "/health",
             "/api/auth/status",
             "/api/auth/login",
         ]:
@@ -78,6 +79,11 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
                 "error": "unauthorized",
                 "message": "请先输入访问密码解锁看板"
             }), 401
+
+    @app.route("/health")
+    def health_check():
+        """轻量级健康检查接口，供 Docker 与 Dokploy 容器平台探针使用"""
+        return jsonify({"status": "ok", "app": "dollyteria-watcher"})
 
     # SSE 事件广播队列列表
     event_queues = []

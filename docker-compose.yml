@@ -16,8 +16,8 @@ services:
       # 也可以在此直接指定看板访问密码 (优先级高于 config.json，可选):
       # - WEB_PASSWORD=your_password_here
     volumes:
-      - ./data:/app/data
+      - dollyteria-data:/app/data
     deploy:
       resources:
         limits:
-          memory: 300M   # 内存上限 300MB，确保绝不影响服务器上既有的 yurara ERP 服务
+          memory: 300M # 内存上限 300MB，确保绝不影响服务器上既有的 yurara ERP 服务

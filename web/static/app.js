@@ -1816,6 +1816,12 @@ function addToWebCart(itemId) {
     inpPage.value = 'product';
     form.appendChild(inpPage);
 
+    const inpQty = document.createElement('input');
+    inpQty.type = 'hidden';
+    inpQty.name = `cart_addquantity_${itemId}`;
+    inpQty.value = '1';
+    form.appendChild(inpQty);
+
     const inpBtn = document.createElement('input');
     inpBtn.type = 'hidden';
     inpBtn.name = 'cart_add_btn';

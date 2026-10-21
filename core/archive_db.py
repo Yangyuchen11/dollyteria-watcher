@@ -50,6 +50,7 @@ class DollyteriaArchiveDB:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_in_stock ON products(is_in_stock);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updated_at DESC);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_price ON products(price);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_products_id_num ON products(CAST(id AS INTEGER) DESC);")
                 conn.commit()
             logger.info(f"SQLite 商品归档数据库初始化成功: {self.db_path}")
         except Exception as e:
@@ -166,12 +167,14 @@ class DollyteriaArchiveDB:
 
         # 排序
         sort_map = {
-            "updated_desc": "updated_at DESC, id DESC",
-            "updated_asc": "updated_at ASC, id ASC",
-            "price_asc": "price ASC, id DESC",
-            "price_desc": "price DESC, id DESC",
+            "id_desc": "CAST(id AS INTEGER) DESC",
+            "id_asc": "CAST(id AS INTEGER) ASC",
+            "updated_desc": "CAST(id AS INTEGER) DESC",  # 兼容旧默认值，指向商品发布顺序从新到旧
+            "crawl_time_desc": "updated_at DESC, CAST(id AS INTEGER) DESC",
+            "price_asc": "price ASC, CAST(id AS INTEGER) DESC",
+            "price_desc": "price DESC, CAST(id AS INTEGER) DESC",
         }
-        order_by_sql = sort_map.get(sort_by, "updated_at DESC, id DESC")
+        order_by_sql = sort_map.get(sort_by, "CAST(id AS INTEGER) DESC")
 
         try:
             with self._get_connection() as conn:

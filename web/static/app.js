@@ -1332,7 +1332,7 @@ const archiveState = {
     pageSize: 30,
     keyword: '',
     inStock: 'all',
-    sortBy: 'updated_desc',
+    sortBy: 'id_desc',
     totalPages: 1,
     totalCount: 0,
     isLoading: false,

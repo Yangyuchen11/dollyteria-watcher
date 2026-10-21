@@ -808,6 +808,22 @@
             </div>
         </div>
 
+        <!-- 一键购买/测试结果弹窗 Modal -->
+        <div id="buy-modal" class="modal-backdrop" style="display:none;">
+            <div class="modal-card glass buy-modal-card">
+                <div class="modal-header">
+                    <h3 id="buy-modal-title" class="modal-title">⚡ 一键购买执行结果</h3>
+                    <button id="buy-modal-close" class="modal-close-btn">&times;</button>
+                </div>
+                <div id="buy-modal-body" class="buy-modal-body">
+                    <!-- 动态注入下单结果 -->
+                </div>
+                <div class="modal-footer" style="margin-top:16px; display:flex; justify-content:flex-end;">
+                    <button id="buy-modal-ok" class="btn btn-primary">关闭</button>
+                </div>
+            </div>
+        </div>
+
         <!-- 全局吐司提示通知 -->
         <div id="toast-container" class="toast-container"></div>
 

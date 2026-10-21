@@ -356,6 +356,44 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = ao.execute_checkout(item_id=item_id, dry_run=True, clear_after_dry_run=True, payment_method=payment_method)
         return jsonify(res)
 
+    @app.route("/api/auto_order/buy", methods=["POST"])
+    def api_auto_order_buy():
+        data = request.json or {}
+        item_id = str(data.get("item_id", "")).strip()
+        item_title = str(data.get("item_title", "")).strip()
+        if not item_id:
+            return jsonify({"success": False, "message": "未指定商品 ID"}), 400
+
+        ao_cfg = monitor.config.get("auto_order", {})
+        username = (ao_cfg.get("username") or "").strip()
+        password = (ao_cfg.get("password") or "").strip()
+        if not username or not password:
+            return jsonify({
+                "success": False,
+                "message": "未配置 Dollyteria 账号邮箱或密码，请先在【🛒 自动下单接口】填写登录凭据"
+            }), 400
+
+        payment_method = (data.get("payment_method") or ao_cfg.get("payment_method", "cod")).strip()
+        dry_run = data.get("dry_run")
+        if dry_run is None:
+            dry_run = ao_cfg.get("dry_run", True)
+        else:
+            dry_run = bool(dry_run)
+
+        monitor.auto_order.username = username
+        monitor.auto_order.password = password
+        monitor.auto_order.dry_run = dry_run
+        monitor.auto_order.payment_method = payment_method
+
+        res = monitor.auto_order.execute_checkout(
+            item_id=item_id,
+            item_title=item_title,
+            dry_run=dry_run,
+            clear_after_dry_run=dry_run,
+            payment_method=payment_method,
+        )
+        return jsonify(res)
+
     @app.route("/api/events")
     def api_events():
         """Server-Sent Events (SSE) 实时长连接，供网页实时接收上新提醒"""

@@ -1539,10 +1539,26 @@ function renderArchiveProducts(items) {
                     </div>
                     <div class="arch-card-title" title="${escapeHtml(it.title || '')}">${escapeHtml(it.title || '无标题商品')}</div>
                     <div class="arch-card-footer">
-                        <span class="arch-card-price">${escapeHtml(priceStr)}</span>
-                        <a href="${escapeHtml(it.url || '#')}" target="_blank" rel="noopener noreferrer" class="arch-card-link-btn">
-                            官网详情 ↗
-                        </a>
+                        <div class="arch-card-price-row">
+                            <span class="arch-card-price">${escapeHtml(priceStr)}</span>
+                            <a href="${escapeHtml(it.url || '#')}" target="_blank" rel="noopener noreferrer" class="arch-card-link-btn" title="在新标签页查看官网商品详情">
+                                官网 ↗
+                            </a>
+                        </div>
+                        <div class="arch-card-actions">
+                            ${isStock ? `
+                                <button type="button" class="btn-card-action btn-card-cart" data-id="${escapeHtml(it.id)}" title="在新标签页直接将此商品加入您的浏览器网页版购物车">
+                                    🛒 加购物车
+                                </button>
+                                <button type="button" class="btn-card-action btn-card-buy" data-id="${escapeHtml(it.id)}" data-title="${escapeHtml(it.title || '')}" data-price="${escapeHtml(priceStr)}" title="调用自动下单接口快速购买 (支持 Dry-Run 仿真与真实购买)">
+                                    ⚡ 一键购买
+                                </button>
+                            ` : `
+                                <button type="button" class="btn-card-action btn-card-disabled" disabled title="该商品当前已售罄，无法加购">
+                                    ⚪ 已售罄
+                                </button>
+                            `}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1735,6 +1751,234 @@ function initArchiveModule() {
             }
         });
     }
+
+    // 绑定卡片上的「🛒 加购物车」与「⚡ 一键购买」点击事件代理
+    const productsGrid = document.getElementById('archive-products-grid');
+    if (productsGrid) {
+        productsGrid.addEventListener('click', (e) => {
+            const btnBuy = e.target.closest('.btn-card-buy');
+            if (btnBuy) {
+                e.preventDefault();
+                e.stopPropagation();
+                const id = btnBuy.getAttribute('data-id');
+                const title = btnBuy.getAttribute('data-title');
+                const price = btnBuy.getAttribute('data-price');
+                quickBuyItem(id, title, price, btnBuy);
+                return;
+            }
+
+            const btnCart = e.target.closest('.btn-card-cart');
+            if (btnCart) {
+                e.preventDefault();
+                e.stopPropagation();
+                const id = btnCart.getAttribute('data-id');
+                addToWebCart(id);
+                return;
+            }
+        });
+    }
+
+    // 绑定购买结果弹窗关闭
+    const buyModal = document.getElementById('buy-modal');
+    const buyModalClose = document.getElementById('buy-modal-close');
+    const buyModalOk = document.getElementById('buy-modal-ok');
+    const closeBuyModal = () => { if (buyModal) buyModal.style.display = 'none'; };
+    if (buyModalClose) buyModalClose.addEventListener('click', closeBuyModal);
+    if (buyModalOk) buyModalOk.addEventListener('click', closeBuyModal);
+    if (buyModal) {
+        buyModal.addEventListener('click', (e) => {
+            if (e.target === buyModal) closeBuyModal();
+        });
+    }
+}
+
+// 直接提交表单至 Dollyteria 官网，将商品 100% 同步加入当前浏览器的网页版购物车
+function addToWebCart(itemId) {
+    itemId = String(itemId).trim();
+    if (!itemId) return;
+
+    // 动态创建隐式表单提交至官网产品页
+    const form = document.createElement('form');
+    form.action = `https://www.dollyteria.com/product/${itemId}`;
+    form.method = 'POST';
+    form.target = '_blank';
+    form.style.display = 'none';
+
+    const inpAdd = document.createElement('input');
+    inpAdd.type = 'hidden';
+    inpAdd.name = `cart_add_${itemId}`;
+    inpAdd.value = 't';
+    form.appendChild(inpAdd);
+
+    const inpPage = document.createElement('input');
+    inpPage.type = 'hidden';
+    inpPage.name = 'cart_operation_page';
+    inpPage.value = 'product';
+    form.appendChild(inpPage);
+
+    const inpBtn = document.createElement('input');
+    inpBtn.type = 'hidden';
+    inpBtn.name = 'cart_add_btn';
+    inpBtn.value = 'カートに入れる';
+    form.appendChild(inpBtn);
+
+    document.body.appendChild(form);
+    form.submit();
+    setTimeout(() => form.remove(), 800);
+
+    showToast(`🛒 已向 Dollyteria 官网提交加购请求！正在新标签页打开您的网页版购物车...`, 'success');
+}
+
+// 调用后台自动下单接口执行一键购买
+async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
+    itemId = String(itemId).trim();
+    if (!itemId) return;
+
+    const aoCfg = currentConfig?.auto_order || {};
+    if (!aoCfg.username || !aoCfg.password) {
+        showToast('请先在「🛒 自动下单接口」标签页配置 Dollyteria 账号邮箱与登录密码', 'warning');
+        return;
+    }
+
+    const isDry = aoCfg.dry_run !== false;
+    const payMethod = aoCfg.payment_method || 'cod';
+    const payName = (payMethod === 'store_pickup' || payMethod === 'store') ? '店頭支払 (到店付款)' : '代金引換 (货到付款)';
+
+    const modeTip = isDry 
+        ? '【🛡️ Dry-Run 仿真测试模式】\n系统将自动模拟登录、秒级加购、选择地址与支付方式全流程，并在最终购买确认前安全拦截，提取详细费用明细，绝对不会扣款或产生订单！'
+        : '【🚨 真实下单模式 (警告)】\n系统将以您的账号自动在 Dollyteria 官网提交真实订单购买！';
+
+    const confirmMsg = `确定要对以下商品发起一键购买吗？\n\n` +
+        `📦 商品名称: ${itemTitle}\n` +
+        `🏷️ 商品编号: #${itemId} | 价格: ${itemPrice}\n` +
+        `💳 锁定支付: 【${payName}】\n` +
+        `⚙️ 当前模式: ${modeTip}`;
+
+    if (!confirm(confirmMsg)) return;
+
+    const originalText = btnEl ? btnEl.innerHTML : '';
+    if (btnEl) {
+        btnEl.disabled = true;
+        btnEl.innerHTML = '⏳ 购买中...';
+    }
+
+    showToast(`正在对商品 #${itemId} 执行自动下单流水线，请稍候...`, 'info');
+
+    try {
+        const res = await fetch('/api/auto_order/buy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                item_id: itemId,
+                item_title: itemTitle,
+                dry_run: isDry,
+                payment_method: payMethod,
+            }),
+        });
+
+        const data = await res.json();
+        if (data.success) {
+            showToast(isDry ? '🎉 仿真测试成功！已顺利抵达最终确认页' : '🎉 真实下单购买成功！', 'success');
+            showBuyResultModal(data, itemTitle, itemId);
+        } else {
+            showToast(data.message || '购买流程中断，请检查账号或库存状态', 'error');
+            if (data.steps_log) {
+                showBuyResultModal(data, itemTitle, itemId);
+            }
+        }
+    } catch (err) {
+        showToast('发起自动购买异常: ' + err.message, 'error');
+    } finally {
+        if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.innerHTML = originalText;
+        }
+    }
+}
+
+// 渲染并展示一键购买明细弹窗
+function showBuyResultModal(data, itemTitle, itemId) {
+    const modal = document.getElementById('buy-modal');
+    const modalTitle = document.getElementById('buy-modal-title');
+    const modalBody = document.getElementById('buy-modal-body');
+    if (!modal || !modalBody) return;
+
+    const isSuccess = Boolean(data.success);
+    const isDry = Boolean(data.dry_run);
+    const d = data.details || {};
+    const stepsHtml = (data.steps_log || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+
+    if (modalTitle) {
+        modalTitle.textContent = isSuccess
+            ? (isDry ? '🛡️ 一键购买仿真测试成功 (Dry-Run)' : '🎉 一键下单成功 (真实订单)')
+            : '❌ 一键购买执行受阻';
+    }
+
+    let summaryHtml = '';
+    if (isSuccess && data.details) {
+        summaryHtml = `
+            <div class="ao-grid-summary">
+                <div class="ao-summary-item">
+                    <div class="label">目标商品</div>
+                    <div class="value">${escapeHtml(d.items && d.items[0] ? d.items[0] : (itemTitle || '#' + itemId))}</div>
+                </div>
+                <div class="ao-summary-item">
+                    <div class="label">支付方式 (已锁定)</div>
+                    <div class="value" style="color:#34d399;">${escapeHtml(d.payment_method || '代金引換')}</div>
+                </div>
+                <div class="ao-summary-item">
+                    <div class="label">商品小计</div>
+                    <div class="value">${escapeHtml(d.subtotal || '--')}</div>
+                </div>
+                <div class="ao-summary-item">
+                    <div class="label">配送运费</div>
+                    <div class="value">${escapeHtml(d.shipping_fee || '--')}</div>
+                </div>
+                <div class="ao-summary-item">
+                    <div class="label">手续费</div>
+                    <div class="value">${escapeHtml(d.cod_fee || '--')}</div>
+                </div>
+                <div class="ao-summary-item">
+                    <div class="label">最终结算总额</div>
+                    <div class="value" style="color:#fbbf24;font-size:15px;font-weight:700;">${escapeHtml(d.total_price || '--')}</div>
+                </div>
+            </div>
+            <div style="font-size:12px;color:var(--text-secondary);margin:8px 0 12px 0;">
+                <strong>收货人与地址：</strong>${escapeHtml(d.recipient_name || '')} • ${escapeHtml(d.recipient_address || '')}
+            </div>
+            ${isDry ? `
+                <div class="ao-safety-banner" style="margin-bottom:12px;">
+                    🛡️ <strong>安全拦截机制已生效：</strong>程序已在最终「購入する」购买按钮前自动拦截，未产生任何实际扣款或订单！测试商品已自动从购物车移出清空。
+                </div>
+            ` : `
+                <div class="ao-safety-banner" style="margin-bottom:12px; background:rgba(16,185,129,0.15); border-color:#10b981;">
+                    🎉 <strong>真实订单已成功提交！</strong>请前往 Dollyteria 官网会员中心或注册邮箱查收订单确认邮件。
+                </div>
+            `}
+        `;
+    } else {
+        summaryHtml = `
+            <div style="color:#f87171;font-size:13px;margin-bottom:12px;padding:10px;background:rgba(239,68,68,0.1);border-radius:6px;border:1px solid rgba(239,68,68,0.2);">
+                ${escapeHtml(data.message || '下单流程受阻，未能抵达最终确认页')}
+            </div>
+        `;
+    }
+
+    modalBody.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.08);">
+            <span style="font-weight:700;font-size:13px;color:${isSuccess ? '#34d399' : '#f87171'};">
+                ${isSuccess ? '✅ 全自动结算链路推进成功' : '❌ 步骤 [' + escapeHtml(data.step || 'unknown') + '] 遇到阻碍'}
+            </span>
+            <span style="font-size:12px;color:var(--text-muted);">耗时: ${data.elapsed_sec || 0}s</span>
+        </div>
+        ${summaryHtml}
+        <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">执行流水线步骤日志：</div>
+        <ul class="ao-steps-list" style="max-height:160px;overflow-y:auto;">
+            ${stepsHtml}
+        </ul>
+    `;
+
+    modal.style.display = 'flex';
 }
 
 // 页面加载启动

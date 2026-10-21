@@ -2109,11 +2109,17 @@ input:checked + .slider:before {
 
 .arch-card-footer {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.arch-card-price-row {
+    display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: auto;
-    padding-top: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .arch-card-price {
@@ -2123,20 +2129,81 @@ input:checked + .slider:before {
 }
 
 .arch-card-link-btn {
-    padding: 4px 10px;
-    background: rgba(255, 255, 255, 0.06);
+    padding: 3px 8px;
+    background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-sm);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     text-decoration: none;
     transition: all var(--transition-fast);
 }
 
 .arch-card-link-btn:hover {
-    background: #ec4899;
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
+}
+
+.arch-card-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.btn-card-action {
+    flex: 1;
+    padding: 6px 4px;
+    border: none;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    transition: all var(--transition-fast);
+    line-height: 1.2;
+}
+
+.btn-card-cart {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    color: #34d399;
+}
+
+.btn-card-cart:hover {
+    background: #10b981;
+    border-color: #10b981;
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
+}
+
+.btn-card-buy {
+    background: linear-gradient(135deg, rgba(236, 72, 153, 0.25), rgba(245, 158, 11, 0.25));
+    border: 1px solid rgba(236, 72, 153, 0.4);
+    color: #f472b6;
+}
+
+.btn-card-buy:hover {
+    background: linear-gradient(135deg, #ec4899, #f59e0b);
     border-color: #ec4899;
     color: #ffffff;
+    box-shadow: 0 2px 10px rgba(236, 72, 153, 0.4);
+}
+
+.btn-card-disabled {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #64748b;
+    cursor: not-allowed;
+}
+
+/* 一键购买弹窗专属样式 */
+.buy-modal-card {
+    max-width: 580px;
+    width: 90%;
 }
 
 /* 分页控件 */

@@ -1,12 +1,10 @@
-# 删掉最上面的 version: '3.8'
-
 services:
   dollyteria:
-    # （根据你实际的服务名填写）
-    image: ...
     build: .
+    container_name: dollyteria-monitor
     restart: always
     ports:
+      # 默认监听 5000 端口。若与服务器上的 yurara ERP 冲突，可将冒号左侧改为 5001:5000 或其他高位端口
       - "5000:5000"
     environment:
       - TZ=Asia/Tokyo
@@ -17,8 +15,6 @@ services:
       - WEB_PASSWORD=yyc931121
     volumes:
       - dollyteria-data:/app/data # 挂载旧数据卷
-
-# 🔴 关键：必须在文件最下方加上这一段，定义外部数据卷！
 volumes:
   dollyteria-data:
     external: true

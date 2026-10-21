@@ -88,6 +88,7 @@ DEFAULT_CONFIG = {
         "username": "",
         "password": "",
     },
+    "web_password": "",
 }
 
 

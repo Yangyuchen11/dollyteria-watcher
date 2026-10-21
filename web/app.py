@@ -7,6 +7,7 @@ import re
 import json
 import queue
 import logging
+import hashlib
 import urllib.parse
 from flask import Flask, render_template, jsonify, request, Response, send_file
 import requests
@@ -26,6 +27,58 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
+    # 访问密码鉴权助手
+    def get_configured_password() -> str:
+        env_pwd = os.environ.get("WEB_PASSWORD", "").strip()
+        if env_pwd:
+            return env_pwd
+        return str(monitor.config.get("web_password", "")).strip()
+
+    def compute_auth_token(password: str) -> str:
+        if not password:
+            return ""
+        return hashlib.sha256(f"dolly_salt_{password}".encode("utf-8")).hexdigest()
+
+    def is_authenticated() -> bool:
+        pwd = get_configured_password()
+        if not pwd:
+            return True  # 未设置密码，直接放行
+        expected_token = compute_auth_token(pwd)
+        cookie_token = request.cookies.get("dolly_token")
+        if cookie_token and cookie_token == expected_token:
+            return True
+        header_token = request.headers.get("X-Auth-Token")
+        if header_token and header_token == expected_token:
+            return True
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            if auth_header[7:].strip() == expected_token:
+                return True
+        query_token = request.args.get("token")
+        if query_token and query_token == expected_token:
+            return True
+        return False
+
+    @app.before_request
+    def enforce_authentication():
+        # 放行静态文件与鉴权相关接口
+        if request.path.startswith("/static/") or request.path in [
+            "/favicon.ico",
+            "/api/auth/status",
+            "/api/auth/login",
+        ]:
+            return None
+        # 页面首页放行，由前端展示锁屏
+        if request.path == "/":
+            return None
+        # 其他所有 /api/* 以及 /img_proxy 均需鉴权
+        if not is_authenticated():
+            return jsonify({
+                "status": "error",
+                "error": "unauthorized",
+                "message": "请先输入访问密码解锁看板"
+            }), 401
+
     # SSE 事件广播队列列表
     event_queues = []
 
@@ -41,6 +94,59 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     @app.route("/")
     def index():
         return render_template("index.html")
+
+    # 鉴权相关 API 路由
+    @app.route("/api/auth/status")
+    def api_auth_status():
+        pwd = get_configured_password()
+        return jsonify({
+            "auth_required": bool(pwd),
+            "authenticated": is_authenticated()
+        })
+
+    @app.route("/api/auth/login", methods=["POST"])
+    def api_auth_login():
+        data = request.json or {}
+        input_pwd = str(data.get("password", "")).strip()
+        real_pwd = get_configured_password()
+        if not real_pwd or input_pwd == real_pwd:
+            token = compute_auth_token(real_pwd)
+            resp = jsonify({"status": "ok", "message": "解锁成功", "token": token})
+            resp.set_cookie(
+                "dolly_token",
+                token,
+                max_age=30 * 86400,
+                httponly=False,
+                samesite="Lax",
+                path="/"
+            )
+            return resp
+        return jsonify({"status": "error", "message": "访问密码错误，请重新输入"}), 401
+
+    @app.route("/api/auth/logout", methods=["POST"])
+    def api_auth_logout():
+        resp = jsonify({"status": "ok", "message": "已锁定并退出登录"})
+        resp.delete_cookie("dolly_token", path="/")
+        return resp
+
+    @app.route("/api/auth/set_password", methods=["POST"])
+    def api_auth_set_password():
+        data = request.json or {}
+        new_pwd = str(data.get("password", "")).strip()
+        monitor.config["web_password"] = new_pwd
+        monitor._save_config()
+        token = compute_auth_token(new_pwd) if new_pwd else ""
+        resp = jsonify({
+            "status": "ok",
+            "message": "访问密码已更新" if new_pwd else "访问密码已清除 (无密码模式)",
+            "token": token,
+            "auth_required": bool(new_pwd)
+        })
+        if new_pwd:
+            resp.set_cookie("dolly_token", token, max_age=30 * 86400, httponly=False, samesite="Lax", path="/")
+        else:
+            resp.delete_cookie("dolly_token", path="/")
+        return resp
 
     @app.route("/api/status")
     def api_status():

@@ -48,7 +48,7 @@
       ],
       "exclude_keywords": [],
       "min_price": 50000,
-      "max_price": 100000,
+      "max_price": 130000,
       "search_mode": "both",
       "match_mode": "all",
       "enabled": true
@@ -61,11 +61,26 @@
         "まい"
       ],
       "exclude_keywords": [],
-      "min_price": 20000,
-      "max_price": 50000,
+      "min_price": 10000,
+      "max_price": 70000,
+      "search_mode": "both",
+      "match_mode": "all",
+      "enabled": true
+    },
+    {
+      "id": "w_1792517908022",
+      "name": "Elizabeth",
+      "keywords": [
+        "SD13",
+        "Elizabeth"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 0,
       "search_mode": "both",
       "match_mode": "all",
       "enabled": true
     }
-  ]
+  ],
+  "web_password": ""
 }

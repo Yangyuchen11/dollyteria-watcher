@@ -99,7 +99,29 @@ const elements = {
 
     // Toast
     toastContainer: document.getElementById('toast-container'),
+
+    // 鉴权与安全
+    btnLockScreen: document.getElementById('btn-lock-screen'),
+    btnQuickLock: document.getElementById('btn-quick-lock'),
+    authLockOverlay: document.getElementById('auth-lock-overlay'),
+    authForm: document.getElementById('auth-form'),
+    authPasswordInput: document.getElementById('auth-password-input'),
+    btnAuthTogglePwd: document.getElementById('btn-auth-toggle-pwd'),
+    authErrorMsg: document.getElementById('auth-error-msg'),
+    btnAuthLogin: document.getElementById('btn-auth-login'),
+    secStatusBanner: document.getElementById('security-status-banner'),
+    secBannerIcon: document.getElementById('sec-banner-icon'),
+    secBannerTitle: document.getElementById('sec-banner-title'),
+    secBannerDesc: document.getElementById('sec-banner-desc'),
+    inputNewWebPassword: document.getElementById('input-new-web-password'),
+    btnToggleNewPwd: document.getElementById('btn-toggle-new-pwd'),
+    btnSaveWebPassword: document.getElementById('btn-save-web-password'),
 };
+
+// 全局运行与鉴权状态标志
+let isAppInitialized = false;
+let sseSource = null;
+let pollTimer = null;
 
 // 格式化倒计时
 function formatSeconds(sec) {
@@ -108,6 +130,145 @@ function formatSeconds(sec) {
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// 检查鉴权状态
+async function checkAuthStatus() {
+    try {
+        const res = await fetch('/api/auth/status');
+        const data = await res.json();
+        updateSecurityTabUI(data.auth_required);
+        if (data.auth_required && !data.authenticated) {
+            showLockScreen();
+            return false;
+        } else {
+            hideLockScreen();
+            return true;
+        }
+    } catch (e) {
+        console.warn('检查鉴权异常:', e);
+        return true;
+    }
+}
+
+function showLockScreen() {
+    if (elements.authLockOverlay) {
+        elements.authLockOverlay.classList.remove('hidden');
+        if (elements.authPasswordInput) {
+            elements.authPasswordInput.value = '';
+            setTimeout(() => elements.authPasswordInput.focus(), 100);
+        }
+    }
+}
+
+function hideLockScreen() {
+    if (elements.authLockOverlay) {
+        elements.authLockOverlay.classList.add('hidden');
+    }
+    hideAuthError();
+}
+
+function showAuthError(msg) {
+    if (elements.authErrorMsg) {
+        elements.authErrorMsg.textContent = msg;
+        elements.authErrorMsg.classList.remove('hidden');
+    }
+}
+
+function hideAuthError() {
+    if (elements.authErrorMsg) {
+        elements.authErrorMsg.classList.add('hidden');
+    }
+}
+
+function shakeLockCard() {
+    const card = document.querySelector('.auth-card');
+    if (card) {
+        card.classList.remove('shake');
+        void card.offsetWidth; // 触发重绘
+        card.classList.add('shake');
+    }
+}
+
+function updateSecurityTabUI(authRequired) {
+    if (!elements.secStatusBanner) return;
+    if (authRequired) {
+        elements.secStatusBanner.className = 'security-status-banner protected';
+        if (elements.secBannerIcon) elements.secBannerIcon.textContent = '🛡️';
+        if (elements.secBannerTitle) elements.secBannerTitle.textContent = '访问保护状态: 已开启安全保护';
+        if (elements.secBannerDesc) elements.secBannerDesc.textContent = '当前已设置 Web 访问密码，未授权的外部网络请求均已被阻断拦截。';
+    } else {
+        elements.secStatusBanner.className = 'security-status-banner unprotected';
+        if (elements.secBannerIcon) elements.secBannerIcon.textContent = '⚠️';
+        if (elements.secBannerTitle) elements.secBannerTitle.textContent = '访问保护状态: 未设置密码 (开放模式)';
+        if (elements.secBannerDesc) elements.secBannerDesc.textContent = '当前未设置访问密码。若要放置在腾讯云轻量服务器公网运行，强烈建议在此设置访问密码！';
+    }
+}
+
+async function doLogin() {
+    const pwd = (elements.authPasswordInput ? elements.authPasswordInput.value : '').trim();
+    if (!pwd) {
+        showAuthError('请输入访问密码');
+        shakeLockCard();
+        return;
+    }
+    try {
+        if (elements.btnAuthLogin) elements.btnAuthLogin.disabled = true;
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pwd })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'ok') {
+            hideAuthError();
+            hideLockScreen();
+            showToast('解锁成功，欢迎使用！', 'success');
+            if (!isAppInitialized) {
+                initMainApp();
+            } else {
+                loadConfig();
+                loadHistory();
+            }
+        } else {
+            showAuthError(data.message || '访问密码错误');
+            shakeLockCard();
+        }
+    } catch (e) {
+        showAuthError('连接服务器失败: ' + e.message);
+        shakeLockCard();
+    } finally {
+        if (elements.btnAuthLogin) elements.btnAuthLogin.disabled = false;
+    }
+}
+
+async function doLogout() {
+    try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {}
+    showToast('已锁定当前控制台', 'info');
+    showLockScreen();
+}
+
+async function saveWebPassword() {
+    const newPwd = (elements.inputNewWebPassword ? elements.inputNewWebPassword.value : '').trim();
+    try {
+        const res = await fetch('/api/auth/set_password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: newPwd })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'ok') {
+            showToast(data.message, 'success');
+            updateSecurityTabUI(data.auth_required);
+            if (elements.inputNewWebPassword) elements.inputNewWebPassword.value = '';
+        } else {
+            showToast(data.message || '保存密码失败', 'error');
+        }
+    } catch (e) {
+        showToast('保存密码异常: ' + e.message, 'error');
+    }
 }
 
 // 播放网页端清脆提示音 (Web Audio API 合成)
@@ -173,10 +334,28 @@ function initTabs() {
     });
 }
 
+// 初始化核心主应用 (在鉴权通过后触发)
+function initMainApp() {
+    if (isAppInitialized) return;
+    isAppInitialized = true;
+    try { loadConfig(); } catch (e) { console.error('loadConfig err:', e); }
+    try { loadHistory(); } catch (e) { console.error('loadHistory err:', e); }
+    try { initSSE(); } catch (e) { console.error('initSSE err:', e); }
+    try {
+        pollStatus();
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(pollStatus, 1000);
+    } catch (e) { console.error('pollStatus err:', e); }
+}
+
 // 加载配置
 async function loadConfig() {
     try {
         const res = await fetch('/api/config');
+        if (res.status === 401) {
+            showLockScreen();
+            return;
+        }
         currentConfig = await res.json();
         renderWatches();
         populateScheduleForm();
@@ -195,6 +374,10 @@ async function saveConfig(silent = false) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(currentConfig)
         });
+        if (res.status === 401) {
+            showLockScreen();
+            return;
+        }
         const data = await res.json();
         if (!silent) showToast(data.message || '配置已保存', 'success');
         renderWatches();
@@ -207,6 +390,10 @@ async function saveConfig(silent = false) {
 async function pollStatus() {
     try {
         const res = await fetch('/api/status');
+        if (res.status === 401) {
+            showLockScreen();
+            return;
+        }
         const data = await res.json();
 
         // 调度器状态
@@ -1095,18 +1282,58 @@ function bindEvents() {
     if (elements.modalClose) elements.modalClose.addEventListener('click', closeRuleModal);
     if (elements.modalBtnCancel) elements.modalBtnCancel.addEventListener('click', closeRuleModal);
     if (elements.modalBtnSave) elements.modalBtnSave.addEventListener('click', saveRuleFromModal);
+
+    // 鉴权与安全相关事件绑定
+    if (elements.btnLockScreen) elements.btnLockScreen.addEventListener('click', doLogout);
+    if (elements.btnQuickLock) elements.btnQuickLock.addEventListener('click', doLogout);
+    if (elements.authForm) {
+        elements.authForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            doLogin();
+        });
+    }
+    if (elements.btnAuthLogin) elements.btnAuthLogin.addEventListener('click', doLogin);
+    if (elements.btnSaveWebPassword) elements.btnSaveWebPassword.addEventListener('click', saveWebPassword);
+
+    // 锁屏密码框回车键直接提交
+    if (elements.authPasswordInput) {
+        elements.authPasswordInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                doLogin();
+            }
+        });
+    }
+
+    // 显示/隐藏密码明文切换
+    if (elements.btnAuthTogglePwd && elements.authPasswordInput) {
+        elements.btnAuthTogglePwd.addEventListener('click', () => {
+            const isPwd = elements.authPasswordInput.type === 'password';
+            elements.authPasswordInput.type = isPwd ? 'text' : 'password';
+            elements.btnAuthTogglePwd.textContent = isPwd ? '🙈' : '👁️';
+        });
+    }
+    if (elements.btnToggleNewPwd && elements.inputNewWebPassword) {
+        elements.btnToggleNewPwd.addEventListener('click', () => {
+            const isPwd = elements.inputNewWebPassword.type === 'password';
+            elements.inputNewWebPassword.type = isPwd ? 'text' : 'password';
+            elements.btnToggleNewPwd.textContent = isPwd ? '🙈' : '👁️';
+        });
+    }
 }
 
 // 页面加载启动
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     try { initTimeSelects(); } catch (e) { console.error('initTimeSelects err:', e); }
     try { initTabs(); } catch (e) { console.error('initTabs err:', e); }
-    try { loadConfig(); } catch (e) { console.error('loadConfig err:', e); }
     try { bindEvents(); } catch (e) { console.error('bindEvents err:', e); }
-    try { loadHistory(); } catch (e) { console.error('loadHistory err:', e); }
-    try { initSSE(); } catch (e) { console.error('initSSE err:', e); }
     try {
-        pollStatus();
-        setInterval(pollStatus, 1000);
-    } catch (e) { console.error('pollStatus err:', e); }
+        const isAuthed = await checkAuthStatus();
+        if (isAuthed) {
+            initMainApp();
+        }
+    } catch (e) {
+        console.error('checkAuthStatus err:', e);
+        initMainApp();
+    }
 });

@@ -43,6 +43,9 @@
                 <button id="btn-test-desktop" class="btn btn-ghost" title="测试Windows弹窗">
                     <span>💻</span>
                 </button>
+                <button id="btn-lock-screen" class="btn btn-ghost" title="锁定看板 / 退出登录">
+                    <span>🔒</span>
+                </button>
             </div>
         </header>
 
@@ -115,6 +118,9 @@
                 <button class="tab-btn" data-tab="tab-feed">
                     <span>✨ 上新发现实时流</span>
                     <span id="feed-badge" class="badge-count" style="display:none;">0</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-security">
+                    <span>🔐 访问安全与密码</span>
                 </button>
             </div>
 
@@ -521,6 +527,54 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Tab 6: 访问安全与密码 -->
+            <div id="tab-security" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">Web 看板访问安全与密码</h2>
+                        <p class="pane-desc">设置访问密码以保护监控规则、通知配置与抢购凭据，防止公网未授权访问</p>
+                    </div>
+                    <button id="btn-quick-lock" class="btn btn-ghost">
+                        <span>🔒 立即锁定当前设备</span>
+                    </button>
+                </div>
+
+                <div class="settings-card glass">
+                    <div class="security-status-banner" id="security-status-banner">
+                        <div class="banner-icon" id="sec-banner-icon">🛡️</div>
+                        <div class="banner-content">
+                            <div class="banner-title" id="sec-banner-title">访问保护状态: 检查中...</div>
+                            <div class="banner-desc" id="sec-banner-desc">正在同步密码配置状态</div>
+                        </div>
+                    </div>
+
+                    <div class="form-row" style="margin-top: 20px;">
+                        <div class="form-group col-8">
+                            <label class="form-label">修改 / 设置访问密码 (留空并保存即可取消密码保护)</label>
+                            <div class="auth-input-group">
+                                <input type="password" id="input-new-web-password" class="form-control" placeholder="输入新的访问密码...">
+                                <button type="button" id="btn-toggle-new-pwd" class="btn-pwd-eye" title="显示/隐藏密码">👁️</button>
+                            </div>
+                            <span class="form-tip">💡 设置密码后，任意设备（包括手机）首次访问时均需输入此密码解锁，浏览器会自动记住 30 天免密。</span>
+                        </div>
+                        <div class="form-group col-4" style="display: flex; align-items: flex-end;">
+                            <button id="btn-save-web-password" class="btn btn-primary w-100">保存密码设置</button>
+                        </div>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <div class="cloud-security-tips">
+                        <h4 class="tips-title">☁️ 腾讯云轻量服务器 24小时常驻运行指南</h4>
+                        <ul class="tips-list">
+                            <li><strong>直接浏览器访问</strong>: 开启密码保护后，您可以直接在腾讯云轻量控制台【防火墙】放行当前端口（默认 5000），手机或电脑随时打开 <code>http://&lt;公网IP&gt;:5000</code> 即可使用，无需在后台挂载 SSH 终端！</li>
+                            <li><strong>避免端口冲突</strong>: 若您服务器上已运行其他 ERP 业务占用了 5000 端口，可随时在 <code>docker-compose.yml</code> 中将左侧端口改为 <code>5001:5000</code> 或 <code>58921:5000</code>。</li>
+                            <li><strong>数据永久持久化</strong>: 您的所有监控任务、账号凭据以及已发现的商品历史均保存在服务器 <code>./data</code> 目录中，容器重启或更新代码绝不丢失数据。</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
         </main>
 
         <!-- 添加/编辑规则弹窗 Modal -->
@@ -602,8 +656,34 @@
 
         <!-- 全局吐司提示通知 -->
         <div id="toast-container" class="toast-container"></div>
+
+        <!-- 锁屏卡片 (未授权时遮罩全屏) -->
+        <div id="auth-lock-overlay" class="auth-lock-overlay hidden">
+            <div class="auth-card glass">
+                <div class="auth-brand">
+                    <div class="auth-icon-badge">
+                        <span>🔒</span>
+                    </div>
+                    <h2 class="auth-title">Dollyteria 控制看板</h2>
+                    <p class="auth-subtitle">该服务已开启公网访问保护，请输入访问密码以解锁</p>
+                </div>
+                <form id="auth-form" class="auth-form" onsubmit="return false;">
+                    <div class="auth-input-wrapper">
+                        <input type="password" id="auth-password-input" class="auth-input" placeholder="请输入看板访问密码..." autocomplete="current-password">
+                        <button type="button" id="btn-auth-toggle-pwd" class="btn-pwd-eye" title="显示/隐藏密码">👁️</button>
+                    </div>
+                    <div id="auth-error-msg" class="auth-error-msg hidden">访问密码错误，请重新输入</div>
+                    <button type="submit" id="btn-auth-login" class="btn btn-primary btn-block">
+                        <span>🔓</span> 解锁并进入看板
+                    </button>
+                </form>
+                <div class="auth-footer-tip">
+                    <span>💡 解锁后浏览器将自动保持 30 天免密访问</span>
+                </div>
+            </div>
+        </div>
     </div>
 
-    <script src="/static/app.js?v=2.1"></script>
+    <script src="/static/app.js?v=2.2"></script>
 </body>
 </html>

@@ -1465,6 +1465,251 @@ input:checked + .slider:before {
     50% { box-shadow: 0 0 14px 4px rgba(239, 68, 68, 0.3); }
 }
 
+/* ==============================================================================
+ * 锁屏全屏遮罩与鉴权弹窗样式 (Auth Lock Screen)
+ * ============================================================================== */
+
+.auth-lock-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 99999;
+    background: rgba(11, 15, 25, 0.88);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    animation: fadeInOverlay 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.auth-lock-overlay.hidden {
+    display: none !important;
+}
+
+@keyframes fadeInOverlay {
+    from { opacity: 0; backdrop-filter: blur(0px); }
+    to { opacity: 1; backdrop-filter: blur(20px); }
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 420px;
+    background: linear-gradient(145deg, rgba(30, 36, 56, 0.95), rgba(18, 22, 38, 0.98));
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    padding: 36px 30px;
+    box-shadow: 0 24px 64px -12px rgba(0, 0, 0, 0.7), 0 0 40px -10px rgba(129, 140, 248, 0.25);
+    text-align: center;
+    transform-origin: center;
+    animation: zoomInCard 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes zoomInCard {
+    from { opacity: 0; transform: scale(0.92) translateY(10px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.auth-card.shake {
+    animation: shakeError 0.45s ease-in-out;
+}
+
+@keyframes shakeError {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-8px); }
+    40%, 80% { transform: translateX(8px); }
+}
+
+.auth-brand {
+    margin-bottom: 24px;
+}
+
+.auth-icon-badge {
+    width: 68px;
+    height: 68px;
+    margin: 0 auto 16px;
+    border-radius: 20px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(236, 72, 153, 0.25));
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 30px;
+    box-shadow: 0 8px 24px rgba(99, 102, 241, 0.2);
+}
+
+.auth-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 8px;
+    letter-spacing: -0.02em;
+}
+
+.auth-subtitle {
+    font-size: 13px;
+    color: #94a3b8;
+    line-height: 1.5;
+}
+
+.auth-form {
+    margin-top: 24px;
+}
+
+.auth-input-wrapper, .auth-input-group {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.auth-input {
+    width: 100%;
+    height: 48px;
+    padding: 0 48px 0 16px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 12px;
+    color: #f8fafc;
+    font-size: 15px;
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+.auth-input:focus {
+    border-color: #818cf8;
+    box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.25);
+    background: rgba(15, 23, 42, 0.95);
+}
+
+.btn-pwd-eye {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+    padding: 4px;
+}
+
+.btn-pwd-eye:hover {
+    opacity: 1;
+}
+
+.auth-error-msg {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    padding: 8px 12px;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.auth-error-msg.hidden {
+    display: none;
+}
+
+.btn-block {
+    width: 100%;
+    margin-top: 16px;
+    height: 46px;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.auth-footer-tip {
+    margin-top: 20px;
+    font-size: 12px;
+    color: #64748b;
+}
+
+/* 安全设置选项卡专属样式 */
+.security-status-banner {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 20px;
+    border-radius: 14px;
+    margin-bottom: 10px;
+    transition: all 0.3s ease;
+}
+
+.security-status-banner.protected {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    color: #34d399;
+}
+
+.security-status-banner.unprotected {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #fbbf24;
+}
+
+.security-status-banner .banner-icon {
+    font-size: 28px;
+    flex-shrink: 0;
+}
+
+.security-status-banner .banner-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 3px;
+}
+
+.security-status-banner.protected .banner-title {
+    color: #6ee7b7;
+}
+
+.security-status-banner.unprotected .banner-title {
+    color: #fde68a;
+}
+
+.security-status-banner .banner-desc {
+    font-size: 13px;
+    color: #94a3b8;
+    line-height: 1.4;
+}
+
+.cloud-security-tips {
+    background: rgba(15, 23, 42, 0.5);
+    border: 1px dashed rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    padding: 18px 20px;
+}
+
+.cloud-security-tips .tips-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #e2e8f0;
+    margin-bottom: 12px;
+}
+
+.cloud-security-tips .tips-list {
+    margin: 0;
+    padding-left: 20px;
+    color: #94a3b8;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.cloud-security-tips .tips-list code {
+    background: rgba(255, 255, 255, 0.1);
+    color: #c7d2fe;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 12px;
+}
+
 
 
 

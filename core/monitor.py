@@ -92,6 +92,10 @@ DEFAULT_CONFIG = {
         "username": "",
         "password": "",
     },
+    "quick_buy": {
+        "enabled": False,
+        "dry_run": True,
+    },
     "web_password": "",
 }
 

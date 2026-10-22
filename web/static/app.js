@@ -79,6 +79,11 @@ const elements = {
     aoModeTitle: document.getElementById('ao-mode-title'),
     aoModeDesc: document.getElementById('ao-mode-desc'),
 
+    // 档案库一键下单 (独立开关与仿真控制)
+    quickBuyEnabled: document.getElementById('quick-buy-enabled'),
+    quickBuyDryRun: document.getElementById('quick-buy-dry-run'),
+    quickBuyModeTag: document.getElementById('quick-buy-mode-tag'),
+
     // 实时流
     feedContainer: document.getElementById('feed-container'),
     btnClearFeed: document.getElementById('btn-clear-feed'),
@@ -378,6 +383,7 @@ async function loadConfig() {
         populateScheduleForm();
         populateNotifiersForm();
         populateAutoOrderForm();
+        populateQuickBuyForm();
     } catch (e) {
         showToast('读取配置失败: ' + e.message, 'error');
     }
@@ -711,6 +717,31 @@ function populateAutoOrderForm() {
         elements.aoTestPaySelect.value = pm;
     }
     updateAoModeBanner();
+}
+
+// 全站档案商品一键下单独立配置同步
+function populateQuickBuyForm() {
+    const qb = currentConfig?.quick_buy || {};
+    if (elements.quickBuyEnabled) elements.quickBuyEnabled.checked = qb.enabled ?? false;
+    if (elements.quickBuyDryRun) elements.quickBuyDryRun.checked = qb.dry_run ?? true;
+    updateQuickBuyStatusTag();
+}
+
+function updateQuickBuyStatusTag() {
+    const tag = elements.quickBuyModeTag || document.getElementById('quick-buy-mode-tag');
+    const enabled = elements.quickBuyEnabled?.checked ?? false;
+    const dryRun = elements.quickBuyDryRun?.checked ?? true;
+    if (!tag) return;
+    if (!enabled) {
+        tag.className = 'status-pill status-idle';
+        tag.textContent = '⚪ 一键下单未启用';
+    } else if (dryRun) {
+        tag.className = 'status-pill status-busy';
+        tag.textContent = '🛡️ 安全仿真测试模式 (Dry-Run)';
+    } else {
+        tag.className = 'status-pill status-bursting';
+        tag.textContent = '🚨 真实下单模式 (已激活)';
+    }
 }
 
 // 规则 Modal 弹窗逻辑
@@ -1500,7 +1531,8 @@ async function loadArchiveProducts(page = 1) {
             matchCount.textContent = `共 ${data.total.toLocaleString()} 件匹配`;
         }
 
-        renderArchiveProducts(data.items || []);
+        archiveState.lastItems = data.items || [];
+        renderArchiveProducts(archiveState.lastItems);
 
         if (pagination) {
             if (data.total > 0 && data.total_pages > 1) {
@@ -1537,6 +1569,14 @@ function renderArchiveProducts(items) {
         grid.innerHTML = '';
         return;
     }
+
+    const qbCfg = currentConfig?.quick_buy || {};
+    const isQbEnabled = Boolean(qbCfg.enabled);
+    const isQbDry = qbCfg.dry_run !== false;
+    const qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
+    const qbBtnTitle = isQbEnabled
+        ? (isQbDry ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)' : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)')
+        : '⚡ 一键购买 (功能未开启，请先在上方卡片开启一键下单开关)';
 
     grid.innerHTML = items.map(it => {
         const isStock = it.is_in_stock;
@@ -1576,7 +1616,7 @@ function renderArchiveProducts(items) {
                                 <button type="button" class="btn-card-action btn-card-cart" data-id="${escapeHtml(it.id)}" title="在新标签页直接将此商品加入您的浏览器网页版购物车">
                                     🛒 加购物车
                                 </button>
-                                <button type="button" class="btn-card-action btn-card-buy" data-id="${escapeHtml(it.id)}" data-title="${escapeHtml(it.title || '')}" data-price="${escapeHtml(priceStr)}" title="调用自动下单接口快速购买 (支持 Dry-Run 仿真与真实购买)">
+                                <button type="button" class="btn-card-action btn-card-buy ${qbBtnClass}" data-id="${escapeHtml(it.id)}" data-title="${escapeHtml(it.title || '')}" data-price="${escapeHtml(priceStr)}" title="${qbBtnTitle}">
                                     ⚡ 一键购买
                                 </button>
                             ` : `
@@ -1593,6 +1633,47 @@ function renderArchiveProducts(items) {
 }
 
 function initArchiveModule() {
+    // 档案库一键下单独立开关与仿真模式绑定
+    if (elements.quickBuyEnabled) {
+        elements.quickBuyEnabled.addEventListener('change', () => {
+            if (!currentConfig.quick_buy) currentConfig.quick_buy = {};
+            currentConfig.quick_buy.enabled = elements.quickBuyEnabled.checked;
+            currentConfig.quick_buy.dry_run = elements.quickBuyDryRun ? elements.quickBuyDryRun.checked : true;
+            saveConfig(true);
+            updateQuickBuyStatusTag();
+            showToast(elements.quickBuyEnabled.checked ? '已开启商品档案一键下单功能' : '已关闭商品档案一键下单功能', 'info');
+            if (archiveState.lastItems && archiveState.lastItems.length > 0) {
+                renderArchiveProducts(archiveState.lastItems);
+            }
+        });
+    }
+
+    if (elements.quickBuyDryRun) {
+        elements.quickBuyDryRun.addEventListener('change', () => {
+            const isChecked = elements.quickBuyDryRun.checked;
+            if (!isChecked && elements.quickBuyEnabled?.checked) {
+                const confirmed = confirm(
+                    "⚠️ 重要安全提示：\n\n" +
+                    "您正在关闭一键下单的 Dry-Run (安全仿真测试) 模式！\n" +
+                    "关闭后，点击商品卡片上的【⚡ 一键购买】将直接向 Dollyteria 官网提交真实订单购买！\n\n" +
+                    "确定要切换为真实购买下单模式吗？"
+                );
+                if (!confirmed) {
+                    elements.quickBuyDryRun.checked = true;
+                    return;
+                }
+            }
+            if (!currentConfig.quick_buy) currentConfig.quick_buy = {};
+            currentConfig.quick_buy.dry_run = elements.quickBuyDryRun.checked;
+            saveConfig(true);
+            updateQuickBuyStatusTag();
+            showToast(elements.quickBuyDryRun.checked ? '一键下单安全仿真模式已开启' : '⚠️ 一键下单已切换为真实购买模式', elements.quickBuyDryRun.checked ? 'info' : 'warning');
+            if (archiveState.lastItems && archiveState.lastItems.length > 0) {
+                renderArchiveProducts(archiveState.lastItems);
+            }
+        });
+    }
+
     // 启动采集
     const btnStart = document.getElementById('btn-crawler-start');
     if (btnStart) {
@@ -1866,13 +1947,21 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     itemId = String(itemId).trim();
     if (!itemId) return;
 
+    // 检查档案库一键下单独立开关
+    const qbCfg = currentConfig?.quick_buy || {};
+    if (!qbCfg.enabled) {
+        showToast('一键下单功能未开启，请先在上方「一键下单设置」开启【启用一键下单开关】', 'warning');
+        return;
+    }
+
     const aoCfg = currentConfig?.auto_order || {};
     if (!aoCfg.username || !aoCfg.password) {
         showToast('请先在「🛒 自动下单接口」标签页配置 Dollyteria 账号邮箱与登录密码', 'warning');
         return;
     }
 
-    const isDry = aoCfg.dry_run !== false;
+    // 独立使用 quick_buy 的仿真模式设置，完全与 auto_order.dry_run 隔离
+    const isDry = qbCfg.dry_run !== false;
     const payMethod = aoCfg.payment_method || 'cod';
     const payName = (payMethod === 'store_pickup' || payMethod === 'store') ? '店頭支払 (到店付款)' : '代金引換 (货到付款)';
 

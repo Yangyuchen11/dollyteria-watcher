@@ -667,6 +667,44 @@
                     </div>
                 </div>
 
+                <!-- 一键下单与安全仿真模式设置卡片 -->
+                <div class="settings-card glass archive-quickbuy-card">
+                    <div class="quickbuy-card-header">
+                        <div class="quickbuy-title-group">
+                            <span class="quickbuy-icon">⚡</span>
+                            <div>
+                                <div class="quickbuy-title">
+                                    <span>商品档案一键下单设置 (Quick Buy)</span>
+                                    <span id="quick-buy-mode-tag" class="status-pill status-idle">⚪ 一键下单未启用</span>
+                                </div>
+                                <div class="quickbuy-subtitle">与【自动下单接口】的后台监控抢购完全分离独立，仅对下方档案卡片中的「⚡ 一键购买」生效</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-row" style="margin-bottom: 0;">
+                        <div class="form-group col-6" style="margin-bottom: 0;">
+                            <div class="switch-row">
+                                <label class="switch">
+                                    <input type="checkbox" id="quick-buy-enabled">
+                                    <span class="slider"></span>
+                                </label>
+                                <span class="form-label-inline">启用一键下单开关</span>
+                            </div>
+                            <span class="form-tip">开启时，点击商品卡片上的【⚡ 一键购买】将自动完成加购下单；关闭时禁止卡片触发购买</span>
+                        </div>
+                        <div class="form-group col-6" style="margin-bottom: 0;">
+                            <div class="switch-row">
+                                <label class="switch">
+                                    <input type="checkbox" id="quick-buy-dry-run" checked>
+                                    <span class="slider"></span>
+                                </label>
+                                <span class="form-label-inline">启用安全仿真测试 (Dry-Run 模式)</span>
+                            </div>
+                            <span class="form-tip">开启时模拟加购并抵达最终确认页提取账单，不产生真实订单；关闭时将提交真实订单！</span>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 档案商品搜索与过滤区 -->
                 <div class="archive-search-container glass">
                     <div class="archive-search-bar">
@@ -855,6 +893,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=2.8"></script>
+    <script src="/static/app.js?v=2.9"></script>
 </body>
 </html>

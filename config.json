@@ -6,6 +6,10 @@
     "enabled": true,
     "payment_method": "store_pickup"
   },
+  "quick_buy": {
+    "enabled": true,
+    "dry_run": true
+  },
   "notifications": {
     "desktop_enabled": true,
     "discord": {

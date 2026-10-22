@@ -373,6 +373,14 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         if not item_id:
             return jsonify({"success": False, "message": "未指定商品 ID"}), 400
 
+        # 校验全站档案一键下单独立开关
+        qb_cfg = monitor.config.get("quick_buy", {})
+        if not qb_cfg.get("enabled", False):
+            return jsonify({
+                "success": False,
+                "message": "一键下单功能已关闭，请先在【📦 全站档案】开启一键下单开关"
+            }), 400
+
         ao_cfg = monitor.config.get("auto_order", {})
         username = (ao_cfg.get("username") or "").strip()
         password = (ao_cfg.get("password") or "").strip()
@@ -385,16 +393,19 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         payment_method = (data.get("payment_method") or ao_cfg.get("payment_method", "cod")).strip()
         dry_run = data.get("dry_run")
         if dry_run is None:
-            dry_run = ao_cfg.get("dry_run", True)
+            dry_run = qb_cfg.get("dry_run", True)
         else:
             dry_run = bool(dry_run)
 
-        monitor.auto_order.username = username
-        monitor.auto_order.password = password
-        monitor.auto_order.dry_run = dry_run
-        monitor.auto_order.payment_method = payment_method
-
-        res = monitor.auto_order.execute_checkout(
+        # 独立实例化 AutoOrderHook，绝不修改后台监控的 monitor.auto_order 实例状态，确保两者彻底解耦互不影响
+        from hooks.auto_order import AutoOrderHook
+        qb_hook = AutoOrderHook(
+            username=username,
+            password=password,
+            dry_run=dry_run,
+            payment_method=payment_method,
+        )
+        res = qb_hook.execute_checkout(
             item_id=item_id,
             item_title=item_title,
             dry_run=dry_run,

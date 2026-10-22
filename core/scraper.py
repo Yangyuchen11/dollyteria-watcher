@@ -43,7 +43,8 @@ class DollyteriaScraper:
                     if any(busy_kw in text for busy_kw in ["アクセス集中", "大変混み合っております", "回線が混雑"]):
                         logger.warning(f"Dollyteria 提示访问繁忙排队中 (尝试 {attempt + 1}/{self.max_retries + 1})")
                         if attempt < self.max_retries:
-                            time.sleep(0.5 * (attempt + 1))
+                            retry_delay = round(min(0.5, 0.15 * (attempt + 1)), 2)
+                            time.sleep(retry_delay)
                             continue
                     return text
 
@@ -51,7 +52,8 @@ class DollyteriaScraper:
                 if resp.status_code in [429, 502, 503, 504]:
                     logger.warning(f"请求 {url} 遇到官网繁忙状态码 {resp.status_code} (尝试 {attempt + 1}/{self.max_retries + 1})")
                     if attempt < self.max_retries:
-                        time.sleep(0.6 * (attempt + 1))
+                        retry_delay = round(min(0.5, 0.15 * (attempt + 1)), 2)
+                        time.sleep(retry_delay)
                         continue
                 else:
                     logger.warning(f"请求 {url} 返回状态码 {resp.status_code}")
@@ -59,7 +61,8 @@ class DollyteriaScraper:
                 last_exc = e
                 logger.warning(f"请求失败 ({attempt + 1}/{self.max_retries + 1}): {e}")
                 if attempt < self.max_retries:
-                    time.sleep(0.8 * (attempt + 1))
+                    retry_delay = round(min(0.5, 0.2 * (attempt + 1)), 2)
+                    time.sleep(retry_delay)
         logger.error(f"无法访问页面: {url}, 错误: {last_exc}")
         return None
 

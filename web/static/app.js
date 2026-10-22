@@ -252,13 +252,13 @@ async function doLogout() {
         pollTimer = null;
     }
     if (sseSource) {
-        try { sseSource.close(); } catch (e) {}
+        try { sseSource.close(); } catch (e) { }
         sseSource = null;
     }
     isAppInitialized = false;
     try {
         await fetch('/api/auth/logout', { method: 'POST' });
-    } catch (e) {}
+    } catch (e) { }
     showToast('已锁定当前控制台', 'info');
     showLockScreen(true);
 }
@@ -427,7 +427,7 @@ async function pollStatus() {
             elements.statusText.textContent = '🔍 正在抓取检测...';
         } else {
             elements.statusIndicator.className = 'status-pill status-idle';
-            elements.statusText.textContent = '● 监控运行中';
+            elements.statusText.textContent = '监控运行中';
         }
 
         // 下次上新时刻
@@ -447,8 +447,8 @@ async function pollStatus() {
         }
         if (elements.statTodayChecksMeta) {
             const total = data.stats?.total_checks;
-            elements.statTodayChecksMeta.textContent = (total !== undefined) 
-                ? `每日 00:00 清零 (累计: ${total})` 
+            elements.statTodayChecksMeta.textContent = (total !== undefined)
+                ? `每日 00:00 清零 (累计: ${total})`
                 : '每日 00:00 自动清零';
         }
 
@@ -467,8 +467,8 @@ function renderWatches() {
         card.className = `watch-card ${rule.enabled ? '' : 'disabled'}`;
 
         const matchMode = rule.match_mode || 'all';
-        const connector = matchMode === 'all' 
-            ? '<span class="tag-connector" title="必须同时包含">+</span >' 
+        const connector = matchMode === 'all'
+            ? '<span class="tag-connector" title="必须同时包含">+</span >'
             : '<span class="tag-connector" title="或者">|</span>';
         const matchBadge = matchMode === 'all'
             ? `<button type="button" class="tag-match-mode btn-toggle-mode and-badge" data-idx="${idx}" title="点击可直接切换 AND / OR 模式">AND 全部满足 ⇋</button>`
@@ -476,7 +476,7 @@ function renderWatches() {
 
         const kws = (rule.keywords || []).map(k => `<span class="tag-kw">${escapeHtml(k)}</span>`).join(connector);
         const excludes = (rule.exclude_keywords || []).map(k => `<span class="tag-exclude">🚫 ${escapeHtml(k)}</span>`).join('');
-        
+
         let priceTag = '';
         if (rule.min_price || rule.max_price) {
             const minStr = rule.min_price ? `￥${rule.min_price.toLocaleString()}` : '0';
@@ -490,8 +490,8 @@ function renderWatches() {
             'keyword_search': '仅关键词搜索'
         };
 
-        const modeHint = matchMode === 'all' 
-            ? '📌 模式：必须同时包含以上所有词 (联合搜索)' 
+        const modeHint = matchMode === 'all'
+            ? '📌 模式：必须同时包含以上所有词 (联合搜索)'
             : '📌 模式：包含以上任意一个词即可';
 
         card.innerHTML = `
@@ -806,8 +806,8 @@ function renderProductCard(item, prepend = true) {
     card.className = 'product-card';
 
     const imgSrc = item.img_url ? `/img_proxy?url=${encodeURIComponent(item.img_url)}` : '';
-    const imgHtml = imgSrc 
-        ? `<img class="product-img" src="${imgSrc}" loading="lazy" alt="${escapeHtml(item.title)}">` 
+    const imgHtml = imgSrc
+        ? `<img class="product-img" src="${imgSrc}" loading="lazy" alt="${escapeHtml(item.title)}">`
         : `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;">无缩略图</div>`;
 
     card.innerHTML = `
@@ -1063,7 +1063,7 @@ function bindEvents() {
         elements.btnClearFeed.addEventListener('click', async () => {
             try {
                 await fetch('/api/clear_history', { method: 'POST' });
-            } catch (e) {}
+            } catch (e) { }
             elements.feedContainer.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-icon">🎀</div>
@@ -1876,7 +1876,7 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     const payMethod = aoCfg.payment_method || 'cod';
     const payName = (payMethod === 'store_pickup' || payMethod === 'store') ? '店頭支払 (到店付款)' : '代金引換 (货到付款)';
 
-    const modeTip = isDry 
+    const modeTip = isDry
         ? '【🛡️ Dry-Run 仿真测试模式】\n系统将自动模拟登录、秒级加购、选择地址与支付方式全流程，并在最终购买确认前安全拦截，提取详细费用明细，绝对不会扣款或产生订单！'
         : '【🚨 真实下单模式 (警告)】\n系统将以您的账号自动在 Dollyteria 官网提交真实订单购买！';
 

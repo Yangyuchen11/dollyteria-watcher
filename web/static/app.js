@@ -1326,19 +1326,21 @@ function bindEvents() {
         });
     }
 
-    // 显示/隐藏密码明文切换
+    // 显示/隐藏密码明文切换 (密文时显示 🙈 遮眼，明文时显示 👁️ 睁眼)
     if (elements.btnAuthTogglePwd && elements.authPasswordInput) {
         elements.btnAuthTogglePwd.addEventListener('click', () => {
             const isPwd = elements.authPasswordInput.type === 'password';
             elements.authPasswordInput.type = isPwd ? 'text' : 'password';
-            elements.btnAuthTogglePwd.textContent = isPwd ? '🙈' : '👁️';
+            elements.btnAuthTogglePwd.textContent = isPwd ? '👁️' : '🙈';
+            elements.btnAuthTogglePwd.title = isPwd ? '点击隐藏密码' : '点击显示明文';
         });
     }
     if (elements.btnToggleNewPwd && elements.inputNewWebPassword) {
         elements.btnToggleNewPwd.addEventListener('click', () => {
             const isPwd = elements.inputNewWebPassword.type === 'password';
             elements.inputNewWebPassword.type = isPwd ? 'text' : 'password';
-            elements.btnToggleNewPwd.textContent = isPwd ? '🙈' : '👁️';
+            elements.btnToggleNewPwd.textContent = isPwd ? '👁️' : '🙈';
+            elements.btnToggleNewPwd.title = isPwd ? '点击隐藏密码' : '点击显示明文';
         });
     }
 }

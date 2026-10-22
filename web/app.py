@@ -29,10 +29,17 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
 
     # 访问密码鉴权助手
     def get_configured_password() -> str:
+        # 1. 优先读取用户在 Web 界面中主动设置/保存的密码 (持久化在 config.json 中)
+        cfg_pwd = monitor.config.get("web_password")
+        if cfg_pwd == "__DISABLED__":
+            return ""  # 用户明确在界面清空并取消了密码保护
+        if cfg_pwd and str(cfg_pwd).strip():
+            return str(cfg_pwd).strip()
+        # 2. 如果 config.json 未显式设置，回退使用环境变量 (例如 docker-compose 初次启动的默认值)
         env_pwd = os.environ.get("WEB_PASSWORD", "").strip()
         if env_pwd:
             return env_pwd
-        return str(monitor.config.get("web_password", "")).strip()
+        return ""
 
     def compute_auth_token(password: str) -> str:
         if not password:
@@ -139,8 +146,10 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     def api_auth_set_password():
         data = request.json or {}
         new_pwd = str(data.get("password", "")).strip()
-        monitor.config["web_password"] = new_pwd
+        monitor.config["web_password"] = new_pwd if new_pwd else "__DISABLED__"
         monitor._save_config()
+        # 同步更新运行时环境变量，确保当前进程无需重启即刻使用新密码
+        os.environ["WEB_PASSWORD"] = new_pwd
         token = compute_auth_token(new_pwd) if new_pwd else ""
         resp = jsonify({
             "status": "ok",

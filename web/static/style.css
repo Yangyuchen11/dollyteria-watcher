@@ -2290,6 +2290,11 @@ input:checked + .slider:before {
     margin-top: 2px;
 }
 
+#quick-buy-mode-tag {
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 .btn-card-buy.qb-disabled {
     background: rgba(255, 255, 255, 0.05);
     border: 1px dashed rgba(255, 255, 255, 0.18);

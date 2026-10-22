@@ -2184,3 +2184,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.error('checkAuthStatus err:', e);
     }
 });
+document.addEventListener('DOMContentLoaded', async () => {
+    try { initTimeSelects(); } catch (e) { console.error('initTimeSelects err:', e); }
+    try { initTabs(); } catch (e) { console.error('initTabs err:', e); }
+    try { bindEvents(); } catch (e) { console.error('bindEvents err:', e); }
+    try {
+        const isAuthed = await checkAuthStatus();
+        if (isAuthed) {
+            initMainApp();
+        }
+    } catch (e) {
+        console.error('checkAuthStatus err:', e);
+    }
+});

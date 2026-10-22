@@ -1,14 +1,10 @@
 {
   "auto_order": {
-    "username": "yyc285184831@gmail.com",
-    "password": "yyc931121",
     "dry_run": true,
     "enabled": true,
-    "payment_method": "store_pickup"
-  },
-  "quick_buy": {
-    "enabled": true,
-    "dry_run": true
+    "password": "yyc931121",
+    "payment_method": "store_pickup",
+    "username": "yyc285184831@gmail.com"
   },
   "notifications": {
     "desktop_enabled": true,
@@ -31,6 +27,10 @@
     },
     "sound_enabled": true
   },
+  "quick_buy": {
+    "dry_run": true,
+    "enabled": true
+  },
   "schedule": {
     "burst_duration_sec": 180,
     "burst_interval_sec": 2,
@@ -44,46 +44,66 @@
   },
   "watches": [
     {
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1792415272992",
-      "name": "DearSDティアラ",
       "keywords": [
         "DearSD",
         "ティアラ"
       ],
-      "exclude_keywords": [],
-      "min_price": 50000,
-      "max_price": 130000,
-      "search_mode": "both",
       "match_mode": "all",
-      "enabled": true
+      "max_price": 130000,
+      "min_price": 50000,
+      "name": "DearSDティアラ",
+      "search_mode": "both",
+      "auto_order": true
     },
     {
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1792423165497",
-      "name": "幼SDまい",
       "keywords": [
         "幼SD",
         "まい"
       ],
-      "exclude_keywords": [],
-      "min_price": 10000,
-      "max_price": 70000,
-      "search_mode": "both",
       "match_mode": "all",
-      "enabled": true
+      "max_price": 70000,
+      "min_price": 10000,
+      "name": "幼SDまい",
+      "search_mode": "both"
     },
     {
       "id": "w_1792517908022",
       "name": "Elizabeth",
       "keywords": [
         "SD13",
-        "Elizabeth"
+        "Elizabeth",
+        "ブライス",
+        "SDM",
+        "オビツ11",
+        "ボークス"
       ],
       "exclude_keywords": [],
       "min_price": 0,
       "max_price": 0,
       "search_mode": "both",
       "match_mode": "all",
+      "auto_order": false,
       "enabled": true
+    },
+    {
+      "auto_order": false,
+      "enabled": true,
+      "exclude_keywords": [],
+      "id": "w_1792660374350",
+      "keywords": [
+        "DearSD　はな"
+      ],
+      "match_mode": "any",
+      "max_price": 0,
+      "min_price": 0,
+      "name": "DearSDはな",
+      "search_mode": "new_stream"
     }
   ],
   "web_password": ""

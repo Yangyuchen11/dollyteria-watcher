@@ -978,7 +978,10 @@ function renderProductCard(item, prepend = true) {
                 <div class="product-model">${escapeHtml(item.model_number || '')}</div>
             </div>
             <div class="product-footer">
-                <div class="product-price">${escapeHtml(item.price_str || '￥' + item.price)}</div>
+                <div class="product-price-row">
+                    <span class="product-price">${escapeHtml(item.price_str || '￥' + item.price)}</span>
+                    <span class="product-time-tag">即时在库</span>
+                </div>
                 <div class="product-card-actions">
                     <button type="button" class="btn btn-sm btn-warning btn-feed-quick-buy ${qbBtnClass}"
                         data-id="${escapeHtml(item.id)}"
@@ -987,7 +990,7 @@ function renderProductCard(item, prepend = true) {
                         title="${qbBtnTitle}">
                         ⚡ 一键购买
                     </button>
-                    <a href="${item.url}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost" title="在官网新标签页查看商品">
+                    <a href="${item.url}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost" title="在官网新标签页查看商品详情">
                         官网 ↗
                     </a>
                 </div>

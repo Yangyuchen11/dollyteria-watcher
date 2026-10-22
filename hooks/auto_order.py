@@ -58,24 +58,25 @@ class AutoOrderHook:
         self._pool_lock = threading.Lock()
         self._standby_workers: List['AutoOrderHook'] = []
 
-    def _safe_request(self, method: str, url: str, max_retries: int = 5, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
-        """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器"""
+    def _safe_request(self, method: str, url: str, max_retries: Optional[int] = None, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
+        """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器 (默认继承 auto_order.max_retries，如 35 次)"""
+        retries = self.max_retries if max_retries is None else int(max_retries)
         delay = self.retry_delay if retry_delay is None else retry_delay
-        for attempt in range(max_retries + 1):
+        for attempt in range(retries + 1):
             try:
                 resp = self.session.request(method, url, **kwargs)
                 is_busy = resp.status_code in [429, 502, 503, 504] or any(
                     k in resp.text for k in ["アクセス集中", "大変混み合っております", "回線が混雑", "ただいま混雑"]
                 )
                 if is_busy:
-                    if attempt < max_retries:
-                        logger.warning(f"[Auto-Order] 结算推进 {url} 遇到繁忙 ({resp.status_code}/排队)，正在迅速重试 (第 {attempt + 1}/{max_retries} 次)...")
+                    if attempt < retries:
+                        logger.warning(f"[Auto-Order] 结算推进 {url} 遇到繁忙 ({resp.status_code}/排队)，正在迅速重试 (第 {attempt + 1}/{retries} 次)...")
                         time.sleep(delay)
                         continue
                 return resp
             except (requests.Timeout, requests.ConnectionError) as e:
-                if attempt < max_retries:
-                    logger.warning(f"[Auto-Order] 结算推进 {url} 网络异常 ({e})，正在迅速重试 (第 {attempt + 1}/{max_retries} 次)...")
+                if attempt < retries:
+                    logger.warning(f"[Auto-Order] 结算推进 {url} 网络异常 ({e})，正在迅速重试 (第 {attempt + 1}/{retries} 次)...")
                     time.sleep(delay)
                     continue
             except Exception as e:

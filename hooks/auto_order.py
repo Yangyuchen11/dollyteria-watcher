@@ -235,7 +235,6 @@ class AutoOrderHook:
                 self.is_logged_in = True
                 msg = f"Dollyteria 账户 [{user}] 登录成功！"
                 logger.info(f"✅ [Auto-Order] {msg}")
-                self.preload_standby_workers(count=2)
                 return True, msg
             else:
                 self.is_logged_in = False
@@ -295,9 +294,12 @@ class AutoOrderHook:
                 r_text = ""
                 if r.content:
                     try:
-                        r_text = r.content.decode("euc-jp", "ignore")
-                    except Exception:
-                        r_text = r.content.decode("utf-8", "ignore")
+                        r_text = r.content.decode("utf-8")
+                    except UnicodeDecodeError:
+                        try:
+                            r_text = r.content.decode("euc-jp", "ignore")
+                        except Exception:
+                            r_text = r.text
 
                 # 1. 检查是否成功进入购物车
                 if r.url and "/cart" in r.url and ("カートの中身" in r_text or "ショッピングカート" in r_text or "レジに進む" in r_text):

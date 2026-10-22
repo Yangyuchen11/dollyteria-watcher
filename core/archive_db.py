@@ -133,6 +133,35 @@ class DollyteriaArchiveDB:
             logger.error(f"批量写入归档商品失败: {e}")
             return 0, 0
 
+    def mark_sold_out(self, item_id: str) -> bool:
+        """将指定商品状态更新为已售罄 (is_in_stock = 0)"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE products SET is_in_stock = 0, updated_at = ? WHERE id = ?",
+                    (int(time.time()), str(item_id).strip())
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"标记商品 #{item_id} 售罄失败: {e}")
+            return False
+
+    def get_stock_status_map(self, ids: List[str]) -> Dict[str, bool]:
+        """批量获取指定商品的在库状态 (返回 {id: is_in_stock})"""
+        if not ids:
+            return {}
+        try:
+            clean_ids = [str(i).strip() for i in ids if str(i).strip()]
+            placeholders = ",".join("?" for _ in clean_ids)
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT id, is_in_stock FROM products WHERE id IN ({placeholders})", clean_ids)
+                return {row["id"]: bool(row["is_in_stock"]) for row in cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"批量查询商品在库状态失败: {e}")
+            return {}
+
     def query_products(
         self,
         keyword: str = "",

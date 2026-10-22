@@ -136,9 +136,13 @@ class DollyteriaMonitor:
         max_workers = int(ao_cfg.get("max_workers", 6))
         self._order_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AutoOrderWorker")
 
-        # 若配置了账号密码，系统启动时在后台自动预登录并保持会话
+        # 若配置了账号密码，系统启动时在后台自动预登录并保持会话与备用池
         if self.auto_order.username and self.auto_order.password:
-            threading.Thread(target=self.auto_order.login, name="AutoOrderStartupLogin", daemon=True).start()
+            def _startup_login():
+                ok, _ = self.auto_order.login()
+                if ok:
+                    self.auto_order.preload_standby_workers()
+            threading.Thread(target=_startup_login, name="AutoOrderStartupLogin", daemon=True).start()
 
     def _load_config(self) -> Dict:
         if os.path.exists(CONFIG_PATH):
@@ -256,7 +260,11 @@ class DollyteriaMonitor:
                 pass
 
         if self.auto_order.username and self.auto_order.password:
-            threading.Thread(target=self.auto_order.login, name="AutoOrderUpdateLogin", daemon=True).start()
+            def _update_login():
+                ok, _ = self.auto_order.login()
+                if ok:
+                    self.auto_order.preload_standby_workers()
+            threading.Thread(target=_update_login, name="AutoOrderUpdateLogin", daemon=True).start()
 
     def reset_seen_items(self):
         """重置已记录商品 (下次检测将视全部匹配商品为新商品)"""

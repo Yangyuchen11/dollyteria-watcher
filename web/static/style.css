@@ -954,6 +954,31 @@ input:checked+.slider:before {
     transform: scale(1.05);
 }
 
+.product-card.is-sold-out .product-img {
+    filter: grayscale(85%) contrast(90%);
+    opacity: 0.65;
+}
+
+.product-soldout-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 15, 26, 0.42);
+    backdrop-filter: blur(1.5px);
+    z-index: 2;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+}
+
+.product-card:hover .product-soldout-overlay {
+    opacity: 0.2; /* 鼠标悬停时自动淡化水印，方便清晰查看商品原图 */
+}
+
 .product-stock-badge {
     position: absolute;
     top: 10px;
@@ -965,6 +990,16 @@ input:checked+.slider:before {
     font-weight: 700;
     padding: 3px 8px;
     border-radius: var(--radius-sm);
+    z-index: 3;
+}
+
+.product-stock-badge.is-sold-out {
+    background: rgba(239, 68, 68, 0.92);
+}
+
+.product-time-tag.is-sold-out {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
 }
 
 .product-rule-badge {

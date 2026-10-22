@@ -950,26 +950,53 @@ function renderProductCard(item, prepend = true) {
     const empty = elements.feedContainer.querySelector('.empty-state');
     if (empty) empty.remove();
 
+    const isStock = (item.is_in_stock !== false && item.is_in_stock !== 0);
+
     const card = document.createElement('div');
-    card.className = 'product-card';
+    card.className = `product-card ${isStock ? '' : 'is-sold-out'}`;
+    card.setAttribute('data-id', String(item.id || ''));
 
     const imgSrc = item.img_url ? `/img_proxy?url=${encodeURIComponent(item.img_url)}` : '';
     const imgHtml = imgSrc
         ? `<img class="product-img" src="${imgSrc}" loading="lazy" alt="${escapeHtml(item.title)}">`
         : `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;">无缩略图</div>`;
 
+    const soldOutOverlay = !isStock
+        ? `<div class="product-soldout-overlay">
+               <div class="soldout-watermark-text">SoldOut 売切</div>
+           </div>`
+        : '';
+
     const qbCfg = currentConfig?.quick_buy || {};
     const isQbEnabled = Boolean(qbCfg.enabled);
     const isQbDry = qbCfg.dry_run !== false;
-    const qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
-    const qbBtnTitle = isQbEnabled
+    let qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
+    let qbBtnTitle = isQbEnabled
         ? (isQbDry ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)' : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)')
         : '⚡ 一键购买 (功能未开启，请先在【全站档案】开启一键下单开关)';
+    let qbBtnText = '⚡ 一键购买';
+    let qbDisabledAttr = '';
+
+    if (!isStock) {
+        qbBtnClass += ' btn-secondary';
+        qbBtnTitle = '官网该商品已售罄';
+        qbBtnText = '已售罄';
+        qbDisabledAttr = 'disabled';
+    }
+
+    const stockBadge = isStock
+        ? `<span class="product-stock-badge">● 在库</span>`
+        : `<span class="product-stock-badge is-sold-out">● 售罄</span>`;
+
+    const timeTag = isStock
+        ? `<span class="product-time-tag">即时在库</span>`
+        : `<span class="product-time-tag is-sold-out">已售罄</span>`;
 
     card.innerHTML = `
         <div class="product-img-wrapper">
+            ${soldOutOverlay}
             ${imgHtml}
-            <span class="product-stock-badge">● 在库</span>
+            ${stockBadge}
             <span class="product-rule-badge">${escapeHtml(item.rule_name || '命中规则')}</span>
         </div>
         <div class="product-body">
@@ -980,15 +1007,16 @@ function renderProductCard(item, prepend = true) {
             <div class="product-footer">
                 <div class="product-price-row">
                     <span class="product-price">${escapeHtml(item.price_str || '￥' + item.price)}</span>
-                    <span class="product-time-tag">即时在库</span>
+                    ${timeTag}
                 </div>
                 <div class="product-card-actions">
                     <button type="button" class="btn btn-sm btn-warning btn-feed-quick-buy ${qbBtnClass}"
                         data-id="${escapeHtml(item.id)}"
                         data-title="${escapeHtml(item.title || '')}"
                         data-price="${escapeHtml(item.price_str || '￥' + item.price)}"
+                        ${qbDisabledAttr}
                         title="${qbBtnTitle}">
-                        ⚡ 一键购买
+                        ${qbBtnText}
                     </button>
                     <a href="${item.url}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost" title="在官网新标签页查看商品详情">
                         官网 ↗
@@ -1033,6 +1061,12 @@ function initSSE() {
             if (data.type === 'order_success') {
                 const item = data.item || {};
                 showToast(`🎉 【自动下单成功】已成功为您抢到: ${item.title || item.id}！`, 'success');
+                return;
+            }
+
+            // 收到商品售罄状态同步事件
+            if (data.type === 'item_sold_out' && data.item_id) {
+                markFeedProductSoldOut(data.item_id);
                 return;
             }
 
@@ -2178,6 +2212,69 @@ function addToWebCart(itemId) {
     showToast(`🛒 已向 Dollyteria 官网提交加购请求！正在新标签页打开您的网页版购物车...`, 'success');
 }
 
+// 将指定商品卡片标记为售罄状态 (同步水印遮罩、售罄徽章与按钮禁用)
+function markFeedProductSoldOut(itemId) {
+    itemId = String(itemId).trim();
+    if (!itemId) return;
+
+    // 1. 查找上新实时流中的卡片
+    const cards = document.querySelectorAll(`.product-card[data-id="${itemId}"], .btn-feed-quick-buy[data-id="${itemId}"]`);
+    cards.forEach(el => {
+        const card = el.classList.contains('product-card') ? el : el.closest('.product-card');
+        if (!card) return;
+
+        card.classList.add('is-sold-out');
+
+        // 添加 SoldOut 水印遮罩 (若尚未存在)
+        const imgWrap = card.querySelector('.product-img-wrapper');
+        if (imgWrap && !imgWrap.querySelector('.product-soldout-overlay')) {
+            const overlay = document.createElement('div');
+            overlay.className = 'product-soldout-overlay';
+            overlay.innerHTML = '<div class="soldout-watermark-text">SoldOut 売切</div>';
+            imgWrap.prepend(overlay);
+        }
+
+        // 更新徽章状态
+        const badge = card.querySelector('.product-stock-badge');
+        if (badge) {
+            badge.className = 'product-stock-badge is-sold-out';
+            badge.textContent = '● 售罄';
+        }
+
+        const timeTag = card.querySelector('.product-time-tag');
+        if (timeTag) {
+            timeTag.className = 'product-time-tag is-sold-out';
+            timeTag.textContent = '已售罄';
+        }
+
+        // 禁用并更新一键购买按钮
+        const btnBuy = card.querySelector('.btn-feed-quick-buy');
+        if (btnBuy) {
+            btnBuy.disabled = true;
+            btnBuy.classList.remove('btn-warning');
+            btnBuy.classList.add('btn-secondary');
+            btnBuy.textContent = '已售罄';
+            btnBuy.title = '官网该商品已售罄';
+        }
+    });
+
+    // 2. 同时若在全站档案卡片流中，也联动打上售罄状态
+    const archCards = document.querySelectorAll('.arch-card');
+    archCards.forEach(card => {
+        const link = card.querySelector(`a[href*="/product/${itemId}"]`);
+        if (link) {
+            card.classList.add('is-sold-out');
+            const thumbWrap = card.querySelector('.arch-card-thumb-wrap');
+            if (thumbWrap && !thumbWrap.querySelector('.arch-soldout-overlay')) {
+                const overlay = document.createElement('div');
+                overlay.className = 'arch-soldout-overlay';
+                overlay.innerHTML = '<div class="soldout-watermark-text">SoldOut 売切</div>';
+                thumbWrap.prepend(overlay);
+            }
+        }
+    });
+}
+
 // 调用后台自动下单接口执行一键购买
 async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     itemId = String(itemId).trim();
@@ -2240,6 +2337,10 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
             showToast(isDry ? '🎉 仿真测试成功！已顺利抵达最终确认页' : '🎉 真实下单购买成功！', 'success');
             showBuyResultModal(data, itemTitle, itemId);
         } else {
+            // 若发现已售罄，立即将前端卡片置为 SoldOut 状态
+            if (data.is_sold_out) {
+                markFeedProductSoldOut(itemId);
+            }
             showToast(data.message || '购买流程中断，请检查账号或库存状态', 'error');
             if (data.steps_log) {
                 showBuyResultModal(data, itemTitle, itemId);
@@ -2248,8 +2349,7 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     } catch (err) {
         showToast('发起自动购买异常: ' + err.message, 'error');
     } finally {
-        if (btnEl) {
-            btnEl.disabled = false;
+        if (btnEl && !btnEl.disabled) {
             btnEl.innerHTML = originalText;
         }
     }

@@ -282,7 +282,16 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
 
     @app.route("/api/history")
     def api_history():
-        return jsonify(monitor.state.get("history", []))
+        history = list(monitor.state.get("history", []))
+        if history:
+            ids = [it.get("id") for it in history if it.get("id")]
+            if ids:
+                stock_map = monitor.archive_db.get_stock_status_map(ids)
+                for it in history:
+                    pid = str(it.get("id", ""))
+                    if pid in stock_map:
+                        it["is_in_stock"] = stock_map[pid]
+        return jsonify(history)
 
     @app.route("/api/clear_history", methods=["POST"])
     def api_clear_history():
@@ -410,23 +419,30 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         else:
             dry_run = bool(dry_run)
 
-        # 独立实例化 AutoOrderHook，继承全局 503 重试与并发配置，绝不污染后台监控实例状态
-        from hooks.auto_order import AutoOrderHook
-        qb_hook = AutoOrderHook(
-            username=username,
-            password=password,
-            dry_run=dry_run,
-            payment_method=payment_method,
-            retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
-            max_retries=int(ao_cfg.get("max_retries", 35)),
-        )
-        res = qb_hook.execute_checkout(
-            item_id=item_id,
-            item_title=item_title,
-            dry_run=dry_run,
-            clear_after_dry_run=dry_run,
-            payment_method=payment_method,
-        )
+        # 借用后台已预热好的 Worker 执行一键购买，享受 0 延迟秒级开抢与独立 Session
+        worker = monitor.auto_order.get_worker()
+        worker.dry_run = dry_run
+        worker.payment_method = payment_method
+        worker.retry_delay = float(ao_cfg.get("retry_delay_sec", 0.15))
+        worker.max_retries = int(ao_cfg.get("max_retries", 35))
+        try:
+            res = worker.execute_checkout(
+                item_id=item_id,
+                item_title=item_title,
+                dry_run=dry_run,
+                clear_after_dry_run=dry_run,
+                payment_method=payment_method,
+            )
+        finally:
+            monitor.auto_order.release_worker(worker)
+
+        # 若加购返回商品已明确售罄，立即标记归档库并向 Web 前端广播 SoldOut 事件
+        if not res.get("success") and res.get("is_sold_out"):
+            monitor.archive_db.mark_sold_out(item_id)
+            on_new_event({
+                "type": "item_sold_out",
+                "item_id": item_id,
+            })
         if res.get("success") and not res.get("dry_run"):
             item_info = {
                 "id": item_id,

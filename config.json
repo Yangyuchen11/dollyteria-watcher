@@ -44,6 +44,7 @@
   },
   "watches": [
     {
+      "auto_order": true,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1792415272992",
@@ -55,8 +56,7 @@
       "max_price": 130000,
       "min_price": 50000,
       "name": "DearSDティアラ",
-      "search_mode": "both",
-      "auto_order": true
+      "search_mode": "both"
     },
     {
       "enabled": true,
@@ -73,8 +73,10 @@
       "search_mode": "both"
     },
     {
+      "auto_order": false,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1792517908022",
-      "name": "Elizabeth",
       "keywords": [
         "SD13",
         "Elizabeth",
@@ -83,13 +85,11 @@
         "オビツ11",
         "ボークス"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 0,
-      "search_mode": "both",
       "match_mode": "all",
-      "auto_order": false,
-      "enabled": true
+      "max_price": 0,
+      "min_price": 5000,
+      "name": "Elizabeth",
+      "search_mode": "both"
     },
     {
       "auto_order": false,

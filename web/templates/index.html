@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=2.4">
+    <link rel="stylesheet" href="/static/style.css?v=3.1">
 </head>
 <body>
     <div class="app-container">
@@ -474,9 +474,9 @@
                                     <input type="checkbox" id="ao-dry-run" checked>
                                     <span class="slider"></span>
                                 </label>
-                                <span class="form-label-inline">启用安全仿真测试 (Dry-Run 模式)</span>
+                                <span class="form-label-inline" id="ao-dry-run-label">启用安全仿真测试 (Dry-Run 模式)</span>
                             </div>
-                            <span class="form-tip">强烈推荐保持开启：到达确认页并抓取完整账单后立即安全拦截，绝不提交最终订单</span>
+                            <span class="form-tip">关闭此开关即开启真实下单：将直接提交官方正式订单并扣款购买；开启时到达确认页自动安全拦截绝不扣款</span>
                         </div>
                         <div class="form-group col-6">
                             <div class="switch-row">
@@ -919,6 +919,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=2.9"></script>
+    <script src="/static/app.js?v=3.1"></script>
 </body>
 </html>

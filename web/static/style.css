@@ -449,12 +449,17 @@ body {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
-    padding: 20px;
+    padding: 18px 20px 14px 20px;
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
-    gap: 16px;
     transition: var(--transition);
+}
+
+.watch-card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 12px;
 }
 
 .watch-card:hover {
@@ -469,9 +474,10 @@ body {
 
 .watch-card-top {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    justify-content: flex-start;
+    align-items: center;
     gap: 12px;
+    margin-bottom: 12px;
 }
 
 /* 监控提醒与自动下单双开关聚合胶囊 */
@@ -603,61 +609,101 @@ input:checked+.slider.slider-emerald {
     box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
 }
 
-.watch-title-group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+.watch-name-row {
+    margin-bottom: 8px;
 }
 
 .watch-name {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: 17px;
+    font-weight: 700;
     color: var(--text-primary);
+    line-height: 1.35;
+    letter-spacing: -0.2px;
+}
+
+/* 监控属性胶囊横向排列行 */
+.watch-badges-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
 }
 
 .watch-mode-tag {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     font-size: 11px;
-    padding: 2px 8px;
+    padding: 3px 9px;
     border-radius: var(--radius-full);
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-secondary);
     width: fit-content;
+    white-space: nowrap;
+    line-height: 1.3;
 }
 
 .watch-tag-list {
     display: flex;
+    align-items: center;
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 8px;
 }
 
 .tag-kw {
+    display: inline-flex;
+    align-items: center;
     background: rgba(139, 92, 246, 0.15);
     border: 1px solid rgba(139, 92, 246, 0.3);
     color: #c4b5fd;
     padding: 3px 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+    border-radius: var(--radius-full);
+    font-size: 11.5px;
     font-weight: 500;
+    white-space: nowrap;
 }
 
 .tag-exclude {
+    display: inline-flex;
+    align-items: center;
     background: rgba(239, 68, 68, 0.15);
     border: 1px solid rgba(239, 68, 68, 0.3);
     color: #fca5a5;
     padding: 3px 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+    border-radius: var(--radius-full);
+    font-size: 11.5px;
+    white-space: nowrap;
 }
 
 .tag-price {
+    display: inline-flex;
+    align-items: center;
     background: rgba(245, 158, 11, 0.15);
     border: 1px solid rgba(245, 158, 11, 0.3);
     color: #fcd34d;
     padding: 3px 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+    border-radius: var(--radius-full);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+.tag-price.tag-price-none {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    color: var(--text-muted);
+}
+
+.watch-price-row {
+    display: flex;
+    align-items: center;
+    min-height: 26px;
+    margin-top: 8px;
+}
+
+.watch-footer-status {
+    display: flex;
+    align-items: center;
 }
 
 .watch-card-footer {
@@ -666,6 +712,8 @@ input:checked+.slider.slider-emerald {
     align-items: center;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     padding-top: 12px;
+    margin-top: auto;
+    flex-shrink: 0;
 }
 
 /* 设置面板通用样式 */
@@ -2551,24 +2599,6 @@ input:checked+.slider:before {
 #quick-buy-mode-tag {
     white-space: nowrap;
     flex-shrink: 0;
-}
-
-.btn-card-buy.qb-disabled {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px dashed rgba(255, 255, 255, 0.18);
-    color: #94a3b8;
-    opacity: 0.85;
-}
-
-.btn-card-buy.qb-disabled:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.3);
-    color: #cbd5e1;
-    box-shadow: none;
-}
-
-white-space: nowrap;
-flex-shrink: 0;
 }
 
 .btn-card-buy.qb-disabled {

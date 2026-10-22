@@ -496,10 +496,6 @@ function renderWatches() {
             'keyword_search': '仅关键词搜索'
         };
 
-        const modeHint = matchMode === 'all'
-            ? '📌 模式：必须同时包含以上所有词 (联合搜索)'
-            : '📌 模式：包含以上任意一个词即可';
-
         const autoOrderEnabled = Boolean(rule.auto_order);
         const globalAoEnabled = Boolean(currentConfig.auto_order?.enabled);
         const isDryRun = currentConfig.auto_order?.dry_run !== false;
@@ -510,30 +506,21 @@ function renderWatches() {
         } else if (autoOrderEnabled) {
             if (globalAoEnabled) {
                 if (isDryRun) {
-                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截)">🛡️ 自动购买适用 (仿真测试)</span>';
+                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截)">🛡️ 仿真抢购适用</span>';
                 } else {
-                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，命中时将自动以真实订单下单！">🚨 自动抢购适用 (真实下单)</span>';
+                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，命中时将自动以真实订单下单！">🚨 真实下单适用</span>';
                 }
             } else {
                 statusBadgeHtml = '<span class="rule-status-badge status-standby" title="已开启自动购买，但自动下单全局总开关未开启，当前仅发送提醒">🛒 自动购买就绪 (全局未开)</span>';
             }
         } else {
-            statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 仅提醒 (不自动购买)</span>';
+            statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 仅提醒模式</span>';
         }
 
         card.innerHTML = `
-            <div>
+            <div class="watch-card-body">
+                <!-- 第一行：左上角开关胶囊 -->
                 <div class="watch-card-top">
-                    <div class="watch-title-group">
-                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                            <div class="watch-name">${escapeHtml(rule.name)}</div>
-                            ${matchBadge}
-                        </div>
-                        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px;">
-                            <span class="watch-mode-tag">${modeMap[rule.search_mode] || '综合检索'}</span>
-                            ${statusBadgeHtml}
-                        </div>
-                    </div>
                     <div class="watch-switch-cluster">
                         <div class="watch-switch-item" title="监控与提醒总开关：开启后持续检测新上架并发送通知">
                             <span class="switch-icon">🔔</span>
@@ -554,15 +541,33 @@ function renderWatches() {
                         </div>
                     </div>
                 </div>
+
+                <!-- 第二行：商品名称 (开关的正下方独立成行) -->
+                <div class="watch-name-row">
+                    <span class="watch-name">${escapeHtml(rule.name)}</span>
+                </div>
+
+                <!-- 第三行：检索模式与匹配胶囊 (横向同行排列) -->
+                <div class="watch-badges-row">
+                    ${matchBadge}
+                    <span class="watch-mode-tag">${modeMap[rule.search_mode] || '综合检索'}</span>
+                </div>
+
+                <!-- 第四行：关键词胶囊 (独立成行，防止过长引起高度跳动) -->
                 <div class="watch-tag-list">
                     ${kws}
                     ${excludes}
-                    ${priceTag}
                 </div>
-                <div class="watch-mode-hint">${modeHint}</div>
+
+                <!-- 第五行：价格设置独立行 (仅设置了价格时显示，未设置价格时不显示) -->
+                ${priceTag ? `<div class="watch-price-row">${priceTag}</div>` : ''}
             </div>
+
+            <!-- 底部操作栏：左下角状态徽标 + 右下角编辑与删除 (保持居底) -->
             <div class="watch-card-footer">
-                <span style="font-size:12px;color:var(--text-muted);">规则 #${idx + 1}</span>
+                <div class="watch-footer-status">
+                    ${statusBadgeHtml}
+                </div>
                 <div style="display:flex;gap:8px;">
                     <button class="btn btn-sm btn-ghost btn-edit-rule" data-idx="${idx}">编辑</button>
                     <button class="btn btn-sm btn-ghost text-danger btn-delete-rule" data-idx="${idx}">删除</button>
@@ -705,6 +710,13 @@ function updateAoModeBanner() {
     if (!elements.aoModeBanner) return;
     const isEnabled = elements.aoEnabled ? elements.aoEnabled.checked : false;
     const isDryRun = elements.aoDryRun ? elements.aoDryRun.checked : true;
+
+    const dryRunLabel = document.getElementById('ao-dry-run-label');
+    if (dryRunLabel) {
+        dryRunLabel.innerHTML = isDryRun
+            ? '<span>启用安全仿真测试 (Dry-Run 模式)</span>'
+            : '<span style="color:#f87171;font-weight:700;">🚨 真实自动下单模式已激活！</span>';
+    }
 
     if (!isEnabled) {
         elements.aoModeBanner.className = 'ao-mode-banner idle';
@@ -1260,26 +1272,39 @@ function bindEvents() {
         });
     }
 
-    // 自动下单开关联动实时状态横幅
+    // 自动下单开关联动实时状态横幅与即时保存
     if (elements.aoEnabled) {
         elements.aoEnabled.addEventListener('change', () => {
+            if (!currentConfig.auto_order) currentConfig.auto_order = {};
+            currentConfig.auto_order.enabled = elements.aoEnabled.checked;
             updateAoModeBanner();
+            saveConfig(true);
+            showToast(elements.aoEnabled.checked ? '已开启全局自动下单' : '已关闭全局自动下单', 'info');
         });
     }
     if (elements.aoDryRun) {
         elements.aoDryRun.addEventListener('change', () => {
+            if (!currentConfig.auto_order) currentConfig.auto_order = {};
             if (!elements.aoDryRun.checked && elements.aoEnabled?.checked) {
                 const confirmed = confirm(
                     "⚠️ 重要安全提示：\n\n" +
-                    "您正在关闭 Dry-Run (安全仿真) 模式！\n" +
-                    "关闭后，一旦监控命中您设置的商品关键词，系统将在确认页直接点击「購入する」提交真实订单并完成购买！\n\n" +
-                    "确定要解除安全保护吗？"
+                    "您正在开启【真实自动下单】模式！\n" +
+                    "解除 Dry-Run 仿真保护后，一旦监控命中您开启自动购买的商品，系统将在确认页直接点击「購入する」正式提交官方真实订单并扣款购买！\n\n" +
+                    "确定要开启真实下单吗？"
                 );
                 if (!confirmed) {
                     elements.aoDryRun.checked = true;
+                    return;
                 }
             }
+            currentConfig.auto_order.dry_run = elements.aoDryRun.checked;
             updateAoModeBanner();
+            saveConfig(true);
+            if (!elements.aoDryRun.checked) {
+                showToast('🚨 已开启真实下单模式！命中监控时将向官网直接提交订单', 'warning');
+            } else {
+                showToast('🛡️ 已切换为 Dry-Run 安全仿真测试模式', 'info');
+            }
         });
     }
 
@@ -2171,19 +2196,6 @@ function showBuyResultModal(data, itemTitle, itemId) {
 }
 
 // 页面加载启动
-document.addEventListener('DOMContentLoaded', async () => {
-    try { initTimeSelects(); } catch (e) { console.error('initTimeSelects err:', e); }
-    try { initTabs(); } catch (e) { console.error('initTabs err:', e); }
-    try { bindEvents(); } catch (e) { console.error('bindEvents err:', e); }
-    try {
-        const isAuthed = await checkAuthStatus();
-        if (isAuthed) {
-            initMainApp();
-        }
-    } catch (e) {
-        console.error('checkAuthStatus err:', e);
-    }
-});
 document.addEventListener('DOMContentLoaded', async () => {
     try { initTimeSelects(); } catch (e) { console.error('initTimeSelects err:', e); }
     try { initTabs(); } catch (e) { console.error('initTabs err:', e); }

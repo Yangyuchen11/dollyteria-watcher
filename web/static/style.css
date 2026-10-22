@@ -551,15 +551,6 @@ body {
     white-space: nowrap;
 }
 
-.watch-switch-item.auto-active {
-    background: rgba(16, 185, 129, 0.12);
-    border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.watch-switch-item.auto-active .switch-text {
-    color: #34d399;
-    font-weight: 600;
-}
 
 .watch-switch-item.disabled {
     opacity: 0.45;

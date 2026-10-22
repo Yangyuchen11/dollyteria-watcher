@@ -541,7 +541,7 @@ function renderWatches() {
                             </label>
                         </div>
                         <div class="switch-divider"></div>
-                        <div class="watch-switch-item ${autoOrderEnabled ? 'auto-active' : ''} ${!rule.enabled ? 'disabled' : ''}" title="专属自动购买开关：开启时此商品纳入自动购买名单；关闭时无论全局设置如何仅发送提醒">
+                        <div class="watch-switch-item ${!rule.enabled ? 'disabled' : ''}" title="专属自动购买开关：开启时此商品纳入自动购买名单；关闭时无论全局设置如何仅发送提醒">
                             <span class="switch-icon">🛒</span>
                             <span class="switch-text">自动购买</span>
                             <label class="switch switch-sm">

@@ -130,6 +130,10 @@ class AutoOrderHook:
             while self._standby_workers:
                 w = self._standby_workers.pop(0)
                 if w.is_logged_in:
+                    w.max_retries = self.max_retries
+                    w.retry_delay = self.retry_delay
+                    w.dry_run = self.dry_run
+                    w.payment_method = self.payment_method
                     w._is_busy = True
                     return w
 
@@ -288,7 +292,12 @@ class AutoOrderHook:
                     logger.info(f"[Auto-Order] 正在加购商品 [{item_id}]...")
 
                 r = self.session.post(product_url, data=cart_data, timeout=8, allow_redirects=True)
-                r_text = r.content.decode("utf-8", "ignore") if r.content else ""
+                r_text = ""
+                if r.content:
+                    try:
+                        r_text = r.content.decode("euc-jp", "ignore")
+                    except Exception:
+                        r_text = r.content.decode("utf-8", "ignore")
 
                 # 1. 检查是否成功进入购物车
                 if r.url and "/cart" in r.url and ("カートの中身" in r_text or "ショッピングカート" in r_text or "レジに進む" in r_text):
@@ -297,8 +306,18 @@ class AutoOrderHook:
                         return True, "商品已成功加购并进入购物车", False
 
                 # 2. 检查是否明确售罄 (Sold Out)
-                if r_text and any(k in r_text for k in SOLDOUT_KEYWORDS):
-                    logger.warning(f"🛑 [Auto-Order] 商品 [{item_id}] 官网已明确售罄 (Sold Out / 売り切れ / 在庫不足)，终止重试")
+                # Dollyteria 官方模板特性：
+                # A: 显式文本 (売り切れ, 在庫不足, 在庫切れ 等)
+                # B: 商品详情页结构特征：售罄时页面通常不会显示「売り切れ」文字，而是直接移除「カートに入れる」加购按钮 (cart_add_btn/cartinput)，仅保留「商品問い合わせ (inquiry_btn)」
+                is_on_product_page = (r.url and f"/product/{item_id}" in r.url)
+                has_cart_input = any(k in r_text for k in ["cart_add_btn", "add_cart_btn", "cartinput", "submit_cart_input_btn", f"cart_add_{item_id}"])
+                has_inquiry_btn = any(k in r_text for k in ["inquiry_btn", "inquiryinput", f"/contact/product/{item_id}"])
+                has_explicit_soldout = any(k in r_text for k in SOLDOUT_KEYWORDS)
+
+                is_sold_out = has_explicit_soldout or (is_on_product_page and (not has_cart_input) and has_inquiry_btn)
+
+                if is_sold_out:
+                    logger.warning(f"🛑 [Auto-Order] 商品 [{item_id}] 官网已明确售罄 (加购按钮已下架/已售出)，智能熔断立即终止重试！")
                     return False, "加购未成功：商品已明确售罄或已被他人抢先下单锁定", True
 
                 # 3. 检查是否遭遇 503 / 502 / 504 / 429 繁忙或排队占位页

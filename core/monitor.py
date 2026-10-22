@@ -239,6 +239,14 @@ class DollyteriaMonitor:
         self.auto_order.max_retries = int(ao_cfg.get("max_retries", 35))
         self.auto_order.standby_workers_count = int(ao_cfg.get("standby_workers", 2))
 
+        # 实时同步至已有备用 Worker 实例
+        with self.auto_order._pool_lock:
+            for w in self.auto_order._standby_workers:
+                w.retry_delay = self.auto_order.retry_delay
+                w.max_retries = self.auto_order.max_retries
+                w.dry_run = self.auto_order.dry_run
+                w.payment_method = self.auto_order.payment_method
+
         # 动态同步抢购并发线程池大小
         new_max_workers = int(ao_cfg.get("max_workers", 6))
         if hasattr(self._order_executor, "_max_workers") and self._order_executor._max_workers != new_max_workers:

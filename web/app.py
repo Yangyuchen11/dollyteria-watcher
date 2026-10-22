@@ -365,8 +365,16 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
 
         payment_method = (data.get("payment_method") or monitor.config.get("auto_order", {}).get("payment_method", "cod")).strip()
 
+        ao_cfg = monitor.config.get("auto_order", {})
         from hooks.auto_order import AutoOrderHook
-        ao = AutoOrderHook(username=username, password=password, dry_run=True, payment_method=payment_method)
+        ao = AutoOrderHook(
+            username=username,
+            password=password,
+            dry_run=True,
+            payment_method=payment_method,
+            retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
+            max_retries=int(ao_cfg.get("max_retries", 35)),
+        )
         res = ao.execute_checkout(item_id=item_id, dry_run=True, clear_after_dry_run=True, payment_method=payment_method)
         return jsonify(res)
 
@@ -402,13 +410,15 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         else:
             dry_run = bool(dry_run)
 
-        # 独立实例化 AutoOrderHook，绝不修改后台监控的 monitor.auto_order 实例状态，确保两者彻底解耦互不影响
+        # 独立实例化 AutoOrderHook，继承全局 503 重试与并发配置，绝不污染后台监控实例状态
         from hooks.auto_order import AutoOrderHook
         qb_hook = AutoOrderHook(
             username=username,
             password=password,
             dry_run=dry_run,
             payment_method=payment_method,
+            retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
+            max_retries=int(ao_cfg.get("max_retries", 35)),
         )
         res = qb_hook.execute_checkout(
             item_id=item_id,

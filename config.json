@@ -45,7 +45,8 @@
     "drop_times": [],
     "enabled": true,
     "interval_enabled": true,
-    "interval_minutes": 5
+    "interval_minutes": 5,
+    "max_stream_pages": 5
   },
   "watches": [
     {

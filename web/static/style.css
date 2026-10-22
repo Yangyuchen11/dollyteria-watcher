@@ -1013,6 +1013,13 @@ input:checked+.slider:before {
     align-items: center;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     padding-top: 12px;
+    gap: 8px;
+}
+
+.product-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .product-price {
@@ -2691,16 +2698,18 @@ input:checked+.slider:before {
     flex-shrink: 0;
 }
 
-.btn-card-buy.qb-disabled {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px dashed rgba(255, 255, 255, 0.18);
-    color: #94a3b8;
+.btn-card-buy.qb-disabled,
+.btn-feed-quick-buy.qb-disabled {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px dashed rgba(255, 255, 255, 0.18) !important;
+    color: #94a3b8 !important;
     opacity: 0.85;
 }
 
-.btn-card-buy.qb-disabled:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.3);
-    color: #cbd5e1;
-    box-shadow: none;
+.btn-card-buy.qb-disabled:hover,
+.btn-feed-quick-buy.qb-disabled:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.3) !important;
+    color: #cbd5e1 !important;
+    box-shadow: none !important;
 }

@@ -4,6 +4,7 @@
 """
 import time
 import logging
+import threading
 from typing import List, Dict, Callable
 from notifiers.sound import SoundNotifier
 from notifiers.desktop import DesktopNotifier
@@ -73,23 +74,22 @@ class NotifierManager:
         if len(self.recent_events) > 50:
             self.recent_events.pop()
 
-        # 分发到各个激活的通道
-        if self.sound.enabled:
-            self.sound.notify(items, rule)
+        # 异步分发至各个外部网络/系统通知通道，绝不阻塞抢购与主监控轮询
+        def _async_notify():
+            if self.sound.enabled:
+                self.sound.notify(items, rule)
+            if self.desktop.enabled:
+                self.desktop.notify(items, rule)
+            if self.discord.enabled:
+                self.discord.notify(items, rule)
+            if self.line.enabled:
+                self.line.notify(items, rule)
+            if self.email.enabled:
+                self.email.notify(items, rule)
 
-        if self.desktop.enabled:
-            self.desktop.notify(items, rule)
+        threading.Thread(target=_async_notify, name="AsyncNotifyThread", daemon=True).start()
 
-        if self.discord.enabled:
-            self.discord.notify(items, rule)
-
-        if self.line.enabled:
-            self.line.notify(items, rule)
-
-        if self.email.enabled:
-            self.email.notify(items, rule)
-
-        # 推送给 Web UI 监听器
+        # 推送给 Web UI 实时监听器 (SSE，毫秒级就地推送)
         for listener in list(self._listeners):
             try:
                 listener(event)
@@ -117,18 +117,18 @@ class NotifierManager:
         if len(self.recent_events) > 50:
             self.recent_events.pop()
 
-        # 分发到各个激活的通道 (已移除订单成功的音效提示)
-        if self.desktop.enabled and hasattr(self.desktop, "notify_order_success"):
-            self.desktop.notify_order_success(item, order_result, rule_name)
+        # 异步分发到各个激活的外部通道
+        def _async_order_notify():
+            if self.desktop.enabled and hasattr(self.desktop, "notify_order_success"):
+                self.desktop.notify_order_success(item, order_result, rule_name)
+            if self.discord.enabled and hasattr(self.discord, "notify_order_success"):
+                self.discord.notify_order_success(item, order_result, rule_name)
+            if self.line.enabled and hasattr(self.line, "notify_order_success"):
+                self.line.notify_order_success(item, order_result, rule_name)
+            if self.email.enabled and hasattr(self.email, "notify_order_success"):
+                self.email.notify_order_success(item, order_result, rule_name)
 
-        if self.discord.enabled and hasattr(self.discord, "notify_order_success"):
-            self.discord.notify_order_success(item, order_result, rule_name)
-
-        if self.line.enabled and hasattr(self.line, "notify_order_success"):
-            self.line.notify_order_success(item, order_result, rule_name)
-
-        if self.email.enabled and hasattr(self.email, "notify_order_success"):
-            self.email.notify_order_success(item, order_result, rule_name)
+        threading.Thread(target=_async_order_notify, name="AsyncOrderNotifyThread", daemon=True).start()
 
         # 推送给 Web UI 实时监听器 (SSE)
         for listener in list(self._listeners):

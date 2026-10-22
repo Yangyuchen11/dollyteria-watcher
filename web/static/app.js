@@ -43,6 +43,7 @@ const elements = {
     btnAddDropTime: document.getElementById('btn-add-drop-time'),
     schedBurstDuration: document.getElementById('sched-burst-duration'),
     schedBurstInterval: document.getElementById('sched-burst-interval'),
+    schedMaxPages: document.getElementById('sched-max-pages'),
     schedIntervalEnabled: document.getElementById('sched-interval-enabled'),
     schedIntervalMinutes: document.getElementById('sched-interval-minutes'),
     schedDailySyncEnabled: document.getElementById('sched-daily-sync-enabled'),
@@ -756,7 +757,8 @@ function populateScheduleForm() {
     currentDropTimes = [...(s.drop_times || [])];
     renderDropTimesChips();
     if (elements.schedBurstDuration) elements.schedBurstDuration.value = s.burst_duration_sec ?? 180;
-    if (elements.schedBurstInterval) elements.schedBurstInterval.value = s.burst_interval_sec ?? 2.0;
+    if (elements.schedBurstInterval) elements.schedBurstInterval.value = s.burst_interval_sec ?? 0.3;
+    if (elements.schedMaxPages) elements.schedMaxPages.value = s.max_stream_pages ?? 5;
     if (elements.schedIntervalEnabled) elements.schedIntervalEnabled.checked = s.interval_enabled ?? true;
     if (elements.schedIntervalMinutes) elements.schedIntervalMinutes.value = s.interval_minutes ?? 5;
 
@@ -824,17 +826,32 @@ function updateQuickBuyStatusTag() {
     const tag = elements.quickBuyModeTag || document.getElementById('quick-buy-mode-tag');
     const enabled = elements.quickBuyEnabled?.checked ?? false;
     const dryRun = elements.quickBuyDryRun?.checked ?? true;
-    if (!tag) return;
-    if (!enabled) {
-        tag.className = 'status-pill status-idle';
-        tag.textContent = '⚪ 一键下单未启用';
-    } else if (dryRun) {
-        tag.className = 'status-pill status-busy';
-        tag.textContent = '🛡️ 安全仿真测试模式 (Dry-Run)';
-    } else {
-        tag.className = 'status-pill status-bursting';
-        tag.textContent = '🚨 真实下单模式 (已激活)';
+    if (tag) {
+        if (!enabled) {
+            tag.className = 'status-pill status-idle';
+            tag.textContent = '⚪ 一键下单未启用';
+        } else if (dryRun) {
+            tag.className = 'status-pill status-busy';
+            tag.textContent = '🛡️ 安全仿真测试模式 (Dry-Run)';
+        } else {
+            tag.className = 'status-pill status-bursting';
+            tag.textContent = '🚨 真实下单模式 (已激活)';
+        }
     }
+
+    // 同步更新实时发现流所有卡片上的一键购买按钮状态
+    const feedBuyBtns = document.querySelectorAll('.btn-feed-quick-buy');
+    feedBuyBtns.forEach(btn => {
+        if (!enabled) {
+            btn.classList.add('qb-disabled');
+            btn.title = '⚡ 一键购买 (功能未开启，请先在【全站档案】开启一键下单开关)';
+        } else {
+            btn.classList.remove('qb-disabled');
+            btn.title = dryRun
+                ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)'
+                : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)';
+        }
+    });
 }
 
 // 规则 Modal 弹窗逻辑
@@ -941,6 +958,14 @@ function renderProductCard(item, prepend = true) {
         ? `<img class="product-img" src="${imgSrc}" loading="lazy" alt="${escapeHtml(item.title)}">`
         : `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;">无缩略图</div>`;
 
+    const qbCfg = currentConfig?.quick_buy || {};
+    const isQbEnabled = Boolean(qbCfg.enabled);
+    const isQbDry = qbCfg.dry_run !== false;
+    const qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
+    const qbBtnTitle = isQbEnabled
+        ? (isQbDry ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)' : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)')
+        : '⚡ 一键购买 (功能未开启，请先在【全站档案】开启一键下单开关)';
+
     card.innerHTML = `
         <div class="product-img-wrapper">
             ${imgHtml}
@@ -954,9 +979,18 @@ function renderProductCard(item, prepend = true) {
             </div>
             <div class="product-footer">
                 <div class="product-price">${escapeHtml(item.price_str || '￥' + item.price)}</div>
-                <a href="${item.url}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-primary">
-                    查看商品 ↗
-                </a>
+                <div class="product-card-actions">
+                    <button type="button" class="btn btn-sm btn-warning btn-feed-quick-buy ${qbBtnClass}"
+                        data-id="${escapeHtml(item.id)}"
+                        data-title="${escapeHtml(item.title || '')}"
+                        data-price="${escapeHtml(item.price_str || '￥' + item.price)}"
+                        title="${qbBtnTitle}">
+                        ⚡ 一键购买
+                    </button>
+                    <a href="${item.url}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost" title="在官网新标签页查看商品">
+                        官网 ↗
+                    </a>
+                </div>
             </div>
         </div>
     `;
@@ -1246,7 +1280,8 @@ function bindEvents() {
             currentConfig.schedule = currentConfig.schedule || {};
             currentConfig.schedule.drop_times = [...currentDropTimes];
             currentConfig.schedule.burst_duration_sec = parseInt(elements.schedBurstDuration?.value) || 180;
-            currentConfig.schedule.burst_interval_sec = parseFloat(elements.schedBurstInterval?.value) || 2.0;
+            currentConfig.schedule.burst_interval_sec = parseFloat(elements.schedBurstInterval?.value) || 0.3;
+            currentConfig.schedule.max_stream_pages = parseInt(elements.schedMaxPages?.value) || 5;
             currentConfig.schedule.interval_enabled = elements.schedIntervalEnabled?.checked ?? true;
             currentConfig.schedule.interval_minutes = parseFloat(elements.schedIntervalMinutes?.value) || 5;
             currentConfig.schedule.daily_stock_sync = {
@@ -2064,6 +2099,21 @@ function initArchiveModule() {
                 const id = btnCart.getAttribute('data-id');
                 addToWebCart(id);
                 return;
+            }
+        });
+    }
+
+    // 绑定实时发现流卡片上的「⚡ 一键购买」点击事件代理
+    if (elements.feedContainer) {
+        elements.feedContainer.addEventListener('click', (e) => {
+            const btnBuy = e.target.closest('.btn-feed-quick-buy');
+            if (btnBuy) {
+                e.preventDefault();
+                e.stopPropagation();
+                const id = btnBuy.getAttribute('data-id');
+                const title = btnBuy.getAttribute('data-title');
+                const price = btnBuy.getAttribute('data-price');
+                quickBuyItem(id, title, price, btnBuy);
             }
         });
     }

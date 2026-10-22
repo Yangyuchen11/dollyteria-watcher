@@ -67,9 +67,10 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "drop_times": ["20:00:00", "21:00:00"],  # 定点准时触发时间 (支持多个)
         "burst_duration_sec": 180,                 # 触发后密集轮询持续秒数
-        "burst_interval_sec": 2.0,                 # 密集轮询间隔 (秒)
+        "burst_interval_sec": 0.3,                 # 密集轮询间隔 (秒)
         "interval_minutes": 5,                     # 日常平缓轮询间隔 (分钟)
         "interval_enabled": True,                  # 是否开启日常平缓轮询
+        "max_stream_pages": 5,                     # 上新流最大翻页深度 (每页100件，默认5页覆盖500件)
     },
     "notifications": {
         "sound_enabled": True,
@@ -263,12 +264,16 @@ class DollyteriaMonitor:
         logger.info("正在建立当前库存基准线，抓取当前商品...")
         seen_set = set(self.state.get("seen_ids", []))
         try:
-            # 抓取当前最新的上新流 100 件
-            items = self.scraper.fetch_new_arrivals(num=100, in_stock_only=True)
-            for it in items:
-                seen_set.add(it["id"])
-            if items:
+            # 抓取当前最新的上新流 (前 5 页，覆盖最多 500 件在售商品)
+            for p in range(1, 6):
+                items = self.scraper.fetch_new_arrivals(num=100, page=p, in_stock_only=True)
+                if not items:
+                    break
+                for it in items:
+                    seen_set.add(it["id"])
                 self.archive_db.upsert_batch(items)
+                if len(items) < 100:
+                    break
 
             # 抓取所有监控规则的搜索结果第 1 页
             for rule in self.config.get("watches", []):
@@ -427,63 +432,87 @@ class DollyteriaMonitor:
             needs_new_stream = is_burst or any(r.get("search_mode", "both") in ["new_stream", "both"] for r in active_rules)
 
             if needs_new_stream:
-                logger.info(f"⚡ 正在抓取 Dollyteria /new 页面最新上新流 ({'爆发抢购模式' if is_burst else '常规巡检'})...")
-                new_arrivals = self.scraper.fetch_new_arrivals(num=100, in_stock_only=True)
-                for it in new_arrivals:
-                    pool_items[it["id"]] = it
+                # 针对 Dollyteria 一次上新 300~500 件的大批量上新，采用「逐页流式匹配 + 智能早停」机制：
+                # 1. 抓取第 1 页 (最新 100 件) -> 本地内存比对 -> 命中则零延迟直接触发并发抢购与提醒！
+                # 2. 检查当前页是否有已记录过的历史商品 (seen_set)：
+                #    - 若当前页中途出现了已见商品，说明此次大上新全部在该页截断，无需继续翻页，毫秒级直接结束！
+                #    - 若当前页所有商品全部为全新商品 (说明上新数量超过 100 件溢出至下一页)，自动顺延拉取第 2 页、第 3 页 (最高可达 max_stream_pages，默认 5 页即 500 件)
+                # 每页一旦匹配到规则立即触发抢购，绝不等待后续页面！
+                max_pages = int(self.config.get("schedule", {}).get("max_stream_pages", 5))
+                for page_idx in range(1, max_pages + 1):
+                    logger.info(f"⚡ 正在抓取 Dollyteria /new 页面最新上新流 (第 {page_idx}/{max_pages} 页, {'爆发抢购' if is_burst else '常规巡检'})...")
+                    new_arrivals = self.scraper.fetch_new_arrivals(num=100, page=page_idx, in_stock_only=True)
+                    if not new_arrivals:
+                        break
 
-                # 【Pipeline 流式立即加购与匹配机制】：
-                # 抓取到 /new 后立刻在本地内存比对所有规则，毫秒级就地触发自动下单与提醒，绝不等待后续任何网络请求！
-                stage1_matches = []
-                for it in new_arrivals:
-                    if it["id"] in seen_set:
-                        continue
-                    # 遍历规则寻找匹配 (优先匹配开启了自动下单的规则)
-                    matched_rule = None
-                    for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
-                        if not is_burst and rule.get("search_mode", "both") == "keyword_search":
-                            continue
-                        if self._matches_rule(it, rule):
-                            matched_rule = rule
-                            break
-                    if matched_rule:
-                        stage1_matches.append((it, matched_rule))
+                    for it in new_arrivals:
+                        pool_items[it["id"]] = it
 
-                if stage1_matches:
-                    logger.info(f"✨ [/new 实时流式命中] 发现 {len(stage1_matches)} 件符合规则的有货新商品！")
+                    # 区分当前页全新商品与已见商品
+                    page_new_items = []
+                    has_seen_in_page = False
+                    for it in new_arrivals:
+                        if it["id"] in seen_set:
+                            has_seen_in_page = True
+                        else:
+                            page_new_items.append(it)
 
-                    # 立即触发自动下单 (多线程并发抢购)
-                    if self.config.get("auto_order", {}).get("enabled", False):
-                        auto_order_tasks = [(it, r) for it, r in stage1_matches if r.get("auto_order", False)]
-                        if auto_order_tasks:
-                            logger.info(f"⚡ [流式立即下单] 触发 {len(auto_order_tasks)} 件新商品的自动抢购流水线...")
-                            self._execute_auto_orders_concurrent(auto_order_tasks)
-                        non_ao_rules = {r.get("name") for it, r in stage1_matches if not r.get("auto_order", False)}
-                        for nr in non_ao_rules:
-                            logger.info(f"ℹ️ 规则 [{nr}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
+                    # 对全新商品执行规则匹配
+                    stage_matches = []
+                    for it in page_new_items:
+                        matched_rule = None
+                        for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
+                            if not is_burst and rule.get("search_mode", "both") == "keyword_search":
+                                continue
+                            if self._matches_rule(it, rule):
+                                matched_rule = rule
+                                break
+                        if matched_rule:
+                            stage_matches.append((it, matched_rule))
 
-                    # 分组分发各渠道提醒
-                    rule_groups = {}
-                    for it, r in stage1_matches:
-                        rule_groups.setdefault(r["id"], {"rule": r, "items": []})["items"].append(it)
-                    for r_data in rule_groups.values():
-                        self.notifier.dispatch(r_data["items"], r_data["rule"])
+                    if stage_matches:
+                        logger.info(f"✨ [/new 实时流式命中 (第 {page_idx} 页)] 发现 {len(stage_matches)} 件符合规则的有货新商品！")
 
-                    # 记录至历史动态与已见缓存
-                    for it, r in stage1_matches:
+                        # 立即触发自动下单 (多线程并发抢购，非阻塞)
+                        if self.config.get("auto_order", {}).get("enabled", False):
+                            auto_order_tasks = [(it, r) for it, r in stage_matches if r.get("auto_order", False)]
+                            if auto_order_tasks:
+                                logger.info(f"⚡ [流式立即下单] 触发 {len(auto_order_tasks)} 件新商品的自动抢购流水线...")
+                                self._execute_auto_orders_concurrent(auto_order_tasks)
+                            non_ao_rules = {r.get("name") for it, r in stage_matches if not r.get("auto_order", False)}
+                            for nr in non_ao_rules:
+                                logger.info(f"ℹ️ 规则 [{nr}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
+
+                        # 分组分发各渠道提醒
+                        rule_groups = {}
+                        for it, r in stage_matches:
+                            rule_groups.setdefault(r["id"], {"rule": r, "items": []})["items"].append(it)
+                        for r_data in rule_groups.values():
+                            self.notifier.dispatch(r_data["items"], r_data["rule"])
+
+                        # 记录至历史动态与已见缓存
+                        for it, r in stage_matches:
+                            seen_set.add(it["id"])
+                            hist_entry = dict(it)
+                            hist_entry["rule_name"] = r.get("name")
+                            self.state.setdefault("history", []).insert(0, hist_entry)
+                            total_new_matches.append(it)
+
+                        # 立即保存状态与归档，确保断电或异常不丢
+                        self.state["seen_ids"] = list(seen_set)
+                        self._save_state()
+                        try:
+                            self.archive_db.upsert_batch([it for it, r in stage_matches])
+                        except Exception as e:
+                            logger.warning(f"同步流式命中商品至归档库失败: {e}")
+
+                    # 将该页未命中的全新商品也加入 seen_set，避免下一次循环重复判断
+                    for it in page_new_items:
                         seen_set.add(it["id"])
-                        hist_entry = dict(it)
-                        hist_entry["rule_name"] = r.get("name")
-                        self.state.setdefault("history", []).insert(0, hist_entry)
-                        total_new_matches.append(it)
 
-                    # 立即保存状态与归档，确保断电或异常不丢
-                    self.state["seen_ids"] = list(seen_set)
-                    self._save_state()
-                    try:
-                        self.archive_db.upsert_batch([it for it, r in stage1_matches])
-                    except Exception as e:
-                        logger.warning(f"同步流式命中商品至归档库失败: {e}")
+                    # 智能早停：当前页包含已见商品，说明此次大上新到此为止已全部接驳完毕；或当前页已不足100件
+                    if has_seen_in_page or len(new_arrivals) < 100:
+                        break
 
             # 2. 关键词全店搜索 (/product-list/?keyword=...)
             # 核心策略：爆发抢购模式下专攻 /new 主干道，完全跳过耗时的关键词全店搜索，杜绝 503 官网限流！

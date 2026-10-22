@@ -74,6 +74,7 @@ class DiscordNotifier(BaseNotifier):
             "content": f"🚨 **Dollyteria 上新提醒**：规则 【**{rule_name}**】 命中 {len(items)} 件新在售商品！",
             "embeds": embeds,
         }
+        return self._send_webhook(payload)
 
     def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
         """推送自动下单成功专属高优先级通知"""

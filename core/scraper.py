@@ -142,13 +142,16 @@ class DollyteriaScraper:
 
         return items
 
-    def fetch_new_arrivals(self, num: int = 100, in_stock_only: bool = True) -> List[Dict]:
+    def fetch_new_arrivals(self, num: int = 100, page: int = 1, in_stock_only: bool = True) -> List[Dict]:
         """
         抓取 Dollyteria 最新的上新流 (/new)
-        这是最快获悉最新上架商品的方式，上新点往往第一时间出现在此
+        这是最快获悉最新上架商品的方式，上新点往往第一时间出现在此。
+        支持分页: page=1 (前100件), page=2 (101~200件), page=3 (201~300件)...
         """
         url = f"{BASE_URL}/new"
         params = {"num": str(num)}
+        if page > 1:
+            params["page"] = str(page)
         if in_stock_only:
             params["available"] = "1"
 

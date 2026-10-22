@@ -1725,9 +1725,6 @@ function renderArchiveProducts(items) {
 
     grid.innerHTML = items.map(it => {
         const isStock = it.is_in_stock;
-        const stockBadge = isStock
-            ? '<span class="arch-stock-badge in-stock">🟢 在售</span>'
-            : '<span class="arch-stock-badge sold-out">⚪ 已售罄</span>';
 
         const soldOutOverlay = !isStock
             ? `<div class="arch-soldout-overlay">
@@ -1742,7 +1739,6 @@ function renderArchiveProducts(items) {
         return `
             <div class="arch-card ${isStock ? '' : 'is-sold-out'}">
                 <div class="arch-card-thumb-wrap">
-                    ${stockBadge}
                     ${soldOutOverlay}
                     <img src="${escapeHtml(imgSrc)}"
                          alt="${escapeHtml(it.title || '')}"

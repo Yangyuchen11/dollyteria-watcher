@@ -86,6 +86,10 @@ class DollyteriaScheduler:
         remaining = int((next_dt - now).total_seconds())
         return (next_label, remaining)
 
+    def get_next_drop_countdown(self) -> Tuple[Optional[str], int]:
+        """获取下一个定点上新触发时间及剩余秒数"""
+        return self._get_next_drop_info()
+
     def trigger_burst(self, duration_sec: Optional[int] = None):
         """立即手动开启爆发模式 (如测试或手动赶上新)"""
         sched_cfg = self.monitor.config.get("schedule", {})
@@ -95,7 +99,7 @@ class DollyteriaScheduler:
         logger.info(f"⚡ 爆发模式 (Burst Mode) 已开启！将持续高频检测 {dur} 秒。")
         # 预先登录并储备备用 Worker 会话，保障爆发抢购零秒出击
         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
-            self.monitor.auto_order.preload_standby_workers(count=2)
+            self.monitor.auto_order.preload_standby_workers()
 
     def _run_loop(self):
         """调度主循环：每秒唤醒一次评估时间"""
@@ -112,7 +116,7 @@ class DollyteriaScheduler:
                 # 1. 检查爆发模式 (Burst Mode)
                 if self.is_bursting:
                     if now_ts < self.burst_end_time:
-                        burst_interval = float(sched_cfg.get("burst_interval_sec", 2.0))
+                        burst_interval = float(sched_cfg.get("burst_interval_sec", 0.3))
                         if now_ts - self.last_burst_check >= burst_interval:
                             self.last_burst_check = now_ts
                             logger.info(f"⚡ [爆发模式] 正在进行高频检测 (剩余 {int(self.burst_end_time - now_ts)}s)...")
@@ -126,10 +130,10 @@ class DollyteriaScheduler:
                 today_str = now.strftime("%Y-%m-%d")
 
                 # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前登录预热备用 Worker 会话
-                _, rem_drop_sec = self.get_next_drop_countdown()
+                _, rem_drop_sec = self._get_next_drop_info()
                 if 1 <= rem_drop_sec <= 20:
                     if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
-                        self.monitor.auto_order.preload_standby_workers(count=2)
+                        self.monitor.auto_order.preload_standby_workers()
 
                 for dt_str in drop_times:
                     parts = [int(p) for p in dt_str.strip().split(":") if p.strip().isdigit()]

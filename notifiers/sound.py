@@ -37,27 +37,6 @@ class SoundNotifier(BaseNotifier):
         thread.start()
         return True
 
-    def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
-        """播放自动下单成功专属音效 (五音阶欢快号角)"""
-        if not self.enabled:
-            return False
-
-        def _play_fanfare():
-            try:
-                if sys.platform == "win32":
-                    import winsound
-                    # 胜利号角音阶 (C5 -> E5 -> G5 -> C6 -> E6)
-                    tones = [(523, 100), (659, 100), (784, 120), (1046, 160), (1318, 300)]
-                    for freq, dur in tones:
-                        winsound.Beep(freq, dur)
-                else:
-                    print("\a\a\a", end="", flush=True)
-            except Exception as e:
-                logger.debug(f"播放下单胜利音效失败: {e}")
-
-        thread = threading.Thread(target=_play_fanfare, daemon=True)
-        thread.start()
-        return True
 
     def test(self):
         """测试音效"""

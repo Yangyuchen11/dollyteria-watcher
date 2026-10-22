@@ -861,9 +861,8 @@ function initSSE() {
             const data = JSON.parse(event.data);
             if (data.type === 'connected') return;
 
-            // 收到自动下单成功事件
+            // 收到自动下单成功事件 (静默弹窗，不播放声音)
             if (data.type === 'order_success') {
-                playWebChime();
                 const item = data.item || {};
                 showToast(`🎉 【自动下单成功】已成功为您抢到: ${item.title || item.id}！`, 'success');
                 return;

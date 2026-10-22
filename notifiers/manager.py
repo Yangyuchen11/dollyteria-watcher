@@ -117,10 +117,7 @@ class NotifierManager:
         if len(self.recent_events) > 50:
             self.recent_events.pop()
 
-        # 分发到各个激活的通道
-        if self.sound.enabled and hasattr(self.sound, "notify_order_success"):
-            self.sound.notify_order_success(item, order_result, rule_name)
-
+        # 分发到各个激活的通道 (已移除订单成功的音效提示)
         if self.desktop.enabled and hasattr(self.desktop, "notify_order_success"):
             self.desktop.notify_order_success(item, order_result, rule_name)
 

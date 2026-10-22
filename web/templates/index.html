@@ -392,7 +392,7 @@
                         <div class="alert-icon">ℹ️</div>
                         <div class="alert-content">
                             <strong>关于自动下单与代金引换安全机制：</strong>
-                            <p>系统已接入 Dollyteria (おちゃのこネット) 专属加购与结算流水线。自动在结算页匹配勾选 <strong>代金引換 (COD)</strong> 或 <strong>店頭支払</strong>。开启 <strong>Dry-Run (安全仿真)</strong> 模式时，会走通真实结算链路并推进至<strong>下单前最终确认页 (/cart/confirm)</strong>，并在提交最终订单购买按钮前严格安全拦截，绝不发生实际扣款或订单！</p>
+                            <p>系统已接入 Dollyteria (おちゃのこネット) 专属加购与结算流水线。自动在结算页匹配勾选 <strong>代金引換 (COD)</strong>、<strong>銀行振込</strong> 或 <strong>店頭支払</strong>。开启 <strong>Dry-Run (安全仿真)</strong> 模式时，会走通真实结算链路并推进至<strong>下单前最终确认页 (/cart/confirm)</strong>，并在提交最终订单购买按钮前严格安全拦截，绝不发生实际扣款或订单！</p>
                         </div>
                     </div>
 
@@ -433,6 +433,20 @@
                                             </div>
                                         </div>
                                         <div class="option-desc">送货上门时代收现金或刷卡，免去繁琐在线支付验证，极速加购锁单。需缴纳代金引换手续费（通常为330円起）。</div>
+                                    </div>
+                                </label>
+
+                                <label class="payment-option-card">
+                                    <input type="radio" name="ao-payment-method" id="ao-pay-bank" value="bank_transfer">
+                                    <div class="option-content">
+                                        <div class="option-header">
+                                            <span class="option-icon">🏦</span>
+                                            <div>
+                                                <div class="option-title">銀行振込 (银行汇款 / 前払い)</div>
+                                                <div class="option-sub">账户转账 • 自动锁定 pay_procedure=1</div>
+                                            </div>
+                                        </div>
+                                        <div class="option-desc">日本国内银行账户汇款（前付款）。下单秒速锁定库存，等待店家确认邮件起 4 日内转账，免收 330円 代引手续费。</div>
                                     </div>
                                 </label>
 
@@ -500,6 +514,7 @@
                                 <label class="form-label">本次测试支付方式</label>
                                 <select id="ao-test-pay-select" class="form-control">
                                     <option value="cod">📦 代金引換 (pay_procedure=3)</option>
+                                    <option value="bank_transfer">🏦 銀行振込 (pay_procedure=1)</option>
                                     <option value="store_pickup">🏬 店頭支払 (pay_procedure=8)</option>
                                 </select>
                             </div>

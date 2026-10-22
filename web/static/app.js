@@ -708,13 +708,16 @@ function populateAutoOrderForm() {
 
     const pm = ao.payment_method || 'cod';
     const radioCod = document.getElementById('ao-pay-cod');
+    const radioBank = document.getElementById('ao-pay-bank');
     const radioStore = document.getElementById('ao-pay-store');
     if (radioCod && radioStore) {
-        if (pm === 'store_pickup') radioStore.checked = true;
-        else radioCod.checked = true;
+        if (pm === 'store_pickup' || pm === 'store') radioStore.checked = true;
+        else if (pm === 'bank_transfer' || pm === 'bank' || pm === '銀行振込') {
+            if (radioBank) radioBank.checked = true;
+        } else radioCod.checked = true;
     }
     if (elements.aoTestPaySelect) {
-        elements.aoTestPaySelect.value = pm;
+        elements.aoTestPaySelect.value = (pm === 'bank' || pm === '銀行振込') ? 'bank_transfer' : pm;
     }
     updateAoModeBanner();
 }
@@ -1231,7 +1234,7 @@ function bindEvents() {
             const payMethod = elements.aoTestPaySelect ? elements.aoTestPaySelect.value : (
                 document.querySelector('input[name="ao-payment-method"]:checked')?.value || 'cod'
             );
-            const payName = payMethod === 'store_pickup' ? '店頭支払' : '代金引換';
+            const payName = payMethod === 'store_pickup' ? '店頭支払' : (payMethod === 'bank_transfer' ? '銀行振込' : '代金引換');
 
             elements.btnTestDryRunOrder.disabled = true;
             elements.btnTestDryRunOrder.textContent = '⏳ 正在全流程仿真测试中...';
@@ -1963,7 +1966,9 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     // 独立使用 quick_buy 的仿真模式设置，完全与 auto_order.dry_run 隔离
     const isDry = qbCfg.dry_run !== false;
     const payMethod = aoCfg.payment_method || 'cod';
-    const payName = (payMethod === 'store_pickup' || payMethod === 'store') ? '店頭支払 (到店付款)' : '代金引換 (货到付款)';
+    let payName = '代金引換 (货到付款)';
+    if (payMethod === 'store_pickup' || payMethod === 'store') payName = '店頭支払 (到店付款)';
+    else if (payMethod === 'bank_transfer' || payMethod === 'bank' || payMethod === '銀行振込') payName = '銀行振込 (银行汇款)';
 
     const modeTip = isDry
         ? '【🛡️ Dry-Run 仿真测试模式】\n系统将自动模拟登录、秒级加购、选择地址与支付方式全流程，并在最终购买确认前安全拦截，提取详细费用明细，绝对不会扣款或产生订单！'

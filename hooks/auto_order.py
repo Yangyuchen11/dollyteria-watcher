@@ -118,10 +118,18 @@ class AutoOrderHook:
         推进结算流程并自动选择指定支付方式【代金引換 / 店頭支払】，直达下单前确认页面 (/cart/confirm)
         """
         method = (payment_method or self.payment_method or "cod").lower()
-        is_store_pickup = method in ["store_pickup", "store", "店頭", "店頭支払"]
-        target_method_name = "店頭支払" if is_store_pickup else "代金引換"
-        fallback_pay_val = "8" if is_store_pickup else "3"
-        keywords = ["店頭支払", "店頭にてお支払", "店頭"] if is_store_pickup else ["代金引換", "代引", "e-コレクト"]
+        if method in ["bank", "bank_transfer", "bank_wire", "銀行振込", "振込"]:
+            target_method_name = "銀行振込"
+            fallback_pay_val = "1"
+            keywords = ["銀行振込", "振込"]
+        elif method in ["store_pickup", "store", "店頭", "店頭支払"]:
+            target_method_name = "店頭支払"
+            fallback_pay_val = "8"
+            keywords = ["店頭支払", "店頭にてお支払", "店頭"]
+        else:
+            target_method_name = "代金引換"
+            fallback_pay_val = "3"
+            keywords = ["代金引換", "代引", "e-コレクト"]
 
         try:
             # 1. 访问客户/结算入口 (/cart/customer)
@@ -272,10 +280,13 @@ class AutoOrderHook:
                 elif nxt != ":":
                     payment_method_confirmed = nxt
 
-        # 如果是店頭支払，cod_fee 为 0円 (无手续费)
+        # 如果是店頭支払或銀行振込，cod_fee 为 0円 (无代金引换手续费)
         is_store_pickup = "店頭支払" in payment_method_confirmed or "店頭" in payment_method_confirmed
+        is_bank_transfer = "銀行振込" in payment_method_confirmed or "振込" in payment_method_confirmed
         if is_store_pickup:
             cod_fee = "0円 (无需手续费)"
+        elif is_bank_transfer:
+            cod_fee = "0円 (无需代引手续费)"
         elif not cod_fee:
             cod_fee = "330円 (代引手数料)"
 
@@ -293,6 +304,7 @@ class AutoOrderHook:
             "payment_method": payment_method_confirmed,
             "is_cod_verified": ("代金引換" in payment_method_confirmed or "代引" in payment_method_confirmed),
             "is_store_pickup": is_store_pickup,
+            "is_bank_transfer": is_bank_transfer,
             "has_policy_agree": has_policy_agree,
             "confirm_url": resp.url,
         }
@@ -324,7 +336,12 @@ class AutoOrderHook:
         t0 = time.time()
         steps_log = []
 
-        target_name = "店頭支払" if method in ["store_pickup", "store", "店頭", "店頭支払"] else "代金引換"
+        if method in ["bank", "bank_transfer", "bank_wire", "銀行振込", "振込"]:
+            target_name = "銀行振込"
+        elif method in ["store_pickup", "store", "店頭", "店頭支払"]:
+            target_name = "店頭支払"
+        else:
+            target_name = "代金引換"
         logger.info(f"⚡ [Auto-Order 启动] 目标商品 [{item_id}] (指定支付: 【{target_name}】, 模式: {'🛡️ Dry-Run 仿真测试' if is_dry else '🚨 真实下单模式'})")
         steps_log.append(f"启动自动下单流水线 (指定支付: 【{target_name}】, 模式: {'Dry-Run 仿真' if is_dry else '真实下单'})")
 

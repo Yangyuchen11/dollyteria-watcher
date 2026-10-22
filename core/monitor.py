@@ -417,16 +417,20 @@ class DollyteriaMonitor:
                     # 分发各渠道提醒
                     self.notifier.dispatch(unseen_items, rule)
 
-                    # 自动下单 Hook
+                    # 自动下单 Hook (需全局总开关开启且该监控规则勾选了专属自动购买)
                     if self.config.get("auto_order", {}).get("enabled", False):
-                        for u in unseen_items:
-                            order_res = self.auto_order.on_item_matched(u, rule)
-                            if order_res and order_res.get("success"):
-                                # 联动通知渠道扩展分发下单成功通知 (Discord/邮件/桌面/Line/音效)
-                                try:
-                                    self.notifier.dispatch_order_success(item=u, order_result=order_res, rule=rule)
-                                except Exception as e:
-                                    logger.error(f"分发下单成功通知异常: {e}")
+                        if rule.get("auto_order", False):
+                            logger.info(f"⚡ [Auto-Order] 规则 [{rule.get('name')}] 已加入自动购买名单，正在触发自动下单流水线...")
+                            for u in unseen_items:
+                                order_res = self.auto_order.on_item_matched(u, rule)
+                                if order_res and order_res.get("success"):
+                                    # 联动通知渠道扩展分发下单成功通知 (Discord/邮件/桌面/Line/音效)
+                                    try:
+                                        self.notifier.dispatch_order_success(item=u, order_result=order_res, rule=rule)
+                                    except Exception as e:
+                                        logger.error(f"分发下单成功通知异常: {e}")
+                        else:
+                            logger.info(f"ℹ️ 规则 [{rule.get('name')}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
 
                     # 记录至历史动态
                     for u in unseen_items:

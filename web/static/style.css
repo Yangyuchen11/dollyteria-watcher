@@ -419,6 +419,136 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
+    gap: 12px;
+}
+
+/* 监控提醒与自动下单双开关聚合胶囊 */
+.watch-switch-cluster {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 30px;
+    padding: 3px 6px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+}
+
+.watch-switch-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 6px;
+    border-radius: 20px;
+    transition: var(--transition);
+}
+
+.watch-switch-item .switch-icon {
+    font-size: 13px;
+    line-height: 1;
+}
+
+.watch-switch-item .switch-text {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    user-select: none;
+    white-space: nowrap;
+}
+
+.watch-switch-item.auto-active {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.watch-switch-item.auto-active .switch-text {
+    color: #34d399;
+    font-weight: 600;
+}
+
+.watch-switch-item.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.watch-switch-cluster .switch-divider {
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 1px;
+}
+
+/* 规则运行状态徽标 */
+.rule-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+.rule-status-badge.status-notify-only {
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    color: #93c5fd;
+}
+
+.rule-status-badge.status-live-buy {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #6ee7b7;
+}
+
+.rule-status-badge.status-dry-run {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #fde68a;
+}
+
+.rule-status-badge.status-standby {
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    color: #cbd5e1;
+}
+
+.rule-status-badge.status-paused {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
+}
+
+/* 紧凑型 Switch 与绿色 Slider */
+.switch.switch-sm {
+    width: 32px;
+    height: 18px;
+}
+
+.switch.switch-sm .slider {
+    border-radius: 20px;
+}
+
+.switch.switch-sm .slider:before {
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    bottom: 2px;
+}
+
+.switch.switch-sm input:checked + .slider:before {
+    transform: translateX(14px);
+}
+
+.slider.slider-emerald {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+input:checked + .slider.slider-emerald {
+    background-color: #10b981;
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
 }
 
 .watch-title-group {
@@ -1033,18 +1163,26 @@ input:checked + .slider:before {
 /* 支付方式与 Dry-Run 仿真面板样式 */
 .payment-options-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+
+@media (max-width: 900px) {
+    .payment-options-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .payment-option-card {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
     position: relative;
     cursor: pointer;
     border-radius: var(--radius-md);
     border: 1px solid rgba(255, 255, 255, 0.1);
     background: rgba(255, 255, 255, 0.03);
-    padding: 14px 16px;
+    padding: 13px 14px;
     transition: var(--transition);
 }
 

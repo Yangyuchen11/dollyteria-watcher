@@ -11,6 +11,7 @@
       "max_price": 0,
       "search_mode": "both",
       "match_mode": "all",
+      "auto_order": false,
       "enabled": true
     }
   ],

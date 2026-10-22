@@ -500,6 +500,27 @@ function renderWatches() {
             ? '📌 模式：必须同时包含以上所有词 (联合搜索)'
             : '📌 模式：包含以上任意一个词即可';
 
+        const autoOrderEnabled = Boolean(rule.auto_order);
+        const globalAoEnabled = Boolean(currentConfig.auto_order?.enabled);
+        const isDryRun = currentConfig.auto_order?.dry_run !== false;
+
+        let statusBadgeHtml = '';
+        if (!rule.enabled) {
+            statusBadgeHtml = '<span class="rule-status-badge status-paused" title="规则已停用，不参与检测与提醒">⏸️ 已暂停监控</span>';
+        } else if (autoOrderEnabled) {
+            if (globalAoEnabled) {
+                if (isDryRun) {
+                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截)">🛡️ 自动购买适用 (仿真测试)</span>';
+                } else {
+                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，命中时将自动以真实订单下单！">🚨 自动抢购适用 (真实下单)</span>';
+                }
+            } else {
+                statusBadgeHtml = '<span class="rule-status-badge status-standby" title="已开启自动购买，但自动下单全局总开关未开启，当前仅发送提醒">🛒 自动购买就绪 (全局未开)</span>';
+            }
+        } else {
+            statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 仅提醒 (不自动购买)</span>';
+        }
+
         card.innerHTML = `
             <div>
                 <div class="watch-card-top">
@@ -508,12 +529,30 @@ function renderWatches() {
                             <div class="watch-name">${escapeHtml(rule.name)}</div>
                             ${matchBadge}
                         </div>
-                        <span class="watch-mode-tag">${modeMap[rule.search_mode] || '综合检索'}</span>
+                        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px;">
+                            <span class="watch-mode-tag">${modeMap[rule.search_mode] || '综合检索'}</span>
+                            ${statusBadgeHtml}
+                        </div>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" class="watch-toggle" data-idx="${idx}" ${rule.enabled ? 'checked' : ''}>
-                        <span class="slider"></span>
-                    </label>
+                    <div class="watch-switch-cluster">
+                        <div class="watch-switch-item" title="监控与提醒总开关：开启后持续检测新上架并发送通知">
+                            <span class="switch-icon">🔔</span>
+                            <span class="switch-text">提醒</span>
+                            <label class="switch switch-sm">
+                                <input type="checkbox" class="watch-toggle" data-idx="${idx}" ${rule.enabled ? 'checked' : ''}>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="switch-divider"></div>
+                        <div class="watch-switch-item ${autoOrderEnabled ? 'auto-active' : ''} ${!rule.enabled ? 'disabled' : ''}" title="专属自动购买开关：开启时此商品纳入自动购买名单；关闭时无论全局设置如何仅发送提醒">
+                            <span class="switch-icon">🛒</span>
+                            <span class="switch-text">自动购买</span>
+                            <label class="switch switch-sm">
+                                <input type="checkbox" class="watch-auto-buy-toggle" data-idx="${idx}" ${autoOrderEnabled ? 'checked' : ''} ${!rule.enabled ? 'disabled' : ''}>
+                                <span class="slider slider-emerald"></span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
                 <div class="watch-tag-list">
                     ${kws}
@@ -554,6 +593,23 @@ function renderWatches() {
             currentConfig.watches[idx].enabled = e.target.checked;
             saveConfig(true);
             renderWatches();
+        });
+    });
+
+    elements.watchesContainer.querySelectorAll('.watch-auto-buy-toggle').forEach(chk => {
+        chk.addEventListener('change', (e) => {
+            const idx = parseInt(e.target.dataset.idx);
+            const isChecked = e.target.checked;
+            currentConfig.watches[idx].auto_order = isChecked;
+            saveConfig(true);
+            renderWatches();
+            const ruleName = currentConfig.watches[idx].name;
+            if (isChecked) {
+                const globalOn = currentConfig.auto_order?.enabled;
+                showToast(`已将 [${ruleName}] 加入自动购买名单${globalOn ? '（全局自动下单已就绪）' : '（注：需在自动下单接口开启总开关）'}`, 'success');
+            } else {
+                showToast(`已将 [${ruleName}] 设为【仅提醒模式】（命中时绝不自动下单）`, 'info');
+            }
         });
     });
 
@@ -766,6 +822,8 @@ function openRuleModal(rule = null) {
         elements.modalRuleMinPrice.value = rule.min_price || 0;
         elements.modalRuleMaxPrice.value = rule.max_price || 0;
         elements.modalRuleSearchMode.value = rule.search_mode || 'both';
+        const autoOrderChk = document.getElementById('modal-rule-auto-order');
+        if (autoOrderChk) autoOrderChk.checked = Boolean(rule.auto_order);
     } else {
         elements.modalTitle.textContent = '添加监控规则';
         elements.modalRuleId.value = 'w_' + Date.now();
@@ -775,6 +833,8 @@ function openRuleModal(rule = null) {
         elements.modalRuleMinPrice.value = 0;
         elements.modalRuleMaxPrice.value = 0;
         elements.modalRuleSearchMode.value = 'both';
+        const autoOrderChk = document.getElementById('modal-rule-auto-order');
+        if (autoOrderChk) autoOrderChk.checked = false;
     }
     elements.ruleModal.style.display = 'flex';
 }
@@ -807,6 +867,8 @@ function saveRuleFromModal() {
     const selectedRadio = document.querySelector('input[name="modal-rule-match-mode"]:checked');
     const matchMode = selectedRadio ? selectedRadio.value : 'all';
 
+    const autoOrderVal = document.getElementById('modal-rule-auto-order')?.checked ?? false;
+
     const existingIdx = currentConfig.watches.findIndex(r => r.id === ruleId);
     const ruleObj = {
         id: ruleId,
@@ -817,6 +879,7 @@ function saveRuleFromModal() {
         max_price: maxPrice,
         search_mode: searchMode,
         match_mode: matchMode,
+        auto_order: autoOrderVal,
         enabled: existingIdx >= 0 ? currentConfig.watches[existingIdx].enabled : true
     };
 

@@ -472,6 +472,42 @@ body {
     border-style: dashed;
 }
 
+/* 提醒模式：保持原有卡片背景色与边框不变 */
+.watch-card.mode-notify {
+    background: var(--bg-surface);
+    border-color: var(--border-color);
+}
+
+/* 仿真抢购卡片：低饱和度、低亮度浅蓝底色，不影响原有内容阅读 */
+.watch-card.mode-dry-run {
+    background: linear-gradient(145deg, rgba(22, 42, 68, 0.78), rgba(15, 30, 52, 0.82));
+    border-color: rgba(56, 130, 214, 0.28);
+}
+
+.watch-card.mode-dry-run:hover {
+    border-color: rgba(96, 165, 250, 0.48);
+    box-shadow: 0 10px 30px rgba(16, 38, 70, 0.45);
+}
+
+.watch-card.mode-dry-run .watch-card-footer {
+    border-top-color: rgba(56, 130, 214, 0.16);
+}
+
+/* 真实抢购模式卡片：低饱和度、低亮度浅绿底色，不影响原有内容阅读 */
+.watch-card.mode-live-buy {
+    background: linear-gradient(145deg, rgba(18, 48, 38, 0.78), rgba(13, 34, 27, 0.82));
+    border-color: rgba(52, 211, 153, 0.28);
+}
+
+.watch-card.mode-live-buy:hover {
+    border-color: rgba(52, 211, 153, 0.48);
+    box-shadow: 0 10px 30px rgba(12, 40, 28, 0.45);
+}
+
+.watch-card.mode-live-buy .watch-card-footer {
+    border-top-color: rgba(52, 211, 153, 0.16);
+}
+
 .watch-card-top {
     display: flex;
     justify-content: flex-start;
@@ -537,45 +573,38 @@ body {
     margin: 0 1px;
 }
 
-/* 规则运行状态徽标 */
+/* 规则运行状态文字：去除胶囊边框底色，直接以清晰小字展示 */
 .rule-status-badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: var(--radius-full);
+    gap: 5px;
+    font-size: 12px;
     font-weight: 500;
     line-height: 1.4;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    user-select: none;
 }
 
 .rule-status-badge.status-notify-only {
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.25);
-    color: #93c5fd;
+    color: var(--text-secondary);
 }
 
 .rule-status-badge.status-live-buy {
-    background: rgba(16, 185, 129, 0.15);
-    border: 1px solid rgba(16, 185, 129, 0.4);
     color: #6ee7b7;
 }
 
 .rule-status-badge.status-dry-run {
-    background: rgba(245, 158, 11, 0.15);
-    border: 1px solid rgba(245, 158, 11, 0.35);
-    color: #fde68a;
+    color: #93c5fd;
 }
 
 .rule-status-badge.status-standby {
-    background: rgba(148, 163, 184, 0.12);
-    border: 1px solid rgba(148, 163, 184, 0.25);
     color: #cbd5e1;
 }
 
 .rule-status-badge.status-paused {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.2);
     color: #fca5a5;
 }
 

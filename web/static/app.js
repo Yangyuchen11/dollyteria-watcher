@@ -470,7 +470,6 @@ function renderWatches() {
 
     currentConfig.watches.forEach((rule, idx) => {
         const card = document.createElement('div');
-        card.className = `watch-card ${rule.enabled ? '' : 'disabled'}`;
 
         const matchMode = rule.match_mode || 'all';
         const connector = matchMode === 'all'
@@ -500,22 +499,31 @@ function renderWatches() {
         const globalAoEnabled = Boolean(currentConfig.auto_order?.enabled);
         const isDryRun = currentConfig.auto_order?.dry_run !== false;
 
+        let modeCardClass = 'mode-notify';
         let statusBadgeHtml = '';
+
         if (!rule.enabled) {
+            modeCardClass = 'mode-paused';
             statusBadgeHtml = '<span class="rule-status-badge status-paused" title="规则已停用，不参与检测与提醒">⏸️ 已暂停监控</span>';
         } else if (autoOrderEnabled) {
             if (globalAoEnabled) {
                 if (isDryRun) {
-                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截)">🛡️ 仿真抢购适用</span>';
+                    modeCardClass = 'mode-dry-run';
+                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截，不产生真实扣款)">🛡️ 仿真抢购</span>';
                 } else {
-                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，命中时将自动以真实订单下单！">🚨 真实下单适用</span>';
+                    modeCardClass = 'mode-live-buy';
+                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，当前处于真实下单模式，命中时将自动以真实订单下单！">🚨 真实抢购</span>';
                 }
             } else {
+                modeCardClass = isDryRun ? 'mode-dry-run' : 'mode-live-buy';
                 statusBadgeHtml = '<span class="rule-status-badge status-standby" title="已开启自动购买，但自动下单全局总开关未开启，当前仅发送提醒">🛒 自动购买就绪 (全局未开)</span>';
             }
         } else {
-            statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 仅提醒模式</span>';
+            modeCardClass = 'mode-notify';
+            statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 提醒模式</span>';
         }
+
+        card.className = `watch-card ${rule.enabled ? '' : 'disabled'} ${modeCardClass}`;
 
         card.innerHTML = `
             <div class="watch-card-body">

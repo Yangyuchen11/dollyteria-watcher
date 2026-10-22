@@ -80,6 +80,10 @@ const elements = {
     aoModeIcon: document.getElementById('ao-mode-icon'),
     aoModeTitle: document.getElementById('ao-mode-title'),
     aoModeDesc: document.getElementById('ao-mode-desc'),
+    aoMaxWorkers: document.getElementById('ao-max-workers'),
+    aoStandbyWorkers: document.getElementById('ao-standby-workers'),
+    aoRetryDelay: document.getElementById('ao-retry-delay'),
+    aoMaxRetries: document.getElementById('ao-max-retries'),
 
     // 档案库一键下单 (独立开关与仿真控制)
     quickBuyEnabled: document.getElementById('quick-buy-enabled'),
@@ -801,6 +805,10 @@ function populateAutoOrderForm() {
     if (elements.aoTestPaySelect) {
         elements.aoTestPaySelect.value = (pm === 'bank' || pm === '銀行振込') ? 'bank_transfer' : pm;
     }
+    if (elements.aoMaxWorkers) elements.aoMaxWorkers.value = ao.max_workers ?? 6;
+    if (elements.aoStandbyWorkers) elements.aoStandbyWorkers.value = ao.standby_workers ?? 2;
+    if (elements.aoRetryDelay) elements.aoRetryDelay.value = ao.retry_delay_sec ?? 0.15;
+    if (elements.aoMaxRetries) elements.aoMaxRetries.value = ao.max_retries ?? 35;
     updateAoModeBanner();
 }
 
@@ -1283,7 +1291,11 @@ function bindEvents() {
                 password: elements.aoPassword.value.trim(),
                 dry_run: elements.aoDryRun.checked,
                 enabled: elements.aoEnabled.checked,
-                payment_method: payMethod
+                payment_method: payMethod,
+                max_workers: parseInt(elements.aoMaxWorkers?.value) || 6,
+                standby_workers: parseInt(elements.aoStandbyWorkers?.value) || 2,
+                retry_delay_sec: parseFloat(elements.aoRetryDelay?.value) || 0.15,
+                max_retries: parseInt(elements.aoMaxRetries?.value) || 35
             };
             saveConfig();
             updateAoModeBanner();

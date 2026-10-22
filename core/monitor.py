@@ -7,7 +7,9 @@ import json
 import time
 import datetime
 import logging
-from typing import List, Dict, Set, Optional
+import threading
+import concurrent.futures
+from typing import List, Dict, Set, Optional, Tuple
 from core.scraper import DollyteriaScraper
 from core.archive_db import DollyteriaArchiveDB
 from core.archiver import DollyteriaArchiver
@@ -91,6 +93,11 @@ DEFAULT_CONFIG = {
         "dry_run": True,
         "username": "",
         "password": "",
+        "payment_method": "cod",
+        "max_workers": 6,
+        "standby_workers": 2,
+        "retry_delay_sec": 0.15,
+        "max_retries": 35,
     },
     "quick_buy": {
         "enabled": False,
@@ -109,16 +116,28 @@ class DollyteriaMonitor:
         self.state = self._load_state()
 
         self.notifier = NotifierManager(self.config)
+        ao_cfg = self.config.get("auto_order", {})
         self.auto_order = AutoOrderHook(
-            username=self.config.get("auto_order", {}).get("username", ""),
-            password=self.config.get("auto_order", {}).get("password", ""),
-            dry_run=self.config.get("auto_order", {}).get("dry_run", True),
-            payment_method=self.config.get("auto_order", {}).get("payment_method", "cod"),
+            username=ao_cfg.get("username", ""),
+            password=ao_cfg.get("password", ""),
+            dry_run=ao_cfg.get("dry_run", True),
+            payment_method=ao_cfg.get("payment_method", "cod"),
+            retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
+            max_retries=int(ao_cfg.get("max_retries", 35)),
+            standby_workers=int(ao_cfg.get("standby_workers", 2)),
         )
 
         self.is_checking = False
         self.last_check_time = 0
         self.last_check_status = "就绪"
+
+        # 异步非阻塞下单常驻线程池 (抓取与抢购彻底解耦)
+        max_workers = int(ao_cfg.get("max_workers", 6))
+        self._order_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AutoOrderWorker")
+
+        # 若配置了账号密码，系统启动时在后台自动预登录并保持会话
+        if self.auto_order.username and self.auto_order.password:
+            threading.Thread(target=self.auto_order.login, name="AutoOrderStartupLogin", daemon=True).start()
 
     def _load_config(self) -> Dict:
         if os.path.exists(CONFIG_PATH):
@@ -215,6 +234,20 @@ class DollyteriaMonitor:
         self.auto_order.password = ao_cfg.get("password", "")
         self.auto_order.dry_run = ao_cfg.get("dry_run", True)
         self.auto_order.payment_method = ao_cfg.get("payment_method", "cod")
+        self.auto_order.retry_delay = float(ao_cfg.get("retry_delay_sec", 0.15))
+        self.auto_order.max_retries = int(ao_cfg.get("max_retries", 35))
+        self.auto_order.standby_workers_count = int(ao_cfg.get("standby_workers", 2))
+
+        # 动态同步抢购并发线程池大小
+        new_max_workers = int(ao_cfg.get("max_workers", 6))
+        if hasattr(self._order_executor, "_max_workers") and self._order_executor._max_workers != new_max_workers:
+            try:
+                self._order_executor._max_workers = new_max_workers
+            except Exception:
+                pass
+
+        if self.auto_order.username and self.auto_order.password:
+            threading.Thread(target=self.auto_order.login, name="AutoOrderUpdateLogin", daemon=True).start()
 
     def reset_seen_items(self):
         """重置已记录商品 (下次检测将视全部匹配商品为新商品)"""
@@ -329,17 +362,55 @@ class DollyteriaMonitor:
 
         return True
 
-    def check_once(self) -> Dict:
+    def _execute_auto_orders_concurrent(self, order_tasks: List[Tuple[Dict, Dict]], wait_completion: bool = False) -> None:
+        """
+        多线程并发抢购不同商品 (异步非阻塞流水线)：
+        order_tasks: [(item, rule), ...]
+        每个商品获取一个独立的 Worker (独立 Session/Cookie) 在独立线程中并发抢购，
+        遇到 503 迅速微重试直到售罄，各商品互不阻塞。
+        wait_completion: 默认为 False，即提交至常驻线程池后立即返回，让主监控/抓取线程毫无阻碍地继续发起下一轮 /new 抓取！
+        """
+        if not order_tasks:
+            return
+
+        def _worker_task(item: Dict, rule: Dict):
+            worker = None
+            try:
+                worker = self.auto_order.get_worker()
+                logger.info(f"⚡ [多线程抢购启动] 线程 [{threading.current_thread().name}] 开始抢购商品 [{item.get('id')}] {item.get('title', '')}...")
+                order_res = worker.on_item_matched(item, rule)
+                if order_res and order_res.get("success"):
+                    try:
+                        self.notifier.dispatch_order_success(item=item, order_result=order_res, rule=rule)
+                    except Exception as e:
+                        logger.error(f"分发下单成功通知异常: {e}")
+                return item.get("id"), order_res
+            except Exception as e:
+                logger.error(f"商品 [{item.get('id')}] 抢购线程执行异常: {e}", exc_info=True)
+                return item.get("id"), {"success": False, "message": str(e)}
+            finally:
+                if worker:
+                    self.auto_order.release_worker(worker)
+
+        logger.info(f"⚡⚡⚡ [多商品并发抢购] 触发 {len(order_tasks)} 件不同商品的多线程并发抢购 (异步非阻塞流水线)！")
+        futures = [self._order_executor.submit(_worker_task, item, rule) for item, rule in order_tasks]
+        if wait_completion:
+            concurrent.futures.wait(futures, timeout=45)
+
+    def check_once(self, is_burst: bool = False) -> Dict:
         """
         执行一次完整的巡检
-        返回本次检测的结果摘要
+        - 流式即时抢购 (Pipeline)：抓取 /new 后立即在本地内存匹配规则，发现有货新商品毫秒级直接触发自动下单，绝不等待后续网络搜索
+        - 多线程并发抢购：多件不同商品并发分配独立 Worker (独立 Session/Cookie) 抢购，互不干扰
+        - 爆发模式 (is_burst=True)：专攻 /new 高速主干道，跳过全店关键词搜索，杜绝 503 限流
+        - 日常平缓模式 (is_burst=False)：/new 抢购处理完后，按需执行关键词全店搜索
         """
         if self.is_checking:
             return {"status": "busy", "message": "上一轮检测正在进行中"}
 
         self.is_checking = True
         self.last_check_time = int(time.time())
-        self.last_check_status = "检测中"
+        self.last_check_status = "检测中 (爆发抢购)" if is_burst else "检测中"
 
         active_rules = [r for r in self.config.get("watches", []) if r.get("enabled", True)]
         if not active_rules:
@@ -349,103 +420,148 @@ class DollyteriaMonitor:
 
         seen_set = set(self.state.get("seen_ids", []))
         total_new_matches = []
-        rule_matches_map = {}
+        pool_items = {}
 
         try:
-            # 1. 首先检查上新流 (/new)，这是定点上新最快出现的地方
-            needs_new_stream = any(r.get("search_mode", "both") in ["new_stream", "both"] for r in active_rules)
-            pool_items = {}
+            # 1. 首先检查上新流 (/new)，这是定点上新与补货最快出现的地方
+            needs_new_stream = is_burst or any(r.get("search_mode", "both") in ["new_stream", "both"] for r in active_rules)
 
             if needs_new_stream:
-                logger.info("正在抓取 Dollyteria /new 页面最新上新流...")
+                logger.info(f"⚡ 正在抓取 Dollyteria /new 页面最新上新流 ({'爆发抢购模式' if is_burst else '常规巡检'})...")
                 new_arrivals = self.scraper.fetch_new_arrivals(num=100, in_stock_only=True)
                 for it in new_arrivals:
                     pool_items[it["id"]] = it
 
-            # 2. 检查特定关键词搜索 (/product-list/?keyword=...)
-            for rule in active_rules:
-                mode = rule.get("search_mode", "both")
-                if mode in ["keyword_search", "both"]:
-                    match_mode = rule.get("match_mode", "all")
-                    keywords = [k.strip() for k in rule.get("keywords", []) if k.strip()]
-                    if match_mode == "all":
-                        # 多个词必须同时全部满足 (AND)：组合成以空格隔开的联合关键词在全站检索
-                        combined_kw = " ".join(keywords)
-                        if combined_kw:
-                            logger.info(f"正在进行多词同时满足(AND)搜索: [{combined_kw}] (规则: {rule.get('name')})...")
-                            res = self.scraper.search_products(combined_kw, num=100, page=1, in_stock_only=True)
-                            for it in res:
-                                pool_items[it["id"]] = it
-                    else:
-                        for kw in keywords:
-                            logger.info(f"正在搜索关键词: [{kw}] (规则: {rule.get('name')})...")
-                            res = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
-                            for it in res:
-                                pool_items[it["id"]] = it
-            # 同步本次巡检到的商品至归档数据库
+                # 【Pipeline 流式立即加购与匹配机制】：
+                # 抓取到 /new 后立刻在本地内存比对所有规则，毫秒级就地触发自动下单与提醒，绝不等待后续任何网络请求！
+                stage1_matches = []
+                for it in new_arrivals:
+                    if it["id"] in seen_set:
+                        continue
+                    # 遍历规则寻找匹配 (优先匹配开启了自动下单的规则)
+                    matched_rule = None
+                    for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
+                        if not is_burst and rule.get("search_mode", "both") == "keyword_search":
+                            continue
+                        if self._matches_rule(it, rule):
+                            matched_rule = rule
+                            break
+                    if matched_rule:
+                        stage1_matches.append((it, matched_rule))
+
+                if stage1_matches:
+                    logger.info(f"✨ [/new 实时流式命中] 发现 {len(stage1_matches)} 件符合规则的有货新商品！")
+
+                    # 立即触发自动下单 (多线程并发抢购)
+                    if self.config.get("auto_order", {}).get("enabled", False):
+                        auto_order_tasks = [(it, r) for it, r in stage1_matches if r.get("auto_order", False)]
+                        if auto_order_tasks:
+                            logger.info(f"⚡ [流式立即下单] 触发 {len(auto_order_tasks)} 件新商品的自动抢购流水线...")
+                            self._execute_auto_orders_concurrent(auto_order_tasks)
+                        non_ao_rules = {r.get("name") for it, r in stage1_matches if not r.get("auto_order", False)}
+                        for nr in non_ao_rules:
+                            logger.info(f"ℹ️ 规则 [{nr}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
+
+                    # 分组分发各渠道提醒
+                    rule_groups = {}
+                    for it, r in stage1_matches:
+                        rule_groups.setdefault(r["id"], {"rule": r, "items": []})["items"].append(it)
+                    for r_data in rule_groups.values():
+                        self.notifier.dispatch(r_data["items"], r_data["rule"])
+
+                    # 记录至历史动态与已见缓存
+                    for it, r in stage1_matches:
+                        seen_set.add(it["id"])
+                        hist_entry = dict(it)
+                        hist_entry["rule_name"] = r.get("name")
+                        self.state.setdefault("history", []).insert(0, hist_entry)
+                        total_new_matches.append(it)
+
+                    # 立即保存状态与归档，确保断电或异常不丢
+                    self.state["seen_ids"] = list(seen_set)
+                    self._save_state()
+                    try:
+                        self.archive_db.upsert_batch([it for it, r in stage1_matches])
+                    except Exception as e:
+                        logger.warning(f"同步流式命中商品至归档库失败: {e}")
+
+            # 2. 关键词全店搜索 (/product-list/?keyword=...)
+            # 核心策略：爆发抢购模式下专攻 /new 主干道，完全跳过耗时的关键词全店搜索，杜绝 503 官网限流！
+            if is_burst:
+                logger.debug("⚡ 处于爆发抢购模式 (Burst Mode)，跳过耗时的关键词全店搜索，专攻 /new 高速主干道。")
+            else:
+                stage2_pool = {}
+                for rule in active_rules:
+                    mode = rule.get("search_mode", "both")
+                    if mode in ["keyword_search", "both"]:
+                        match_mode = rule.get("match_mode", "all")
+                        keywords = [k.strip() for k in rule.get("keywords", []) if k.strip()]
+                        if match_mode == "all":
+                            combined_kw = " ".join(keywords)
+                            if combined_kw:
+                                logger.info(f"正在进行多词同时满足(AND)搜索: [{combined_kw}] (规则: {rule.get('name')})...")
+                                res = self.scraper.search_products(combined_kw, num=100, page=1, in_stock_only=True)
+                                for it in res:
+                                    pool_items[it["id"]] = it
+                                    stage2_pool[it["id"]] = it
+                        else:
+                            for kw in keywords:
+                                logger.info(f"正在搜索关键词: [{kw}] (规则: {rule.get('name')})...")
+                                res = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
+                                for it in res:
+                                    pool_items[it["id"]] = it
+                                    stage2_pool[it["id"]] = it
+
+                # 阶段二搜索到的商品匹配与触发
+                stage2_matches = []
+                for it_id, it in stage2_pool.items():
+                    if it_id in seen_set:
+                        continue
+                    matched_rule = None
+                    for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
+                        if self._matches_rule(it, rule):
+                            matched_rule = rule
+                            break
+                    if matched_rule:
+                        stage2_matches.append((it, matched_rule))
+
+                if stage2_matches:
+                    logger.info(f"✨ [全店搜索命中] 发现 {len(stage2_matches)} 件符合规则的有货新商品！")
+                    if self.config.get("auto_order", {}).get("enabled", False):
+                        auto_order_tasks = [(it, r) for it, r in stage2_matches if r.get("auto_order", False)]
+                        if auto_order_tasks:
+                            logger.info(f"⚡ [搜索结果下单] 触发 {len(auto_order_tasks)} 件新商品自动抢购流水线...")
+                            self._execute_auto_orders_concurrent(auto_order_tasks)
+                        non_ao_rules = {r.get("name") for it, r in stage2_matches if not r.get("auto_order", False)}
+                        for nr in non_ao_rules:
+                            logger.info(f"ℹ️ 规则 [{nr}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
+
+                    rule_groups = {}
+                    for it, r in stage2_matches:
+                        rule_groups.setdefault(r["id"], {"rule": r, "items": []})["items"].append(it)
+                    for r_data in rule_groups.values():
+                        self.notifier.dispatch(r_data["items"], r_data["rule"])
+
+                    for it, r in stage2_matches:
+                        seen_set.add(it["id"])
+                        hist_entry = dict(it)
+                        hist_entry["rule_name"] = r.get("name")
+                        self.state.setdefault("history", []).insert(0, hist_entry)
+                        total_new_matches.append(it)
+
+            # 同步本次巡检到的所有候选商品至归档数据库
             if pool_items:
                 try:
                     self.archive_db.upsert_batch(list(pool_items.values()))
                 except Exception as e:
                     logger.warning(f"同步巡检商品至归档库失败: {e}")
 
-            # 3. 对抓取到的全部候选商品逐条匹配规则
-            for it_id, item in pool_items.items():
-                for rule in active_rules:
-                    if self._matches_rule(item, rule):
-                        rule_id = rule.get("id")
-                        if rule_id not in rule_matches_map:
-                            rule_matches_map[rule_id] = {"rule": rule, "items": []}
-                        rule_matches_map[rule_id]["items"].append(item)
-
-            # 4. 去重与提醒触发
-            new_item_ids_to_add = set()
-
-            for rule_id, match_data in rule_matches_map.items():
-                rule = match_data["rule"]
-                items = match_data["items"]
-
-                # 仅筛选出未曾见过的商品
-                unseen_items = [it for it in items if it["id"] not in seen_set]
-
-                if unseen_items:
-                    logger.info(f"✨ 规则 [{rule.get('name')}] 发现 {len(unseen_items)} 件全新商品！")
-                    total_new_matches.extend(unseen_items)
-                    for u in unseen_items:
-                        new_item_ids_to_add.add(u["id"])
-
-                    # 分发各渠道提醒
-                    self.notifier.dispatch(unseen_items, rule)
-
-                    # 自动下单 Hook (需全局总开关开启且该监控规则勾选了专属自动购买)
-                    if self.config.get("auto_order", {}).get("enabled", False):
-                        if rule.get("auto_order", False):
-                            logger.info(f"⚡ [Auto-Order] 规则 [{rule.get('name')}] 已加入自动购买名单，正在触发自动下单流水线...")
-                            for u in unseen_items:
-                                order_res = self.auto_order.on_item_matched(u, rule)
-                                if order_res and order_res.get("success"):
-                                    # 联动通知渠道扩展分发下单成功通知 (Discord/邮件/桌面/Line/音效)
-                                    try:
-                                        self.notifier.dispatch_order_success(item=u, order_result=order_res, rule=rule)
-                                    except Exception as e:
-                                        logger.error(f"分发下单成功通知异常: {e}")
-                        else:
-                            logger.info(f"ℹ️ 规则 [{rule.get('name')}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
-
-                    # 记录至历史动态
-                    for u in unseen_items:
-                        hist_entry = dict(u)
-                        hist_entry["rule_name"] = rule.get("name")
-                        self.state.setdefault("history", []).insert(0, hist_entry)
-
             # 更新已见缓存与统计数据
-            if new_item_ids_to_add:
-                self.state["seen_ids"] = list(seen_set.union(new_item_ids_to_add))
-
+            self.state["seen_ids"] = list(seen_set)
             stats = self.get_stats()
             stats["today_checks"] = stats.get("today_checks", 0) + 1
             stats["total_checks"] = stats.get("total_checks", 0) + 1
-            if new_item_ids_to_add:
+            if total_new_matches:
                 stats["total_matches"] = stats.get("total_matches", 0) + len(total_new_matches)
             self._save_state()
 

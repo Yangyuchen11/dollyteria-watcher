@@ -2,11 +2,12 @@
 直接下单 / 自动加购扩展接口 (Auto-Order Hook)
 针对 Dollyteria (おちゃのこネット / ocnk 架构) 的全自动下单流程：
 1. 会员登录凭据验证与 Session 保持
-2. 商品秒级加购 (/product/{id} -> /cart)
+2. 商品秒级加购 (/product/{id} -> /cart)，支持遭遇 503 快速高频重试直至售罄
 3. 推进客户信息与收货地址步骤 (/cart/shipping)
-4. 自动匹配并勾选【代金引換 (COD, pay_procedure=3)】
+4. 自动匹配并勾选【代金引換 (COD) / 店頭支払 / 銀行振込】
 5. 推进至下单前最终确认页面 (/cart/confirm)
-6. 【Dry-Run 仿真测试模式】：
+6. 多线程独立会话并发 Worker 池支持不同商品并行抢购
+7. 【Dry-Run 仿真测试模式】：
    - 完整走通上述所有链路直至 /cart/confirm
    - 提取订单金额明细、代金引换手续费、最终总额、收货人与地址
    - 🛡️ 安全拦截：坚决不点击最后的「購入する」提交按钮！
@@ -15,6 +16,7 @@
 import re
 import time
 import logging
+import threading
 from typing import Dict, Optional, Tuple, List
 import requests
 from bs4 import BeautifulSoup
@@ -23,11 +25,23 @@ logger = logging.getLogger("dollyteria.hooks.auto_order")
 
 
 class AutoOrderHook:
-    def __init__(self, username: str = "", password: str = "", dry_run: bool = True, payment_method: str = "cod"):
+    def __init__(
+        self,
+        username: str = "",
+        password: str = "",
+        dry_run: bool = True,
+        payment_method: str = "cod",
+        retry_delay: float = 0.15,
+        max_retries: int = 35,
+        standby_workers: int = 2,
+    ):
         self.username = (username or "").strip()
         self.password = (password or "").strip()
         self.dry_run = dry_run
         self.payment_method = payment_method or "cod"
+        self.retry_delay = float(retry_delay) if retry_delay is not None else 0.15
+        self.max_retries = int(max_retries) if max_retries is not None else 35
+        self.standby_workers_count = int(standby_workers) if standby_workers is not None else 2
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -37,6 +51,121 @@ class AutoOrderHook:
         })
         self.is_logged_in = False
         self.last_result: Optional[Dict] = None
+
+        # 多线程独立会话与并发 Worker 池机制
+        self._is_busy = False
+        self._is_standby_worker = False
+        self._pool_lock = threading.Lock()
+        self._standby_workers: List['AutoOrderHook'] = []
+
+    def _safe_request(self, method: str, url: str, max_retries: int = 5, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
+        """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器"""
+        delay = self.retry_delay if retry_delay is None else retry_delay
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self.session.request(method, url, **kwargs)
+                is_busy = resp.status_code in [429, 502, 503, 504] or any(
+                    k in resp.text for k in ["アクセス集中", "大変混み合っております", "回線が混雑", "ただいま混雑"]
+                )
+                if is_busy:
+                    if attempt < max_retries:
+                        logger.warning(f"[Auto-Order] 结算推进 {url} 遇到繁忙 ({resp.status_code}/排队)，正在迅速重试 (第 {attempt + 1}/{max_retries} 次)...")
+                        time.sleep(delay)
+                        continue
+                return resp
+            except (requests.Timeout, requests.ConnectionError) as e:
+                if attempt < max_retries:
+                    logger.warning(f"[Auto-Order] 结算推进 {url} 网络异常 ({e})，正在迅速重试 (第 {attempt + 1}/{max_retries} 次)...")
+                    time.sleep(delay)
+                    continue
+            except Exception as e:
+                logger.error(f"[Auto-Order] 请求 {url} 发生未捕获异常: {e}")
+                break
+        return None
+
+    def preload_standby_workers(self, count: Optional[int] = None):
+        """预先登录并储备备用 Worker 会话 (在后台独立线程执行，不阻塞主线程)"""
+        if self._is_standby_worker or not self.username or not self.password:
+            return
+
+        target_count = self.standby_workers_count if count is None else int(count)
+
+        def _prewarm():
+            for _ in range(target_count):
+                with self._pool_lock:
+                    if len(self._standby_workers) >= target_count:
+                        break
+                w = AutoOrderHook(
+                    username=self.username,
+                    password=self.password,
+                    dry_run=self.dry_run,
+                    payment_method=self.payment_method,
+                    retry_delay=self.retry_delay,
+                    max_retries=self.max_retries,
+                    standby_workers=self.standby_workers_count,
+                )
+                w._is_standby_worker = True
+                ok, _ = w.login()
+                if ok:
+                    with self._pool_lock:
+                        if len(self._standby_workers) < target_count:
+                            self._standby_workers.append(w)
+            with self._pool_lock:
+                ready_count = len(self._standby_workers)
+            if ready_count > 0:
+                logger.info(f"✨ [Auto-Order] 已就绪 {ready_count} 个独立并发抢购备用会话！")
+
+        threading.Thread(target=_prewarm, name="WorkerPreloadThread", daemon=True).start()
+
+    def get_worker(self) -> 'AutoOrderHook':
+        """
+        获取一个可用的独立下单 Worker：
+        - 单商品任务：优先复用当前主实例（若主实例未在忙且已登录）
+        - 多商品并发：从预热池弹出独立 Session 的 Worker，确保不同商品在独立 Cookie/Cart 会话中并行抢购，互不冲突
+        - 若预热池为空：即时派生独立 Worker 并登录
+        """
+        with self._pool_lock:
+            # 1. 优先看备用池中是否有已登录好的 Worker
+            while self._standby_workers:
+                w = self._standby_workers.pop(0)
+                if w.is_logged_in:
+                    w._is_busy = True
+                    return w
+
+            # 2. 若备用池无，且主实例空闲已登录，则使用主实例
+            if not self._is_busy and self.is_logged_in:
+                self._is_busy = True
+                return self
+
+        # 3. 若备用池为空且主实例忙或未登录，即时派生独立 Worker
+        worker = AutoOrderHook(
+            username=self.username,
+            password=self.password,
+            dry_run=self.dry_run,
+            payment_method=self.payment_method,
+            retry_delay=self.retry_delay,
+            max_retries=self.max_retries,
+            standby_workers=self.standby_workers_count,
+        )
+        worker._is_standby_worker = True
+        worker._is_busy = True
+        if self.username and self.password:
+            worker.login()
+        return worker
+
+    def release_worker(self, worker: 'AutoOrderHook'):
+        """任务结束后释放回收 Worker"""
+        if worker is self:
+            with self._pool_lock:
+                self._is_busy = False
+            return
+
+        worker._is_busy = False
+        with self._pool_lock:
+            # 保留最多 standby_workers_count + 1 个已登录的待命 Worker
+            max_keep = max(3, self.standby_workers_count + 1)
+            if len(self._standby_workers) < max_keep and worker.is_logged_in:
+                self._standby_workers.append(worker)
 
     def login(self, username: str = None, password: str = None) -> Tuple[bool, str]:
         """登录 Dollyteria 官网账户"""
@@ -53,29 +182,65 @@ class AutoOrderHook:
 
         login_url = "https://www.dollyteria.com/member-login"
         try:
-            self.session.get(login_url, timeout=10)
+            r_get = self._safe_request("GET", login_url, timeout=10)
+            if not r_get or r_get.status_code != 200:
+                msg = f"访问登录页遇到异常 (HTTP {r_get.status_code if r_get else '超时/繁忙'})"
+                logger.warning(f"[Auto-Order] {msg}")
+                return False, msg
+
             payload = {
                 "mode": "memberlogin",
                 "email": user,
                 "password": pwd,
                 "go-login": "ログイン",
             }
-            resp = self.session.post(login_url, data=payload, timeout=10, allow_redirects=True)
+            resp = self._safe_request("POST", login_url, data=payload, timeout=10, allow_redirects=True)
+            if not resp:
+                msg = "提交登录请求超时或官网持续繁忙 (503)"
+                logger.warning(f"[Auto-Order] {msg}")
+                return False, msg
+
+            if resp.status_code in [429, 502, 503, 504]:
+                msg = f"提交登录接口遭遇官网繁忙 (HTTP {resp.status_code})"
+                logger.warning(f"[Auto-Order] {msg}")
+                return False, msg
+
             text = resp.content.decode("utf-8", "ignore")
 
             # 校验登录状态
-            check_resp = self.session.get("https://www.dollyteria.com/member", timeout=10, allow_redirects=True)
+            check_resp = self._safe_request("GET", "https://www.dollyteria.com/member", timeout=10, allow_redirects=True)
+            if not check_resp:
+                msg = "校验登录状态请求超时或官网繁忙"
+                logger.warning(f"[Auto-Order] {msg}")
+                return False, msg
+
+            if check_resp.status_code in [429, 502, 503, 504]:
+                msg = f"访问会员页面遭遇官网繁忙 (HTTP {check_resp.status_code})"
+                logger.warning(f"[Auto-Order] {msg}")
+                return False, msg
+
             check_text = check_resp.content.decode("utf-8", "ignore")
 
-            if "member-login" not in check_resp.url and ("ログアウト" in check_text or "会員登録" in check_text or "マイページ" in check_text):
+            # 成功进入会员中心 (/member 或包含 マイページ / ログアウト / 会员名称 / ポイント)
+            is_success = ("member-login" not in check_resp.url) and any(
+                k in check_text for k in ["マイページ", "ログアウト", "ポイント", "様"]
+            )
+
+            if is_success:
                 self.is_logged_in = True
                 msg = f"Dollyteria 账户 [{user}] 登录成功！"
                 logger.info(f"✅ [Auto-Order] {msg}")
+                self.preload_standby_workers(count=2)
                 return True, msg
             else:
                 self.is_logged_in = False
                 err_match = re.search(r'(メールアドレスまたはパスワードが間違っています|ログインできません)', text)
-                err_detail = err_match.group(1) if err_match else "账号或密码错误"
+                if err_match:
+                    err_detail = err_match.group(1)
+                elif any(busy_kw in text or busy_kw in check_text for busy_kw in ["アクセス集中", "大変混み合っております", "回線が混雑"]):
+                    err_detail = "官网访问集中排队中 (503/繁忙)"
+                else:
+                    err_detail = "账号密码未通过官网校验"
                 msg = f"登录失败: {err_detail}"
                 logger.warning(f"❌ [Auto-Order] {msg}")
                 return False, msg
@@ -86,11 +251,19 @@ class AutoOrderHook:
             logger.error(f"❌ [Auto-Order] {msg}")
             return False, msg
 
-    def add_to_cart(self, item_id: str, quantity: int = 1) -> Tuple[bool, str]:
-        """将商品快速加入购物车"""
+    def add_to_cart(self, item_id: str, quantity: int = 1, max_retries: Optional[int] = None, retry_delay: Optional[float] = None) -> Tuple[bool, str, bool]:
+        """
+        将商品快速加入购物车：
+        - 遇到 503 / 502 / 429 访问繁忙 / 官网排队占位页 / 网络抖动：高频毫秒级迅速重试
+        - 遇到明确售罄 (Sold Out / 売り切れ / 売切 / 品切れ / 在庫不足 / 在庫切れ)：立即判定已售罄并终止重试
+        - 直到成功入车或明确售罄为止！
+        返回: (success: bool, message: str, is_sold_out: bool)
+        """
+        retries = self.max_retries if max_retries is None else max_retries
+        delay = self.retry_delay if retry_delay is None else retry_delay
         item_id = str(item_id).strip()
         if not item_id:
-            return False, "无效的商品 ID"
+            return False, "无效的商品 ID", True
 
         product_url = f"https://www.dollyteria.com/product/{item_id}"
         cart_data = {
@@ -100,22 +273,70 @@ class AutoOrderHook:
             "cart_add_btn": "カートに入れる",
         }
 
-        try:
-            logger.info(f"[Auto-Order] 正在加购商品 [{item_id}]...")
-            r = self.session.post(product_url, data=cart_data, timeout=10, allow_redirects=True)
-            r_text = r.content.decode("utf-8", "ignore")
+        SOLDOUT_KEYWORDS = [
+            "在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ",
+            "sold out", "soldout", "現在、商品はございません",
+            "ご指定のページは見つかりませんでした",
+        ]
 
-            if "/cart" in r.url and ("カートの中身" in r_text or "ショッピングカート" in r_text):
-                if item_id in r_text or "買い物を続ける" in r_text or "レジに進む" in r_text:
-                    logger.info(f"✅ [Auto-Order] 商品 [{item_id}] 成功加入购物车！")
-                    return True, "商品已成功加购并进入购物车"
-            return False, "加购未成功，商品可能已在库断货或已被抢购锁定"
-        except Exception as e:
-            return False, f"加购请求发生异常: {str(e)}"
+        for attempt in range(retries + 1):
+            try:
+                if attempt > 0:
+                    logger.info(f"[Auto-Order] 正在高频迅速重试加购 [{item_id}] (第 {attempt + 1}/{retries + 1} 次)...")
+                else:
+                    logger.info(f"[Auto-Order] 正在加购商品 [{item_id}]...")
+
+                r = self.session.post(product_url, data=cart_data, timeout=8, allow_redirects=True)
+                r_text = r.content.decode("utf-8", "ignore") if r.content else ""
+
+                # 1. 检查是否成功进入购物车
+                if r.url and "/cart" in r.url and ("カートの中身" in r_text or "ショッピングカート" in r_text or "レジに進む" in r_text):
+                    if item_id in r_text or "買い物を続ける" in r_text or "レジに進む" in r_text:
+                        logger.info(f"✅ [Auto-Order] 商品 [{item_id}] 成功加入购物车！(尝试次数: {attempt + 1})")
+                        return True, "商品已成功加购并进入购物车", False
+
+                # 2. 检查是否明确售罄 (Sold Out)
+                if r_text and any(k in r_text for k in SOLDOUT_KEYWORDS):
+                    logger.warning(f"🛑 [Auto-Order] 商品 [{item_id}] 官网已明确售罄 (Sold Out / 売り切れ / 在庫不足)，终止重试")
+                    return False, "加购未成功：商品已明确售罄或已被他人抢先下单锁定", True
+
+                # 3. 检查是否遭遇 503 / 502 / 504 / 429 繁忙或排队占位页
+                is_busy = r.status_code in [429, 502, 503, 504] or (r_text and any(
+                    k in r_text for k in ["アクセス集中", "大変混み合っております", "回線が混雑", "ただいま混雑"]
+                ))
+                if is_busy:
+                    if attempt < retries:
+                        logger.warning(f"⚠️ [Auto-Order] 加购目标商品 [{item_id}] 遇到官网繁忙 ({r.status_code}/排队)，迅速高频重试中 (已尝试 {attempt + 1} 次)...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.warning(f"❌ [Auto-Order] 加购商品 [{item_id}] 连续 {retries + 1} 次遇到官网繁忙 (503)，达到最大重试上限")
+                        return False, "加购未成功：官网持续繁忙 (503)", False
+
+                # 4. 其他未能识别的页面跳转 (如重定向回商品页但未入车)
+                if attempt < retries:
+                    logger.warning(f"⚠️ [Auto-Order] 加购未能进入购物车 (页面: {r.url})，正在重新尝试加购 (第 {attempt + 1} 次)...")
+                    time.sleep(delay)
+                    continue
+
+            except (requests.Timeout, requests.ConnectionError) as e:
+                if attempt < retries:
+                    logger.warning(f"⚠️ [Auto-Order] 加购网络抖动 ({e})，正在迅速重试 (第 {attempt + 1} 次)...")
+                    time.sleep(delay)
+                    continue
+                return False, f"加购网络超时: {e}", False
+            except Exception as e:
+                logger.error(f"❌ [Auto-Order] 加购请求异常: {e}")
+                if attempt < retries:
+                    time.sleep(delay)
+                    continue
+                return False, f"加购请求异常: {str(e)}", False
+
+        return False, "加购多次尝试未成功", False
 
     def proceed_to_confirmation(self, payment_method: str = None) -> Tuple[bool, str, Optional[requests.Response]]:
         """
-        推进结算流程并自动选择指定支付方式【代金引換 / 店頭支払】，直达下单前确认页面 (/cart/confirm)
+        推进结算流程并自动选择指定支付方式【代金引換 / 店頭支払 / 銀行振込】，直达下单前确认页面 (/cart/confirm)
         """
         method = (payment_method or self.payment_method or "cod").lower()
         if method in ["bank", "bank_transfer", "bank_wire", "銀行振込", "振込"]:
@@ -133,24 +354,27 @@ class AutoOrderHook:
 
         try:
             # 1. 访问客户/结算入口 (/cart/customer)
-            r_cust = self.session.get("https://www.dollyteria.com/cart/customer", timeout=10, allow_redirects=True)
+            r_cust = self._safe_request("GET", "https://www.dollyteria.com/cart/customer", timeout=10, allow_redirects=True)
+            if not r_cust:
+                return False, "未能打开结算入口页面 (/cart/customer)", None
             text_cust = r_cust.content.decode("utf-8", "ignore")
             soup_cust = BeautifulSoup(text_cust, "html.parser")
 
             # 如果未登录，执行结算内登录
             if soup_cust.find("input", {"name": "password"}):
                 logger.info("[Auto-Order] 正在进行结算会员登录...")
-                r_cust = self.session.post("https://www.dollyteria.com/cart/customer", data={
+                r_cust = self._safe_request("POST", "https://www.dollyteria.com/cart/customer", data={
                     "mode": "memberlogin",
                     "email": self.username,
                     "password": self.password,
                     "login": "ログイン",
                 }, timeout=10, allow_redirects=True)
+                if not r_cust:
+                    return False, "结算会员登录请求超时或官网繁忙", None
                 text_cust = r_cust.content.decode("utf-8", "ignore")
                 soup_cust = BeautifulSoup(text_cust, "html.parser")
 
             # 2. 检查是否在地址选择页面 (/cart/shipping 或 shipping-list)
-            # Ochanoko 默认地址选择表单: action="/shipping-list/cart/1", shipping-id="99999999" (ご注文者住所)
             shipping_select_form = soup_cust.find("form", action=lambda a: a and "shipping-list" in a)
             if shipping_select_form:
                 action = shipping_select_form.get("action")
@@ -159,13 +383,16 @@ class AutoOrderHook:
                 if id_inp and id_inp.get("value"):
                     ship_id = id_inp.get("value")
                 logger.info(f"[Auto-Order] 正在选择收货地址 (默认收件人: {ship_id})...")
-                r_ship = self.session.post(action, data={
+                r_ship = self._safe_request("POST", action, data={
                     "mode": "shipping-select",
                     "shipping-id": ship_id,
                 }, timeout=10, allow_redirects=True)
             else:
                 # 尝试直接访问 /cart/shipping?shipping_no=1
-                r_ship = self.session.get("https://www.dollyteria.com/cart/shipping?shipping_no=1", timeout=10, allow_redirects=True)
+                r_ship = self._safe_request("GET", "https://www.dollyteria.com/cart/shipping?shipping_no=1", timeout=10, allow_redirects=True)
+
+            if not r_ship:
+                return False, "地址选择未能正常响应", None
 
             text_ship = r_ship.content.decode("utf-8", "ignore")
             soup_ship = BeautifulSoup(text_ship, "html.parser")
@@ -219,7 +446,9 @@ class AutoOrderHook:
 
             action_url = form.get("action") or "https://www.dollyteria.com/cart/shipping"
             logger.info(f"正在提交【{target_method_name}】结算配置，直达下单前确认页 (/cart/confirm)...")
-            r_confirm = self.session.post(action_url, data=delivery_payload, timeout=12, allow_redirects=True)
+            r_confirm = self._safe_request("POST", action_url, data=delivery_payload, timeout=12, allow_redirects=True)
+            if not r_confirm:
+                return False, "提交支付与配送方式配置遭遇网络/繁忙超时", None
             confirm_text = r_confirm.content.decode("utf-8", "ignore")
 
             if "/cart/confirm" in r_confirm.url or "ご購入内容の最終確認" in confirm_text or "最終確認" in confirm_text:
@@ -310,9 +539,11 @@ class AutoOrderHook:
         }
 
     def clear_cart(self):
-        """清空购物车中的所有商品"""
+        """清空当前会话购物车中的所有商品"""
         try:
-            r = self.session.get("https://www.dollyteria.com/cart", timeout=10)
+            r = self._safe_request("GET", "https://www.dollyteria.com/cart", timeout=10)
+            if not r:
+                return
             soup = BeautifulSoup(r.content.decode("utf-8", "ignore"), "html.parser")
             for inp in soup.find_all("input", {"type": "submit"}):
                 name = inp.get("name", "")
@@ -328,7 +559,7 @@ class AutoOrderHook:
     def execute_checkout(self, item_id: str, item_title: str = "", dry_run: bool = None, clear_after_dry_run: bool = True, payment_method: str = None) -> Dict:
         """
         完整下单流水线：
-        登录 -> 加购 -> 地址/配送 -> 选中【代金引換 / 店頭支払】 -> 直达最终确认页 -> [Dry-Run 安全拦截 / 真实下单]
+        登录 -> 加购 (带 503 迅速微重试直至售罄) -> 地址/配送 -> 选中指定支付方式 -> 直达最终确认页 -> [Dry-Run 安全拦截 / 真实下单]
         """
         is_dry = self.dry_run if dry_run is None else dry_run
         method = payment_method or self.payment_method or "cod"
@@ -361,14 +592,15 @@ class AutoOrderHook:
         else:
             steps_log.append("官网会员登录: 已就绪 (Session 保持中)")
 
-        # 2. 秒级加购
-        ok, msg = self.add_to_cart(item_id)
+        # 2. 秒级加购 (带 503 迅速高频重试，直至售罄)
+        ok, msg, is_sold_out = self.add_to_cart(item_id)
         steps_log.append(f"商品加购入车: {'成功' if ok else '失败 (' + msg + ')'}")
         if not ok:
             return {
                 "success": False,
                 "step": "add_to_cart",
                 "dry_run": is_dry,
+                "is_sold_out": is_sold_out,
                 "message": f"商品加购失败: {msg}",
                 "steps_log": steps_log,
                 "elapsed_sec": round(time.time() - t0, 2),
@@ -443,7 +675,7 @@ class AutoOrderHook:
                 v = inp.get("value", "")
                 if not n:
                     continue
-                # 排除其他无关 submit 按钮 (如优惠券适用 coupon=適用)
+                # 排除其他无关 submit 按钮
                 if itype == "submit":
                     continue
                 # 排除未选中的其他 checkbox
@@ -457,7 +689,16 @@ class AutoOrderHook:
             final_data["go-next"] = "購入する"
 
             action_url = final_form.get("action") or "https://www.dollyteria.com/cart/confirm"
-            resp_complete = self.session.post(action_url, data=final_data, timeout=15, allow_redirects=True)
+            resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
+            if not resp_complete:
+                return {
+                    "success": False,
+                    "step": "final_submit",
+                    "dry_run": False,
+                    "message": "最终下单提交遭遇网络超时或官网 503 持续繁忙",
+                    "steps_log": steps_log,
+                    "elapsed_sec": elapsed,
+                }
             complete_text = resp_complete.content.decode("utf-8", "ignore")
 
             success = "注文完了" in complete_text or "/cart/complete" in resp_complete.url

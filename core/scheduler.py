@@ -93,6 +93,9 @@ class DollyteriaScheduler:
         self.is_bursting = True
         self.burst_end_time = time.time() + dur
         logger.info(f"⚡ 爆发模式 (Burst Mode) 已开启！将持续高频检测 {dur} 秒。")
+        # 预先登录并储备备用 Worker 会话，保障爆发抢购零秒出击
+        if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
+            self.monitor.auto_order.preload_standby_workers(count=2)
 
     def _run_loop(self):
         """调度主循环：每秒唤醒一次评估时间"""
@@ -113,7 +116,7 @@ class DollyteriaScheduler:
                         if now_ts - self.last_burst_check >= burst_interval:
                             self.last_burst_check = now_ts
                             logger.info(f"⚡ [爆发模式] 正在进行高频检测 (剩余 {int(self.burst_end_time - now_ts)}s)...")
-                            self.monitor.check_once()
+                            self.monitor.check_once(is_burst=True)
                     else:
                         self.is_bursting = False
                         logger.info("⚡ 爆发模式持续时间结束，恢复正常巡检模式。")
@@ -121,6 +124,12 @@ class DollyteriaScheduler:
                 # 2. 检查定点准时触发 (如 20:00:00 / 21:00:00)
                 drop_times = sched_cfg.get("drop_times", [])
                 today_str = now.strftime("%Y-%m-%d")
+
+                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前登录预热备用 Worker 会话
+                _, rem_drop_sec = self.get_next_drop_countdown()
+                if 1 <= rem_drop_sec <= 20:
+                    if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
+                        self.monitor.auto_order.preload_standby_workers(count=2)
 
                 for dt_str in drop_times:
                     parts = [int(p) for p in dt_str.strip().split(":") if p.strip().isdigit()]
@@ -148,7 +157,7 @@ class DollyteriaScheduler:
                     if now_ts - self.last_interval_check >= interval_sec:
                         self.last_interval_check = now_ts
                         logger.info(f"⏰ 执行日常平缓巡检 (每 {interval_min} 分钟一次)...")
-                        self.monitor.check_once()
+                        self.monitor.check_once(is_burst=False)
 
                 # 跨天重置触发标记集合，防止常驻运行内存增长
                 if not hasattr(self, "_last_date") or self._last_date != today_str:
@@ -175,7 +184,9 @@ class DollyteriaScheduler:
             except Exception as e:
                 logger.error(f"调度循环异常: {e}", exc_info=True)
 
-            time.sleep(1)
+            # 动态微休眠：爆发抢购期使用 50ms 超高速唤醒，精准执行 0.3s 等高频轮询；平常巡检期使用 0.5s 低功耗休眠
+            loop_sleep = 0.05 if self.is_bursting else 0.5
+            time.sleep(loop_sleep)
 
     def get_status(self) -> Dict:
         """获取当前调度器运行状态及倒计时信息"""

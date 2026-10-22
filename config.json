@@ -1,10 +1,14 @@
 {
   "auto_order": {
+    "username": "yyc285184831@gmail.com",
+    "password": "yyc931121",
     "dry_run": true,
     "enabled": true,
-    "password": "yyc931121",
     "payment_method": "store_pickup",
-    "username": "yyc285184831@gmail.com"
+    "max_workers": 10,
+    "standby_workers": 3,
+    "retry_delay_sec": 0.1,
+    "max_retries": 40
   },
   "notifications": {
     "desktop_enabled": true,
@@ -28,86 +32,36 @@
     "sound_enabled": true
   },
   "quick_buy": {
-    "dry_run": true,
+    "dry_run": false,
     "enabled": true
   },
   "schedule": {
     "burst_duration_sec": 180,
-    "burst_interval_sec": 2,
-    "drop_times": [
-      "21:00:00",
-      "21:05:00"
-    ],
-    "enabled": true,
-    "interval_enabled": true,
-    "interval_minutes": 5,
+    "burst_interval_sec": 0.3,
     "daily_stock_sync": {
       "enabled": true,
       "time": "05:00:00"
-    }
+    },
+    "drop_times": [],
+    "enabled": true,
+    "interval_enabled": true,
+    "interval_minutes": 5
   },
   "watches": [
     {
-      "auto_order": true,
-      "enabled": true,
-      "exclude_keywords": [],
-      "id": "w_1792415272992",
+      "id": "w_1792669729612",
+      "name": "SDGIRL/アナイス",
       "keywords": [
-        "DearSD",
-        "ティアラ"
+        "SDGIRL",
+        "アナイス"
       ],
-      "match_mode": "all",
-      "max_price": 130000,
-      "min_price": 50000,
-      "name": "DearSDティアラ",
-      "search_mode": "both"
-    },
-    {
-      "enabled": true,
       "exclude_keywords": [],
-      "id": "w_1792423165497",
-      "keywords": [
-        "幼SD",
-        "まい"
-      ],
+      "min_price": 70000,
+      "max_price": 72000,
+      "search_mode": "both",
       "match_mode": "all",
-      "max_price": 70000,
-      "min_price": 10000,
-      "name": "幼SDまい",
-      "search_mode": "both"
-    },
-    {
       "auto_order": false,
-      "enabled": true,
-      "exclude_keywords": [],
-      "id": "w_1792517908022",
-      "keywords": [
-        "SD13",
-        "Elizabeth",
-        "ブライス",
-        "SDM",
-        "オビツ11",
-        "ボークス"
-      ],
-      "match_mode": "all",
-      "max_price": 0,
-      "min_price": 5000,
-      "name": "Elizabeth",
-      "search_mode": "both"
-    },
-    {
-      "auto_order": false,
-      "enabled": true,
-      "exclude_keywords": [],
-      "id": "w_1792660374350",
-      "keywords": [
-        "DearSD　はな"
-      ],
-      "match_mode": "any",
-      "max_price": 0,
-      "min_price": 0,
-      "name": "DearSDはな",
-      "search_mode": "new_stream"
+      "enabled": false
     }
   ],
   "web_password": ""

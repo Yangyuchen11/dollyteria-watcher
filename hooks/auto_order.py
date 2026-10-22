@@ -450,10 +450,12 @@ class AutoOrderHook:
                 "success": success,
                 "step": "order_complete",
                 "dry_run": False,
-                "message": "🎉 商品已成功完成自动下单！支付方式为代金引换。" if success else "最终下单提交未确认成功，请立即手动核对！",
+                "message": f"🎉 商品已成功完成自动下单！支付方式为【{details.get('payment_method', target_name)}】。" if success else "最终下单提交未确认成功，请立即手动核对！",
                 "elapsed_sec": round(time.time() - t0, 2),
                 "steps_log": steps_log,
                 "final_url": resp_complete.url,
+                "details": details,
+                "payment_method": details.get("payment_method", target_name),
             }
 
     def on_item_matched(self, item: Dict, rule: Dict) -> Optional[Dict]:

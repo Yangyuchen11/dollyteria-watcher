@@ -401,6 +401,24 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             clear_after_dry_run=dry_run,
             payment_method=payment_method,
         )
+        if res.get("success") and not res.get("dry_run"):
+            item_info = {
+                "id": item_id,
+                "title": item_title or f"商品 #{item_id}",
+                "url": f"https://www.dollyteria.com/product/{item_id}",
+            }
+            archived = monitor.archive_db.get_product_by_id(item_id)
+            if archived:
+                item_info.update(archived)
+            try:
+                monitor.notifier.dispatch_order_success(
+                    item=item_info,
+                    order_result=res,
+                    rule={"name": "看板一键购买"}
+                )
+            except Exception as e:
+                logger.error(f"一键购买分发成功通知异常: {e}")
+
         return jsonify(res)
 
     @app.route("/api/events")

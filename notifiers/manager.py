@@ -96,6 +96,50 @@ class NotifierManager:
             except Exception as e:
                 logger.debug(f"推送监听器回调异常: {e}")
 
+    def dispatch_order_success(self, item: Dict, order_result: Dict, rule: Dict = None):
+        """自动下单成功统一分发给所有激活的通知渠道"""
+        if not item or not order_result:
+            return
+
+        rule_name = (rule.get("name") if rule else "自动监控抢购") or "自动监控抢购"
+        logger.info(f"🎉 [通知中心] 正在分发【自动下单成功】通知: [{item.get('title', item.get('id'))}]")
+
+        event = {
+            "id": f"evt_order_{int(time.time() * 1000)}",
+            "type": "order_success",
+            "timestamp": int(time.time()),
+            "rule_name": rule_name,
+            "item": item,
+            "order_result": order_result,
+        }
+
+        self.recent_events.insert(0, event)
+        if len(self.recent_events) > 50:
+            self.recent_events.pop()
+
+        # 分发到各个激活的通道
+        if self.sound.enabled and hasattr(self.sound, "notify_order_success"):
+            self.sound.notify_order_success(item, order_result, rule_name)
+
+        if self.desktop.enabled and hasattr(self.desktop, "notify_order_success"):
+            self.desktop.notify_order_success(item, order_result, rule_name)
+
+        if self.discord.enabled and hasattr(self.discord, "notify_order_success"):
+            self.discord.notify_order_success(item, order_result, rule_name)
+
+        if self.line.enabled and hasattr(self.line, "notify_order_success"):
+            self.line.notify_order_success(item, order_result, rule_name)
+
+        if self.email.enabled and hasattr(self.email, "notify_order_success"):
+            self.email.notify_order_success(item, order_result, rule_name)
+
+        # 推送给 Web UI 实时监听器 (SSE)
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception as e:
+                logger.debug(f"推送监听器回调异常: {e}")
+
     def update_config(self, notif_cfg: Dict):
         """动态更新通知渠道配置"""
         if "sound_enabled" in notif_cfg:

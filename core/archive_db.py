@@ -262,6 +262,35 @@ class DollyteriaArchiveDB:
             logger.error(f"获取在售商品 ID 列表异常: {e}")
             return []
 
+    def get_product_by_id(self, item_id: str) -> Optional[Dict]:
+        """根据商品 ID 精确获取单个商品详细信息"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, title, model_number, price, price_str, url, img_url,
+                           is_in_stock, first_seen_at, updated_at
+                    FROM products
+                    WHERE id = ?;
+                """, (str(item_id).strip(),))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "id": row["id"],
+                        "title": row["title"],
+                        "model_number": row["model_number"],
+                        "price": row["price"],
+                        "price_str": row["price_str"] or f"￥{row['price']:,}",
+                        "url": row["url"],
+                        "img_url": row["img_url"],
+                        "is_in_stock": bool(row["is_in_stock"]),
+                        "first_seen_at": row["first_seen_at"],
+                        "updated_at": row["updated_at"],
+                    }
+        except Exception as e:
+            logger.error(f"获取单商品数据异常: {e}")
+        return None
+
     def clear_archive(self):
         """清空归档库"""
         try:

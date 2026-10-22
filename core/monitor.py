@@ -416,7 +416,13 @@ class DollyteriaMonitor:
                     # 自动下单 Hook
                     if self.config.get("auto_order", {}).get("enabled", False):
                         for u in unseen_items:
-                            self.auto_order.on_item_matched(u, rule)
+                            order_res = self.auto_order.on_item_matched(u, rule)
+                            if order_res and order_res.get("success"):
+                                # 联动通知渠道扩展分发下单成功通知 (Discord/邮件/桌面/Line/音效)
+                                try:
+                                    self.notifier.dispatch_order_success(item=u, order_result=order_res, rule=rule)
+                                except Exception as e:
+                                    logger.error(f"分发下单成功通知异常: {e}")
 
                     # 记录至历史动态
                     for u in unseen_items:

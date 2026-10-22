@@ -94,6 +94,54 @@ class EmailNotifier(BaseNotifier):
 
         return self._send_email(subject, html_content)
 
+    def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
+        """推送自动下单成功专属邮件"""
+        if not self.enabled:
+            return False
+        if not (self.smtp_host and self.smtp_user and self.smtp_password):
+            return False
+
+        details = order_result.get("details", {})
+        pay_method = order_result.get("payment_method") or details.get("payment_method") or "代金引換"
+        total_price = details.get("total_price") or item.get("price_str") or f"￥{item.get('price', 0):,}"
+
+        title_short = (item.get("title") or "商品")[:35]
+        subject = f"🎉【Dollyteria 自动下单成功】已成功为您抢购: {title_short}"
+
+        img_tag = f'<img src="{item.get("img_url")}" width="150" style="border-radius:8px;object-fit:cover;box-shadow:0 4px 12px rgba(0,0,0,0.1);" />' if item.get("img_url") else ""
+
+        html = f"""
+        <div style="max-width:650px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;background:#ffffff;">
+            <div style="background:linear-gradient(135deg, #10b981 0%, #059669 100%);color:#ffffff;padding:22px 28px;">
+                <div style="font-size:22px;font-weight:bold;margin-bottom:6px;">🎉 Dollyteria 自动下单成功通知</div>
+                <div style="font-size:13px;opacity:0.95;">系统监控到目标商品，已毫秒级推进结算完成 Dollyteria 官网正式下单！</div>
+            </div>
+            <div style="padding:24px 28px;">
+                <div style="display:flex;margin-bottom:20px;border-bottom:1px solid #f1f5f9;padding-bottom:18px;">
+                    <div style="margin-right:18px;">{img_tag}</div>
+                    <div>
+                        <h3 style="margin:0 0 8px 0;font-size:15px;color:#1e293b;line-height:1.4;">{item.get('title', '未知商品')}</h3>
+                        <div style="font-size:13px;color:#64748b;margin-bottom:6px;">商品编号: <b>{item.get('model_number') or item.get('id')}</b></div>
+                        <div style="font-size:20px;font-weight:bold;color:#10b981;">{total_price}</div>
+                    </div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:14px;color:#334155;margin-bottom:22px;">
+                    <tr style="border-bottom:1px solid #f8fafc;"><td style="padding:8px 0;color:#64748b;">支付方式:</td><td style="padding:8px 0;font-weight:600;text-align:right;">【{pay_method}】</td></tr>
+                    <tr style="border-bottom:1px solid #f8fafc;"><td style="padding:8px 0;color:#64748b;">收货人:</td><td style="padding:8px 0;font-weight:600;text-align:right;">{details.get('recipient_name') or '官网默认收货人'}</td></tr>
+                    <tr style="border-bottom:1px solid #f8fafc;"><td style="padding:8px 0;color:#64748b;">触发来源:</td><td style="padding:8px 0;font-weight:600;text-align:right;">{rule_name or '自动监控'}</td></tr>
+                    <tr style="border-bottom:1px solid #f8fafc;"><td style="padding:8px 0;color:#64748b;">下单耗时:</td><td style="padding:8px 0;font-weight:600;text-align:right;">{order_result.get('elapsed_sec', 0)} 秒</td></tr>
+                </table>
+                <div style="text-align:center;margin-top:20px;">
+                    <a href="https://www.dollyteria.com/member" style="display:inline-block;padding:12px 28px;background:#10b981;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;font-size:14px;">前往官网个人中心核对订单</a>
+                </div>
+            </div>
+            <div style="background:#f8fafc;padding:12px 28px;font-size:12px;color:#94a3b8;text-align:center;border-top:1px solid #f1f5f9;">
+                Dollyteria 自动下单抢购助手 • 请及时前往官网核对发货与支付信息
+            </div>
+        </div>
+        """
+        return self._send_email(subject, html)
+
     def _send_email(self, subject: str, html_content: str) -> bool:
         try:
             msg = MIMEMultipart("alternative")

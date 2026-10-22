@@ -75,6 +75,67 @@ class DiscordNotifier(BaseNotifier):
             "embeds": embeds,
         }
 
+    def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
+        """推送自动下单成功专属高优先级通知"""
+        if not self.enabled or not self.webhook_url:
+            return False
+
+        details = order_result.get("details", {})
+        pay_method = order_result.get("payment_method") or details.get("payment_method") or "代金引換"
+        total_price = details.get("total_price") or item.get("price_str") or f"￥{item.get('price', 0):,}"
+
+        embed = {
+            "title": f"🎉 【自动下单成功】{item.get('title', '未知商品')[:230]}",
+            "url": item.get("url", "https://www.dollyteria.com/"),
+            "description": f"⚡ **系统已全自动完成加购并成功提交 Dollyteria 官网订单！**",
+            "color": 0x10B981,  # 胜利高光翡翠绿
+            "fields": [
+                {
+                    "name": "💰 订单总额",
+                    "value": f"**{total_price}**",
+                    "inline": True,
+                },
+                {
+                    "name": "📦 支付方式",
+                    "value": f"【{pay_method}】",
+                    "inline": True,
+                },
+                {
+                    "name": "🎯 触发来源",
+                    "value": f"`{rule_name or '自动监控抢购'}`",
+                    "inline": True,
+                },
+                {
+                    "name": "⏱️ 下单耗时",
+                    "value": f"{order_result.get('elapsed_sec', 0)} 秒",
+                    "inline": True,
+                },
+                {
+                    "name": "👤 会员收件人",
+                    "value": f"{details.get('recipient_name') or '官网默认收货人'}",
+                    "inline": True,
+                },
+                {
+                    "name": "🔗 官网订单查验",
+                    "value": "[前往个人中心核对订单](https://www.dollyteria.com/member)",
+                    "inline": True,
+                },
+            ],
+            "footer": {
+                "text": "Dollyteria 自动下单抢购助手 • 订单已生成，请留意官网发货通知",
+            },
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+
+        img_url = item.get("img_url", "")
+        if img_url and img_url.startswith("http"):
+            embed["image"] = {"url": img_url}
+
+        payload = {
+            "username": "Dollyteria 抢购助手",
+            "content": f"🚨 **【重要抢购提醒】Dollyteria 自动下单成功！已为您锁定商品！** @everyone",
+            "embeds": [embed],
+        }
         return self._send_webhook(payload)
 
     def _send_webhook(self, payload: Dict) -> bool:

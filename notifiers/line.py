@@ -47,6 +47,28 @@ class LineNotifier(BaseNotifier):
         message = "\n".join(lines)
         return self._send_line_notify(message, image_thumbnail=items[0].get("img_url"))
 
+    def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
+        """推送自动下单成功 LINE 消息"""
+        if not self.enabled or not self.token:
+            return False
+
+        details = order_result.get("details", {})
+        pay_method = order_result.get("payment_method") or details.get("payment_method") or "代金引換"
+        total_price = details.get("total_price") or item.get("price_str") or f"￥{item.get('price', 0):,}"
+
+        lines = [
+            "\n🎉 [Dollyteria 自动下单成功！]",
+            f"商品: {item.get('title')}",
+            f"总金额: {total_price}",
+            f"支付方式: 【{pay_method}】",
+            f"触发来源: {rule_name or '自动监控'}",
+            f"下单耗时: {order_result.get('elapsed_sec', 0)}s",
+            "官网个人中心: https://www.dollyteria.com/member",
+            "请尽快前往官网个人中心核对订单！",
+        ]
+        message = "\n".join(lines)
+        return self._send_line_notify(message, image_thumbnail=item.get("img_url"))
+
     def _send_line_notify(self, message: str, image_thumbnail: str = "") -> bool:
         """通过 LINE Notify API 发送消息"""
         url = "https://notify-api.line.me/api/notify"

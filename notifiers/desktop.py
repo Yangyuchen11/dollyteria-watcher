@@ -78,6 +78,25 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
         thread.start()
         return True
 
+    def notify_order_success(self, item: Dict, order_result: Dict, rule_name: str = "") -> bool:
+        """推送自动下单成功 Windows 气泡通知"""
+        if not self.enabled:
+            return False
+
+        details = order_result.get("details", {})
+        pay_method = order_result.get("payment_method") or details.get("payment_method") or "代金引換"
+        title = "🎉 Dollyteria 自动下单成功！"
+        body = f"已成功抢到商品: {item.get('title', '')[:35]}\n支付: 【{pay_method}】 | 耗时: {order_result.get('elapsed_sec', 0)}s"
+        url = "https://www.dollyteria.com/member"
+
+        thread = threading.Thread(
+            target=self._show_windows_toast,
+            args=(title, body, url),
+            daemon=True,
+        )
+        thread.start()
+        return True
+
     def test(self):
         """测试弹窗"""
         self._show_windows_toast(

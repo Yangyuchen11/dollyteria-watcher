@@ -861,6 +861,14 @@ function initSSE() {
             const data = JSON.parse(event.data);
             if (data.type === 'connected') return;
 
+            // 收到自动下单成功事件
+            if (data.type === 'order_success') {
+                playWebChime();
+                const item = data.item || {};
+                showToast(`🎉 【自动下单成功】已成功为您抢到: ${item.title || item.id}！`, 'success');
+                return;
+            }
+
             // 收到上新提醒事件
             if (data.items && data.items.length > 0) {
                 playWebChime();

@@ -238,6 +238,11 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     def api_archive_crawler_stop():
         return jsonify(monitor.archiver.stop())
 
+    @app.route("/api/archive/sync_stock", methods=["POST"])
+    def api_archive_sync_stock():
+        res = monitor.archiver.start_stock_sync(delay=1.0)
+        return jsonify(res)
+
     @app.route("/api/archive/products")
     def api_archive_products():
         kw = request.args.get("keyword", "").strip()

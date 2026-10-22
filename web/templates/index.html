@@ -249,6 +249,26 @@
                             <input type="number" id="sched-interval-minutes" class="form-control" value="5" min="1" max="120">
                         </div>
                     </div>
+
+                    <div class="form-divider"></div>
+
+                    <div class="form-row">
+                        <div class="form-group col-6">
+                            <div class="switch-row">
+                                <label class="switch">
+                                    <input type="checkbox" id="sched-daily-sync-enabled" checked>
+                                    <span class="slider"></span>
+                                </label>
+                                <span class="form-label-inline">启用每日清晨在库盘点与已售剔除</span>
+                            </div>
+                            <span class="form-tip">每日访客波谷时段自动抓取官网全部在售列表并做差集比对，自动标记已买走售罄商品 (仅 ~8MB 流量)</span>
+                        </div>
+                        <div class="form-group col-6">
+                            <label class="form-label">每日自动盘点触发时刻</label>
+                            <input type="text" id="sched-daily-sync-time" class="form-control" value="05:00:00" placeholder="05:00:00">
+                            <span class="form-tip">推荐 05:00:00 (夜间订单沉淀后且访问量极低时段)，格式 HH:MM:SS</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -602,6 +622,9 @@
                         <p class="pane-desc">支持全自动温和抓取全站所有在售与售罄商品（全站约 4 万件），建立个人行情档案并提供毫秒级搜索</p>
                     </div>
                     <div class="header-actions">
+                        <button id="btn-sync-stock-now" class="btn btn-primary" title="仅抓取当前官网在售列表 (~8MB 流量)，将已被买走/下架的商品精准自动标记为已售罄">
+                            <span>🔄 立即盘点在库状态</span>
+                        </button>
                         <button id="btn-sync-baseline-from-archive" class="btn btn-accent" title="将数据库中所有在售商品设为监控基准">
                             <span>🎯 同步在售商品为监控基准</span>
                         </button>
@@ -638,6 +661,17 @@
                                 <div class="arch-stat-num" id="arch-stat-progress">0%</div>
                                 <div class="arch-stat-label" id="arch-stat-progress-sub">就绪待命</div>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- 在库全量盘点状态条 -->
+                    <div class="archive-sync-status-bar" id="archive-sync-status-bar">
+                        <div class="sync-status-left">
+                            <span class="sync-status-badge">⏰ 每日 05:00 自动盘点</span>
+                            <span class="sync-status-text" id="arch-sync-last-time">上次盘点: 暂无盘点记录</span>
+                        </div>
+                        <div class="sync-status-right">
+                            <span class="sync-status-detail" id="arch-sync-last-detail">仅抓取官网在售清单差集比对，单次仅约 8MB 流量</span>
                         </div>
                     </div>
 

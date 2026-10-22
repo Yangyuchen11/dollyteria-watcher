@@ -150,6 +150,28 @@ class DollyteriaScheduler:
                         logger.info(f"⏰ 执行日常平缓巡检 (每 {interval_min} 分钟一次)...")
                         self.monitor.check_once()
 
+                # 跨天重置触发标记集合，防止常驻运行内存增长
+                if not hasattr(self, "_last_date") or self._last_date != today_str:
+                    self._last_date = today_str
+                    self._triggered_today_markers.clear()
+
+                # 4. 每日清晨在库全量盘点与售罄更新 (默认 05:00:00，仅约 8MB 流量)
+                daily_sync_cfg = sched_cfg.get("daily_stock_sync", {})
+                if daily_sync_cfg.get("enabled", True):
+                    sync_time_str = daily_sync_cfg.get("time", "05:00:00").strip()
+                    parts = [int(p) for p in sync_time_str.split(":") if p.strip().isdigit()]
+                    if len(parts) >= 2:
+                        shour = parts[0]
+                        smin = parts[1]
+                        ssec = parts[2] if len(parts) > 2 else 0
+                        sync_marker = f"{today_str}_stocksync_{shour:02d}:{smin:02d}:{ssec:02d}"
+                        is_sync_hit = (now.hour == shour and now.minute == smin and abs(now.second - ssec) <= 1)
+                        if is_sync_hit and sync_marker not in self._triggered_today_markers:
+                            self._triggered_today_markers.add(sync_marker)
+                            logger.info(f"⏰ 准时命中每日在库盘点时刻 [{sync_time_str}]！正在启动差集更新...")
+                            if hasattr(self.monitor, "archiver") and self.monitor.archiver:
+                                self.monitor.archiver.start_stock_sync(delay=1.0)
+
             except Exception as e:
                 logger.error(f"调度循环异常: {e}", exc_info=True)
 

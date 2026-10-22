@@ -26,12 +26,14 @@ class DollyteriaArchiver:
         self._pause_event = threading.Event()
 
         self.status = "idle"  # idle | running | paused | finished | error
+        self.mode = "full"    # full | stock_sync
         self.current_page = 0
         self.total_pages = 0
         self.total_items_estimated = 0
         self.total_scraped = 0
         self.new_inserted = 0
         self.updated_existing = 0
+        self.sold_out_flipped = 0
         self.delay_sec = 1.2
         self.last_error = ""
         self.started_at = 0
@@ -46,12 +48,14 @@ class DollyteriaArchiver:
 
         return {
             "status": self.status,
+            "mode": self.mode,
             "current_page": self.current_page,
             "total_pages": self.total_pages,
             "total_items_estimated": self.total_items_estimated,
             "total_scraped": self.total_scraped,
             "new_inserted": self.new_inserted,
             "updated_existing": self.updated_existing,
+            "sold_out_flipped": self.sold_out_flipped,
             "delay_sec": self.delay_sec,
             "progress_pct": progress_pct,
             "last_error": self.last_error,
@@ -63,12 +67,13 @@ class DollyteriaArchiver:
     def start(self, start_page: Optional[int] = None, delay: float = 1.2) -> Dict:
         """启动或继续全站采集"""
         if self.status == "running":
-            return {"status": "already_running", "message": "全站采集任务已在运行中"}
+            return {"status": "already_running", "message": f"当前已有正在进行的任务 ({'在库盘点' if self.mode == 'stock_sync' else '全量收录'})"}
 
         if self.status == "paused":
             self.resume()
             return {"status": "ok", "message": "采集任务已从暂停恢复继续"}
 
+        self.mode = "full"
         self.delay_sec = max(0.5, float(delay))
         self._stop_event.clear()
         self._pause_event.clear()
@@ -120,6 +125,37 @@ class DollyteriaArchiver:
         self.status = "idle"
         logger.info(f"全站采集已手动停止，共抓取到第 {self.current_page} 页")
         return {"status": "ok", "message": "采集已停止"}
+
+    def start_stock_sync(self, delay: float = 1.0) -> Dict:
+        """启动全站在售库存盘点与已售商品差集标记 (轻量低消耗同步，约 8MB 流量)"""
+        if self.status == "running":
+            return {"status": "already_running", "message": f"当前已有正在进行的任务 ({'在库盘点' if self.mode == 'stock_sync' else '全量收录'})"}
+
+        if self.status == "paused":
+            self.resume()
+            return {"status": "ok", "message": "盘点任务已从暂停恢复继续"}
+
+        self.mode = "stock_sync"
+        self.delay_sec = max(0.5, float(delay))
+        self._stop_event.clear()
+        self._pause_event.clear()
+
+        self.current_page = 0
+        self.total_pages = 0
+        self.total_items_estimated = 0
+        self.total_scraped = 0
+        self.new_inserted = 0
+        self.updated_existing = 0
+        self.sold_out_flipped = 0
+        self.status = "running"
+        self.last_error = ""
+        self.started_at = int(time.time())
+        self.finished_at = 0
+
+        self._thread = threading.Thread(target=self._run_stock_sync_loop, daemon=True)
+        self._thread.start()
+        logger.info(f"全站在售库存盘点与售罄更新任务已启动，单页抓取间隔 {self.delay_sec}s")
+        return {"status": "ok", "message": "全站在售库存盘点与售罄更新任务已启动"}
 
     def _extract_total_pages(self, html: str) -> int:
         """从页面提取全站商品总数并计算总页数"""
@@ -243,3 +279,101 @@ class DollyteriaArchiver:
         if self.status == "running":
             self.status = "idle"
         logger.info(f"全站归档爬虫线程结束，最终状态: {self.status}")
+
+    def _run_stock_sync_loop(self):
+        """仅抓取 available=1 在售商品列表并对齐售罄数据 (轻量盘点，~8MB 流量)"""
+        logger.info("全站在售库存盘点与售罄更新线程启动")
+        url = f"{BASE_URL}/product-list"
+        page = 1
+        consecutive_errors = 0
+        live_in_stock_ids = set()
+
+        while not self._stop_event.is_set():
+            while self._pause_event.is_set():
+                if self._stop_event.is_set():
+                    break
+                time.sleep(0.5)
+
+            if self._stop_event.is_set():
+                break
+
+            params = {
+                "available": "1",
+                "num": "100",
+                "page": str(page),
+            }
+
+            try:
+                html = self.scraper._get(url, params=params)
+                if not html:
+                    consecutive_errors += 1
+                    logger.warning(f"[在库盘点] 第 {page} 页请求失败，连续重试 {consecutive_errors} 次")
+                    if consecutive_errors >= 5:
+                        self.status = "error"
+                        self.last_error = f"第 {page} 页请求连续失败，盘点自动中止"
+                        break
+                    time.sleep(2.0 * consecutive_errors)
+                    continue
+
+                consecutive_errors = 0
+
+                if self.total_pages <= 0:
+                    est_pages = self._extract_total_pages(html)
+                    if est_pages > 0:
+                        self.total_pages = est_pages
+                        logger.info(f"[在库盘点] 探测到官网当前在售商品预估 {self.total_items_estimated} 件，约 {self.total_pages} 页")
+
+                items = self.scraper.parse_items(html)
+                if not items:
+                    logger.info(f"[在库盘点] 第 {page} 页未解析出在售商品，在售列表已全部遍历完毕")
+                    break
+
+                for it in items:
+                    live_in_stock_ids.add(it["id"])
+
+                # 同步更新/补充入库 (确保在售商品最新入库)
+                ins, upd = self.db.upsert_batch(items)
+                self.new_inserted += ins
+                self.updated_existing += upd
+                self.total_scraped += len(items)
+                self.current_page = page
+
+                logger.info(
+                    f"[在库盘点] 第 {page}/{self.total_pages or '?'} 页完成: "
+                    f"收录在售 {len(items)} 件 (累计在售 ID {len(live_in_stock_ids)} 个)"
+                )
+
+                if self.total_pages > 0 and page >= self.total_pages:
+                    break
+
+                page += 1
+
+                sleep_time = self.delay_sec
+                step = 0.2
+                while sleep_time > 0:
+                    if self._stop_event.is_set() or self._pause_event.is_set():
+                        break
+                    time.sleep(min(step, sleep_time))
+                    sleep_time -= step
+
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"[在库盘点] 处理第 {page} 页异常: {e}")
+                self.last_error = str(e)
+                if consecutive_errors >= 5:
+                    self.status = "error"
+                    break
+                time.sleep(2.0)
+
+        # 遍历完成且未被强制手动停止时，执行差集更新
+        if not self._stop_event.is_set() and self.status != "error" and live_in_stock_ids:
+            logger.info(f"在售列表抓取完毕 (共在线 {len(live_in_stock_ids)} 件)，正在对齐并标记已售罄商品...")
+            flipped = self.db.reconcile_in_stock_ids(live_in_stock_ids)
+            self.sold_out_flipped = flipped
+            self.status = "finished"
+            self.finished_at = int(time.time())
+            logger.info(f"🎉 在售库存盘点与售罄更新全部完成！共剔除/标记 {flipped} 件已售出商品。")
+        elif self.status == "running":
+            self.status = "idle"
+
+        logger.info(f"在库盘点线程退出，最终状态: {self.status}")

@@ -2104,6 +2104,56 @@ input:checked+.slider:before {
     margin-top: 2px;
 }
 
+/* 在库盘点状态条 */
+.archive-sync-status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 9px 14px;
+    margin-bottom: 14px;
+    background: rgba(59, 130, 246, 0.06);
+    border: 1px solid rgba(59, 130, 246, 0.18);
+    border-radius: var(--radius-md);
+    font-size: 12.5px;
+}
+
+.sync-status-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sync-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #93c5fd;
+    white-space: nowrap;
+}
+
+.sync-status-text {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.sync-status-right {
+    display: flex;
+    align-items: center;
+}
+
+.sync-status-detail {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
 /* 采集进度条 */
 .crawler-progress-wrap {
     margin: 16px 0;
@@ -2397,6 +2447,50 @@ input:checked+.slider:before {
     background: rgba(71, 85, 105, 0.85);
     color: #cbd5e1;
     backdrop-filter: blur(4px);
+}
+
+/* 售罄商品卡片与官方同款图片水印遮罩 */
+.arch-card.is-sold-out {
+    opacity: 0.88;
+}
+
+.arch-card.is-sold-out .arch-card-img {
+    filter: grayscale(25%) contrast(90%);
+}
+
+.arch-soldout-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 15, 26, 0.38);
+    backdrop-filter: blur(1.5px);
+    z-index: 2;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+}
+
+.arch-card:hover .arch-soldout-overlay {
+    opacity: 0.18; /* 鼠标悬停时自动淡化水印，方便清晰查看商品原图与成色细节 */
+}
+
+.soldout-watermark-text {
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    color: #f8fafc;
+    padding: 6px 14px;
+    background: rgba(0, 0, 0, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.65);
+    transform: rotate(-10deg);
+    user-select: none;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
 .arch-card-body {

@@ -45,6 +45,8 @@ const elements = {
     schedBurstInterval: document.getElementById('sched-burst-interval'),
     schedIntervalEnabled: document.getElementById('sched-interval-enabled'),
     schedIntervalMinutes: document.getElementById('sched-interval-minutes'),
+    schedDailySyncEnabled: document.getElementById('sched-daily-sync-enabled'),
+    schedDailySyncTime: document.getElementById('sched-daily-sync-time'),
     btnSaveSchedule: document.getElementById('btn-save-schedule'),
 
     // 通知设置
@@ -753,6 +755,10 @@ function populateScheduleForm() {
     if (elements.schedBurstInterval) elements.schedBurstInterval.value = s.burst_interval_sec ?? 2.0;
     if (elements.schedIntervalEnabled) elements.schedIntervalEnabled.checked = s.interval_enabled ?? true;
     if (elements.schedIntervalMinutes) elements.schedIntervalMinutes.value = s.interval_minutes ?? 5;
+
+    const dailySync = s.daily_stock_sync || {};
+    if (elements.schedDailySyncEnabled) elements.schedDailySyncEnabled.checked = dailySync.enabled ?? true;
+    if (elements.schedDailySyncTime) elements.schedDailySyncTime.value = dailySync.time || '05:00:00';
 }
 
 // 通知表单同步
@@ -1235,6 +1241,10 @@ function bindEvents() {
             currentConfig.schedule.burst_interval_sec = parseFloat(elements.schedBurstInterval?.value) || 2.0;
             currentConfig.schedule.interval_enabled = elements.schedIntervalEnabled?.checked ?? true;
             currentConfig.schedule.interval_minutes = parseFloat(elements.schedIntervalMinutes?.value) || 5;
+            currentConfig.schedule.daily_stock_sync = {
+                enabled: elements.schedDailySyncEnabled?.checked ?? true,
+                time: (elements.schedDailySyncTime?.value || '').trim() || '05:00:00'
+            };
             saveConfig();
         });
     }
@@ -1528,6 +1538,26 @@ async function pollArchiveCrawlerStatus() {
         if (elSoldOut) elSoldOut.textContent = (stats.sold_out || 0).toLocaleString();
         if (elProgress) elProgress.textContent = `${data.progress_pct || 0}%`;
 
+        // 盘点时间与状态条显示
+        const elSyncTime = document.getElementById('arch-sync-last-time');
+        const elSyncDetail = document.getElementById('arch-sync-last-detail');
+        if (elSyncTime) {
+            if (stats.last_stock_sync_at && stats.last_stock_sync_at > 0) {
+                const syncDate = new Date(stats.last_stock_sync_at * 1000);
+                const timeStr = syncDate.toLocaleString('zh-CN', { hour12: false });
+                elSyncTime.textContent = `上次盘点: ${timeStr}`;
+            } else {
+                elSyncTime.textContent = '上次盘点: 暂无盘点记录 (每日 05:00 自动执行)';
+            }
+        }
+        if (elSyncDetail) {
+            if (stats.last_stock_sync_at && stats.last_stock_sync_at > 0) {
+                elSyncDetail.textContent = `在线在售存活: ${stats.last_stock_sync_total_live || 0} 件 | 本次新识别售罄: ${stats.last_stock_sync_sold_count || 0} 件`;
+            } else {
+                elSyncDetail.textContent = '仅抓取官网在售清单差集比对，单次仅约 8MB 流量';
+            }
+        }
+
         // 按钮元素
         const btnStart = document.getElementById('btn-crawler-start');
         const btnPause = document.getElementById('btn-crawler-pause');
@@ -1535,15 +1565,23 @@ async function pollArchiveCrawlerStatus() {
         const btnStop = document.getElementById('btn-crawler-stop');
 
         const status = data.status || 'idle';
+        const isStockSync = data.mode === 'stock_sync';
+
         if (elProgressSub) {
-            const statusMap = {
-                'idle': '就绪待命',
-                'running': '⚡ 正在采集...',
-                'paused': '⏸️ 已暂停',
-                'finished': '✅ 采集完成',
-                'error': '❌ 异常中断',
-            };
-            elProgressSub.textContent = statusMap[status] || status;
+            if (isStockSync && status === 'running') {
+                elProgressSub.textContent = '🔄 盘点在库中...';
+            } else if (isStockSync && status === 'finished') {
+                elProgressSub.textContent = '✅ 盘点完成';
+            } else {
+                const statusMap = {
+                    'idle': '就绪待命',
+                    'running': '⚡ 正在采集...',
+                    'paused': '⏸️ 已暂停',
+                    'finished': '✅ 采集完成',
+                    'error': '❌ 异常中断',
+                };
+                elProgressSub.textContent = statusMap[status] || status;
+            }
         }
 
         if (elFill) {
@@ -1552,13 +1590,21 @@ async function pollArchiveCrawlerStatus() {
 
         if (elProgressText) {
             if (status === 'running') {
-                elProgressText.textContent = `正在抓取第 ${data.current_page} / ${data.total_pages || '?'} 页 (累计抓取 ${data.total_scraped || 0} 件，新增 ${data.new_inserted || 0}，更新 ${data.updated_existing || 0})`;
+                if (isStockSync) {
+                    elProgressText.textContent = `[在库盘点中] 正在核验第 ${data.current_page} / ${data.total_pages || '?'} 页在售商品 (已扫描在售 ${data.total_scraped || 0} 件)...`;
+                } else {
+                    elProgressText.textContent = `正在抓取第 ${data.current_page} / ${data.total_pages || '?'} 页 (累计抓取 ${data.total_scraped || 0} 件，新增 ${data.new_inserted || 0}，更新 ${data.updated_existing || 0})`;
+                }
             } else if (status === 'paused') {
                 elProgressText.textContent = `任务暂停在第 ${data.current_page} / ${data.total_pages || '?'} 页 (随时可点击继续)`;
             } else if (status === 'finished') {
-                elProgressText.textContent = `已完成全站爬取！共收录 ${stats.total || 0} 件商品 (在售: ${stats.in_stock || 0})`;
+                if (isStockSync) {
+                    elProgressText.textContent = `在库盘点完成！成功识别并标记 ${data.sold_out_flipped ?? stats.last_stock_sync_sold_count ?? 0} 件售罄商品 (当前在线在售: ${stats.in_stock || 0})`;
+                } else {
+                    elProgressText.textContent = `已完成全站爬取！共收录 ${stats.total || 0} 件商品 (在售: ${stats.in_stock || 0})`;
+                }
             } else if (status === 'error') {
-                elProgressText.textContent = `采集出错: ${data.last_error || '网络或接口异常'}`;
+                elProgressText.textContent = `任务出错: ${data.last_error || '网络或接口异常'}`;
             } else {
                 elProgressText.textContent = `准备就绪 (全站约 40,500 件商品，单页 100 件平缓抓取)`;
             }
@@ -1683,14 +1729,21 @@ function renderArchiveProducts(items) {
             ? '<span class="arch-stock-badge in-stock">🟢 在售</span>'
             : '<span class="arch-stock-badge sold-out">⚪ 已售罄</span>';
 
+        const soldOutOverlay = !isStock
+            ? `<div class="arch-soldout-overlay">
+                   <div class="soldout-watermark-text">SoldOut 売切</div>
+               </div>`
+            : '';
+
         const imgSrc = it.img_url || 'https://www.dollyteria.com/html/template/default/img/common/no_image.gif';
         const priceStr = it.price_str || `￥${(it.price || 0).toLocaleString()}`;
         const modelStr = it.model_number ? escapeHtml(it.model_number) : '常规';
 
         return `
-            <div class="arch-card">
+            <div class="arch-card ${isStock ? '' : 'is-sold-out'}">
                 <div class="arch-card-thumb-wrap">
                     ${stockBadge}
+                    ${soldOutOverlay}
                     <img src="${escapeHtml(imgSrc)}"
                          alt="${escapeHtml(it.title || '')}"
                          class="arch-card-img"
@@ -1843,6 +1896,29 @@ function initArchiveModule() {
                 pollArchiveCrawlerStatus();
             } catch (err) {
                 showToast('停止采集失败: ' + err.message, 'error');
+            }
+        });
+    }
+
+    // 立即执行在售库存盘点与售罄更新
+    const btnSyncStock = document.getElementById('btn-sync-stock-now');
+    if (btnSyncStock) {
+        btnSyncStock.addEventListener('click', async () => {
+            if (!confirm('确定立即启动在库商品全量盘点吗？\n系统将以轻量模式抓取官网在售清单并做差集对比，自动将已被买走/下架的商品精准标记为已售罄 (仅需约 8MB 流量，耗时约 3~4 分钟)。')) return;
+            try {
+                btnSyncStock.disabled = true;
+                const res = await fetch('/api/archive/sync_stock', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast('已启动在售库存盘点！正在后台扫描对齐售罄数据...', 'success');
+                } else {
+                    showToast(data.message || '启动盘点失败', 'warning');
+                }
+                pollArchiveCrawlerStatus();
+            } catch (err) {
+                showToast('启动盘点异常: ' + err.message, 'error');
+            } finally {
+                btnSyncStock.disabled = false;
             }
         });
     }

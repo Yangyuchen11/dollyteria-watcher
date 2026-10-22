@@ -40,7 +40,11 @@
     ],
     "enabled": true,
     "interval_enabled": true,
-    "interval_minutes": 5
+    "interval_minutes": 5,
+    "daily_stock_sync": {
+      "enabled": true,
+      "time": "05:00:00"
+    }
   },
   "watches": [
     {

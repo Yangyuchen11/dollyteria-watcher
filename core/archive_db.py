@@ -51,6 +51,12 @@ class DollyteriaArchiveDB:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updated_at DESC);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_price ON products(price);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_products_id_num ON products(CAST(id AS INTEGER) DESC);")
+                conn.execute("""
+                CREATE TABLE IF NOT EXISTS archive_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                """)
                 conn.commit()
             logger.info(f"SQLite 商品归档数据库初始化成功: {self.db_path}")
         except Exception as e:
@@ -241,15 +247,100 @@ class DollyteriaArchiveDB:
                 cursor.execute("SELECT MAX(updated_at) FROM products;")
                 last_updated = cursor.fetchone()[0] or 0
 
+                sync_at = int(self.get_meta("last_stock_sync_at", "0") or 0)
+                sync_sold = int(self.get_meta("last_stock_sync_sold_count", "0") or 0)
+                sync_live = int(self.get_meta("last_stock_sync_total_live", "0") or 0)
+
                 return {
                     "total": total,
                     "in_stock": in_stock,
                     "sold_out": sold_out,
                     "last_updated": last_updated,
+                    "last_stock_sync_at": sync_at,
+                    "last_stock_sync_sold_count": sync_sold,
+                    "last_stock_sync_total_live": sync_live,
                 }
         except Exception as e:
             logger.error(f"获取归档统计异常: {e}")
-            return {"total": 0, "in_stock": 0, "sold_out": 0, "last_updated": 0}
+            return {
+                "total": 0,
+                "in_stock": 0,
+                "sold_out": 0,
+                "last_updated": 0,
+                "last_stock_sync_at": 0,
+                "last_stock_sync_sold_count": 0,
+                "last_stock_sync_total_live": 0,
+            }
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        """读取元数据键值"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM archive_meta WHERE key = ?;", (str(key),))
+                row = cursor.fetchone()
+                return str(row["value"]) if row else default
+        except Exception as e:
+            logger.warning(f"读取元数据 [{key}] 异常: {e}")
+            return default
+
+    def set_meta(self, key: str, value: str):
+        """保存或更新元数据键值"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO archive_meta (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """, (str(key), str(value)))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"写入元数据 [{key}] 异常: {e}")
+
+    def reconcile_in_stock_ids(self, live_in_stock_ids: set) -> int:
+        """
+        根据官网实时抓取的全部在线在售商品 ID 集合做差集对齐：
+        将数据库中所有已不在该集合内的在售商品自动标记为已售罄 (is_in_stock = 0)
+        返回标记为已售罄的商品条数
+        """
+        if not live_in_stock_ids:
+            logger.warning("传入的实时在售 ID 集合为空，为保护数据安全跳过售罄翻转")
+            return 0
+
+        now = int(time.time())
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM products WHERE is_in_stock = 1;")
+                current_db_ids = {row["id"] for row in cursor.fetchall()}
+
+                # 计算差集：数据库里以为有货、但官网实时在线清单已不存在的商品
+                sold_out_ids = list(current_db_ids - live_in_stock_ids)
+                if not sold_out_ids:
+                    logger.info(f"在售盘点一致：数据库中 {len(current_db_ids)} 件在售商品均在官网在线，无需翻转")
+                    self.set_meta("last_stock_sync_at", str(now))
+                    self.set_meta("last_stock_sync_sold_count", "0")
+                    self.set_meta("last_stock_sync_total_live", str(len(live_in_stock_ids)))
+                    return 0
+
+                # 分批批量翻转为已售罄 (每批 500 个防超过 SQLite 变量上限)
+                chunk_size = 500
+                for i in range(0, len(sold_out_ids), chunk_size):
+                    chunk = sold_out_ids[i:i + chunk_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    cursor.execute(
+                        f"UPDATE products SET is_in_stock = 0, updated_at = ? WHERE id IN ({placeholders});",
+                        [now] + chunk
+                    )
+
+                conn.commit()
+                logger.info(f"在售盘点完成：已成功将 {len(sold_out_ids)} 件下架/被买走商品精准标记为已售罄！")
+                self.set_meta("last_stock_sync_at", str(now))
+                self.set_meta("last_stock_sync_sold_count", str(len(sold_out_ids)))
+                self.set_meta("last_stock_sync_total_live", str(len(live_in_stock_ids)))
+                return len(sold_out_ids)
+        except Exception as e:
+            logger.error(f"对齐在售商品状态异常: {e}")
+            return 0
 
     def get_in_stock_ids(self) -> List[str]:
         """获取当前数据库中所有在售商品 ID (用于一键设为监控基准)"""

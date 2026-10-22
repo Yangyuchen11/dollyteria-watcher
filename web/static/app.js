@@ -139,7 +139,7 @@ async function checkAuthStatus() {
         const data = await res.json();
         updateSecurityTabUI(data.auth_required);
         if (data.auth_required && !data.authenticated) {
-            showLockScreen();
+            showLockScreen(false);
             return false;
         } else {
             hideLockScreen();
@@ -147,15 +147,19 @@ async function checkAuthStatus() {
         }
     } catch (e) {
         console.warn('检查鉴权异常:', e);
-        return true;
+        showLockScreen(false);
+        return false;
     }
 }
 
-function showLockScreen() {
+function showLockScreen(clearInput = false) {
     if (elements.authLockOverlay) {
+        const wasHidden = elements.authLockOverlay.classList.contains('hidden');
         elements.authLockOverlay.classList.remove('hidden');
-        if (elements.authPasswordInput) {
+        if (clearInput && elements.authPasswordInput) {
             elements.authPasswordInput.value = '';
+        }
+        if (wasHidden && elements.authPasswordInput) {
             setTimeout(() => elements.authPasswordInput.focus(), 100);
         }
     }
@@ -243,11 +247,20 @@ async function doLogin() {
 }
 
 async function doLogout() {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+    if (sseSource) {
+        try { sseSource.close(); } catch (e) {}
+        sseSource = null;
+    }
+    isAppInitialized = false;
     try {
         await fetch('/api/auth/logout', { method: 'POST' });
     } catch (e) {}
     showToast('已锁定当前控制台', 'info');
-    showLockScreen();
+    showLockScreen(true);
 }
 
 async function saveWebPassword() {
@@ -395,7 +408,11 @@ async function pollStatus() {
     try {
         const res = await fetch('/api/status');
         if (res.status === 401) {
-            showLockScreen();
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            showLockScreen(false);
             return;
         }
         const data = await res.json();
@@ -1999,6 +2016,5 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     } catch (e) {
         console.error('checkAuthStatus err:', e);
-        initMainApp();
     }
 });

@@ -12,7 +12,9 @@ services:
       - HOST=0.0.0.0
       - NO_BROWSER=1
       - DATA_DIR=/app/data
-      - WEB_PASSWORD=yyc931121
+      # 看板访问密码建议直接在 Web 界面【访问安全与密码】中设置并持久化保存
+      # 如需强制使用环境变量覆盖，可取消下方注释并填入 (可选):
+      # - WEB_PASSWORD=your_password_here
     volumes:
       - dollyteria-data:/app/data # 挂载旧数据卷
 volumes:

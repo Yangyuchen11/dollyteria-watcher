@@ -1980,6 +1980,36 @@ function initArchiveModule() {
         });
     }
 
+    // 立即同步官网最新上新流 (/new) 至档案库
+    const btnSyncNewStream = document.getElementById('btn-sync-new-stream');
+    if (btnSyncNewStream) {
+        btnSyncNewStream.addEventListener('click', async () => {
+            try {
+                btnSyncNewStream.disabled = true;
+                btnSyncNewStream.innerHTML = '<span>⏳ 正在拉取新品档案...</span>';
+                showToast('正在高速拉取官网 /new 最新上新流 (前 500 件新品)，请稍候...', 'info');
+                const res = await fetch('/api/archive/sync_new_stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_pages: 5 })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast(data.message, 'success');
+                    pollArchiveCrawlerStatus();
+                    loadArchiveProducts(1);
+                } else {
+                    showToast(data.message || '同步上新流失败', 'error');
+                }
+            } catch (err) {
+                showToast('同步上新流网络异常: ' + err.message, 'error');
+            } finally {
+                btnSyncNewStream.disabled = false;
+                btnSyncNewStream.innerHTML = '<span>⚡ 同步最新上新至档案</span>';
+            }
+        });
+    }
+
     // 立即执行在售库存盘点与售罄更新
     const btnSyncStock = document.getElementById('btn-sync-stock-now');
     if (btnSyncStock) {

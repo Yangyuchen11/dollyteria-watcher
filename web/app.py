@@ -243,6 +243,13 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = monitor.archiver.start_stock_sync(delay=1.0)
         return jsonify(res)
 
+    @app.route("/api/archive/sync_new_stream", methods=["POST"])
+    def api_archive_sync_new_stream():
+        data = request.json or {}
+        max_pages = int(data.get("max_pages", 5))
+        res = monitor.sync_new_arrivals_to_archive(max_pages=max_pages)
+        return jsonify(res)
+
     @app.route("/api/archive/products")
     def api_archive_products():
         kw = request.args.get("keyword", "").strip()

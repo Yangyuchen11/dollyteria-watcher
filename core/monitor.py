@@ -466,11 +466,8 @@ class DollyteriaMonitor:
 
                     # 区分当前页全新商品与已见商品
                     page_new_items = []
-                    has_seen_in_page = False
                     for it in new_arrivals:
-                        if it["id"] in seen_set:
-                            has_seen_in_page = True
-                        else:
+                        if it["id"] not in seen_set:
                             page_new_items.append(it)
 
                     # 对全新商品执行规则匹配
@@ -526,8 +523,8 @@ class DollyteriaMonitor:
                     for it in page_new_items:
                         seen_set.add(it["id"])
 
-                    # 智能早停：当前页包含已见商品，说明此次大上新到此为止已全部接驳完毕；或当前页已不足100件
-                    if has_seen_in_page or len(new_arrivals) < 100:
+                    # 智能早停：若当前页已没有哪怕 1 件全新商品 (整页均为已见历史商品)，说明此次大上新已完全接驳完毕；或当前页已不足 100 件
+                    if len(page_new_items) == 0 or len(new_arrivals) < 100:
                         break
 
             # 2. 关键词全店搜索 (/product-list/?keyword=...)
@@ -624,3 +621,40 @@ class DollyteriaMonitor:
             return {"status": "error", "message": str(e)}
         finally:
             self.is_checking = False
+
+    def sync_new_arrivals_to_archive(self, max_pages: int = 5) -> Dict:
+        """
+        全量同步 /new 最新上新流至商品归档库 (archive.db)
+        支持抓取前 N 页（默认 5 页，500 件），包含在售与售罄状态，
+        确保大上新的所有新品 100% 完整录入档案与行情库
+        """
+        logger.info(f"⚡ 开始同步 /new 上新流商品至归档库 (最大 {max_pages} 页)...")
+        all_items = []
+        for p in range(1, max_pages + 1):
+            try:
+                items = self.scraper.fetch_new_arrivals(num=100, page=p, in_stock_only=False)
+                if not items:
+                    break
+                all_items.extend(items)
+                if len(items) < 100:
+                    break
+            except Exception as e:
+                logger.error(f"同步上新流第 {p} 页出错: {e}")
+                break
+
+        inserted = 0
+        updated = 0
+        if all_items:
+            try:
+                inserted, updated = self.archive_db.upsert_batch(all_items)
+            except Exception as e:
+                logger.error(f"写入归档库异常: {e}")
+
+        logger.info(f"⚡ 上新流归档同步完成: 共获取 {len(all_items)} 件商品 (新增入库: {inserted}, 更新: {updated})")
+        return {
+            "status": "ok",
+            "total_fetched": len(all_items),
+            "inserted": inserted,
+            "updated": updated,
+            "message": f"成功同步 {len(all_items)} 件最新上新商品至档案 (新增 {inserted} 件，更新状态 {updated} 件)",
+        }

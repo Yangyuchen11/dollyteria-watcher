@@ -246,7 +246,8 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     @app.route("/api/archive/sync_new_stream", methods=["POST"])
     def api_archive_sync_new_stream():
         data = request.json or {}
-        max_pages = int(data.get("max_pages", 5))
+        default_max = int(monitor.config.get("schedule", {}).get("max_stream_pages", 5))
+        max_pages = int(data.get("max_pages", default_max))
         res = monitor.sync_new_arrivals_to_archive(max_pages=max_pages)
         return jsonify(res)
 

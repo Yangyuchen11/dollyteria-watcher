@@ -1984,14 +1984,15 @@ function initArchiveModule() {
     const btnSyncNewStream = document.getElementById('btn-sync-new-stream');
     if (btnSyncNewStream) {
         btnSyncNewStream.addEventListener('click', async () => {
+            const maxPages = currentConfig?.schedule?.max_stream_pages || 5;
             try {
                 btnSyncNewStream.disabled = true;
                 btnSyncNewStream.innerHTML = '<span>⏳ 正在拉取新品档案...</span>';
-                showToast('正在高速拉取官网 /new 最新上新流 (前 500 件新品)，请稍候...', 'info');
+                showToast(`正在高速拉取官网 /new 最新上新流 (前 ${maxPages * 100} 件新品)，请稍候...`, 'info');
                 const res = await fetch('/api/archive/sync_new_stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ max_pages: 5 })
+                    body: JSON.stringify({ max_pages: maxPages })
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {

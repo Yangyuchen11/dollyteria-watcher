@@ -360,6 +360,25 @@ class RecaptchaTokenProvider:
             except Exception:
                 pass
 
+            # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
+            stealth_js = """
+            try {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
+                if (!window.chrome) { window.chrome = {}; }
+                window.chrome.runtime = window.chrome.runtime || {};
+                window.chrome.app = window.chrome.app || {};
+            } catch (e) {}
+            """
+            try:
+                cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+            except Exception:
+                pass
+            try:
+                cdp.call("Runtime.evaluate", {"expression": stealth_js})
+            except Exception:
+                pass
+
             if not force_navigate and slot.sitekey in ("", sitekey):
                 chk = cdp.call("Runtime.evaluate", {
                     "expression": (
@@ -476,6 +495,7 @@ class RecaptchaTokenProvider:
                     "--disable-background-timer-throttling",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
+                    "--lang=ja-JP,ja",
                 ]
                 if os.name != "nt":
                     args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
@@ -636,6 +656,7 @@ class RecaptchaTokenProvider:
                 pass
             expr = (
                 f"new Promise((resolve, reject) => {{"
+                f"  try {{ window.dispatchEvent(new MouseEvent('mousemove', {{ bubbles: true, clientX: 280, clientY: 240 }})); }} catch(e) {{}}"
                 f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
                 f"  window.grecaptcha.ready(() => {{"
                 f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"

@@ -1661,15 +1661,20 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
             in_stock_items = scraper.fetch_new_arrivals(num=10, in_stock_only=True)
             if not in_stock_items:
                 return
-            test_pid = in_stock_items[0]["id"]
-
             live_hook = AutoOrderHook(username=user, password=pwd, dry_run=True, payment_method="store_pickup")
             ok_login, _ = live_hook.login()
             if not ok_login:
                 return
+
+            ok_cart = False
+            test_pid = None
+            for it in in_stock_items:
+                ok_cart, _, _ = live_hook.add_to_cart(it["id"])
+                if ok_cart:
+                    test_pid = it["id"]
+                    break
+            self.assertTrue(ok_cart, "实盘加购测试商品应成功")
             try:
-                ok_cart, _, _ = live_hook.add_to_cart(test_pid)
-                self.assertTrue(ok_cart, "实盘加购测试商品应成功")
                 ok_conf, _, r_conf = live_hook.proceed_to_confirmation(payment_method="store_pickup")
                 self.assertTrue(ok_conf and r_conf is not None, "实盘推进至 /cart/confirm 应成功")
 

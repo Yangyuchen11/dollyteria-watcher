@@ -1,14 +1,14 @@
 {
   "auto_order": {
-    "username": "yyc285184831@gmail.com",
-    "password": "yyc931121",
-    "dry_run": true,
+    "dry_run": false,
     "enabled": true,
-    "payment_method": "store_pickup",
+    "max_retries": 300,
     "max_workers": 10,
-    "standby_workers": 4,
+    "password": "yyc931121",
+    "payment_method": "store_pickup",
     "retry_delay_sec": 0.1,
-    "max_retries": 300
+    "standby_workers": 4,
+    "username": "yyc285184831@gmail.com"
   },
   "notifications": {
     "desktop_enabled": true,
@@ -42,7 +42,9 @@
       "enabled": true,
       "time": "05:00:00"
     },
-    "drop_times": [],
+    "drop_times": [
+      "21:00:00"
+    ],
     "enabled": true,
     "interval_enabled": true,
     "interval_minutes": 5,
@@ -50,19 +52,156 @@
   },
   "watches": [
     {
-      "auto_order": false,
-      "enabled": false,
+      "id": "w_1793015639467",
+      "name": "幼SD のの",
+      "keywords": [
+        "幼SD",
+        "のの"
+      ],
       "exclude_keywords": [],
-      "id": "w_1792669729612",
+      "min_price": 20000,
+      "max_price": 40000,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015672211",
+      "name": "SD女の子/シャルロッテ",
+      "keywords": [
+        "SD女の子",
+        "シャルロッテ"
+      ],
+      "exclude_keywords": [
+        "U-25-12-24"
+      ],
+      "min_price": 125000,
+      "max_price": 220000,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015707951",
+      "name": "SDGIRL/アナイス",
       "keywords": [
         "SDGIRL",
         "アナイス"
       ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 100000,
+      "search_mode": "new_stream",
       "match_mode": "all",
-      "max_price": 72000,
-      "min_price": 70000,
-      "name": "SDGIRL/アナイス",
-      "search_mode": "both"
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015748001",
+      "name": "こまめ",
+      "keywords": [
+        "こまめ"
+      ],
+      "exclude_keywords": [
+        "書籍"
+      ],
+      "min_price": 0,
+      "max_price": 0,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": false,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015771404",
+      "name": "幼SDまい",
+      "keywords": [
+        "幼SD",
+        "まい"
+      ],
+      "exclude_keywords": [],
+      "min_price": 10000,
+      "max_price": 89000,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015791890",
+      "name": "Elizabeth",
+      "keywords": [
+        "SD13",
+        "Elizabeth"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 100000,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015810592",
+      "name": "ねこひげ工房",
+      "keywords": [
+        "ねこひげ工房",
+        "18mm"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 5000,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015827235",
+      "name": "ねこひげ工房",
+      "keywords": [
+        "ねこひげ工房",
+        "16mm"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 3500,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015842252",
+      "name": "DearSDティアラ",
+      "keywords": [
+        "DearSD",
+        "ティアラ"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 0,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": false,
+      "enabled": true
+    },
+    {
+      "id": "w_1793015859571",
+      "name": "DearSD汎用",
+      "keywords": [
+        "DearSD"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 0,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": false,
+      "enabled": true
     }
   ],
   "web_password": ""

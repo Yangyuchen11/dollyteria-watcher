@@ -157,6 +157,9 @@ class _RecaptchaTabSlot:
         self.prepared_at: float = 0.0
         self.borrow_seq: int = 0
         self.prep_seq: int = 0
+        self.success_count: int = 0
+        self.fail_count: int = 0
+        self.last_failed: bool = False
 
 
 class RecaptchaTokenProvider:
@@ -185,6 +188,7 @@ class RecaptchaTokenProvider:
         self._proc: Optional[subprocess.Popen] = None
         self._port: int = 0
         self._user_data_dir: Optional[str] = None
+        self._is_temp_profile: bool = False
         self._sitekey: str = DEFAULT_RECAPTCHA_SITEKEY
         self._target_pool_size: int = 2
         self._slots: List[_RecaptchaTabSlot] = []
@@ -261,8 +265,11 @@ class RecaptchaTokenProvider:
             except Exception:
                 pass
             self._proc = None
-        if self._user_data_dir and os.path.isdir(self._user_data_dir):
+        if self._user_data_dir and getattr(self, "_is_temp_profile", False) and os.path.isdir(self._user_data_dir):
             shutil.rmtree(self._user_data_dir, ignore_errors=True)
+            self._user_data_dir = None
+        elif not getattr(self, "_is_temp_profile", False):
+            # 持久化浏览器数据目录仅解绑引用，保留用户会话、TLS Tickets 与 Cookie 指纹供下次复用
             self._user_data_dir = None
 
     def _list_page_targets(self) -> List[Dict]:
@@ -296,8 +303,8 @@ class RecaptchaTokenProvider:
             cdp = None
             try:
                 cdp = _SimpleCDPClient(helper_ws_url, timeout=5.0)
-                # 使用 newWindow=True 创建独立窗口级 Tab，确保每个槽位均具有独立的 document.visibilityState='visible' 与焦点状态
-                res = cdp.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
+                # 使用 newWindow=False 在同一主窗口内创建标准 Tab，杜绝 Linux Xvfb/无窗管环境下多独立窗口失焦成为无焦点幽灵窗口
+                res = cdp.call("Target.createTarget", {"url": "about:blank", "newWindow": False})
                 new_tid = res.get("targetId")
             except Exception:
                 pass
@@ -356,6 +363,14 @@ class RecaptchaTokenProvider:
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
             try:
+                cdp.call("Target.activateTarget", {"targetId": slot.target_id})
+            except Exception:
+                pass
+            try:
+                cdp.call("Page.bringToFront", {})
+            except Exception:
+                pass
+            try:
                 cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
                 pass
@@ -363,11 +378,85 @@ class RecaptchaTokenProvider:
             # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
             stealth_js = """
             try {
+                // 1. 抹除自动化驱动标记
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
+
+                // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
+                const pluginList = [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                ];
+                Object.defineProperty(navigator, 'plugins', { get: () => pluginList, configurable: true });
+
+                // 3. 补齐 Chrome 专属运行时与性能指标 API (Google BotGuard 关键侦测项)
                 if (!window.chrome) { window.chrome = {}; }
-                window.chrome.runtime = window.chrome.runtime || {};
-                window.chrome.app = window.chrome.app || {};
+                window.chrome.runtime = window.chrome.runtime || {
+                    connect: function() {},
+                    sendMessage: function() {},
+                    onMessage: { addListener: function() {} }
+                };
+                window.chrome.loadTimes = window.chrome.loadTimes || function() {
+                    return {
+                        commitLoadTime: Date.now() / 1000 - 0.5,
+                        connectionInfo: 'http/1.1',
+                        finishDocumentLoadTime: Date.now() / 1000 - 0.2,
+                        finishLoadTime: Date.now() / 1000 - 0.1,
+                        firstPaintAfterLoadTime: 0,
+                        firstPaintTime: Date.now() / 1000 - 0.3,
+                        navigationType: 'Other',
+                        npnNegotiatedProtocol: 'unknown',
+                        requestTime: Date.now() / 1000 - 1.0,
+                        startLoadTime: Date.now() / 1000 - 0.9,
+                        wasAlternateProtocolAvailable: false,
+                        wasFetchedViaSpdy: false,
+                        wasNpnNegotiated: false
+                    };
+                };
+                window.chrome.csi = window.chrome.csi || function() {
+                    return {
+                        startE: Date.now() - 1000,
+                        onloadT: Date.now() - 200,
+                        pageT: 800,
+                        tran: 15
+                    };
+                };
+
+                // 4. 语言与可见性伪装 (强制 visible，杜绝多标签在后台被判定为 hidden 降分)
+                Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'], configurable: true });
+                Object.defineProperty(navigator, 'language', { get: () => 'ja-JP', configurable: true });
+                Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+                Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
+
+                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
+                const patchWebGL = (proto) => {
+                    if (!proto || !proto.getParameter) return;
+                    const origGetParam = proto.getParameter;
+                    proto.getParameter = function(param) {
+                        if (param === 37445) return 'Google Inc. (NVIDIA)';
+                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        return origGetParam.apply(this, arguments);
+                    };
+                };
+                if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
+                if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
+
+                // 6. 音频上下文通道修正 (修正 Linux 无声卡容器下 maxChannelCount=0 特征)
+                if (window.AudioContext || window.webkitAudioContext) {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    const origDestDesc = Object.getOwnPropertyDescriptor(AC.prototype, 'destination');
+                    if (origDestDesc && origDestDesc.get) {
+                        const origGet = origDestDesc.get;
+                        Object.defineProperty(AC.prototype, 'destination', {
+                            get: function() {
+                                const dest = origGet.apply(this);
+                                try { Object.defineProperty(dest, 'maxChannelCount', { value: 2 }); } catch(e) {}
+                                return dest;
+                            }
+                        });
+                    }
+                }
             } catch (e) {}
             """
             try:
@@ -416,6 +505,12 @@ class RecaptchaTokenProvider:
                         break
                 if nav_committed:
                     break
+
+            # 导航完成后立即在当前活动 DOM 上就地再次注入反指纹对抗脚本，确保 grecaptcha.api 加载前指纹已完美就绪
+            try:
+                cdp.call("Runtime.evaluate", {"expression": stealth_js})
+            except Exception:
+                pass
 
             js_inject = f"""
             new Promise((resolve, reject) => {{
@@ -479,7 +574,26 @@ class RecaptchaTokenProvider:
                     return False
 
                 self._port = self._allocate_free_port()
-                self._user_data_dir = tempfile.mkdtemp(prefix="dolly_recaptcha_")
+                # 持久化浏览器数据目录：沉淀 Google 账户会话缓存、TLS Session Tickets 与 Cookie 指纹，规避白板临时目录遭 Google v3 惩罚
+                profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+                try:
+                    os.makedirs(profile_base, exist_ok=True)
+                    # 清理可能因异常退出遗留的 Singleton 锁，防止 Chromium 在 Linux 容器内被死锁阻塞
+                    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                        lk_path = os.path.join(profile_base, lock_name)
+                        if os.path.exists(lk_path) or os.path.islink(lk_path):
+                            try:
+                                if os.path.islink(lk_path) or os.path.isfile(lk_path):
+                                    os.unlink(lk_path)
+                                elif os.path.isdir(lk_path):
+                                    shutil.rmtree(lk_path, ignore_errors=True)
+                            except Exception:
+                                pass
+                    self._user_data_dir = profile_base
+                    self._is_temp_profile = False
+                except Exception:
+                    self._user_data_dir = tempfile.mkdtemp(prefix="dolly_recaptcha_")
+                    self._is_temp_profile = True
                 self._sitekey = sitekey
 
                 args = [
@@ -495,6 +609,8 @@ class RecaptchaTokenProvider:
                     "--disable-background-timer-throttling",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
+                    "--enable-webgl",
+                    "--ignore-gpu-blocklist",
                     "--lang=ja-JP,ja",
                 ]
                 if os.name != "nt":
@@ -651,12 +767,30 @@ class RecaptchaTokenProvider:
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=8.0)
             try:
+                cdp.call("Target.activateTarget", {"targetId": slot.target_id})
+            except Exception:
+                pass
+            try:
+                cdp.call("Page.bringToFront", {})
+            except Exception:
+                pass
+            try:
                 cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
                 pass
+
+            # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
+            try:
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
+                time.sleep(0.015)
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 265, "y": 245})
+                time.sleep(0.015)
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 320, "y": 210})
+            except Exception:
+                pass
+
             expr = (
                 f"new Promise((resolve, reject) => {{"
-                f"  try {{ window.dispatchEvent(new MouseEvent('mousemove', {{ bubbles: true, clientX: 280, clientY: 240 }})); }} catch(e) {{}}"
                 f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
                 f"  window.grecaptcha.ready(() => {{"
                 f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
@@ -682,12 +816,22 @@ class RecaptchaTokenProvider:
                 cdp.close()
 
     def _try_borrow_fast_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
-        """0ms 极速快车道：按 Round-Robin 轮询借用池中已预热就绪 (is_fresh=True) 的空闲 Tab，避免总是重用第 0 号槽位"""
+        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab，按 Round-Robin 轮询"""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None or not self._slots:
                 return None
             n = len(self._slots)
             start = self._rr_index % n
+            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位
+            for offset in range(n):
+                idx = (start + offset) % n
+                s = self._slots[idx]
+                if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
+                    s.in_use = True
+                    s.borrow_seq += 1
+                    self._rr_index = (idx + 1) % n
+                    return s
+            # 2. 次选任意已预热就绪槽位
             for offset in range(n):
                 idx = (start + offset) % n
                 s = self._slots[idx]
@@ -700,16 +844,26 @@ class RecaptchaTokenProvider:
 
     def _borrow_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
         """
-        从多标签池中按 Round-Robin 轮询借出一个独立的 Tab 槽位：
-        1. 优先选用空闲且已预热就绪 (is_fresh=True) 的 Tab，实现 0.15s~0.35s 极速出码
-        2. 其次选用任意空闲 Tab
-        3. 若所有预热 Tab 均正被其他并发下单线程占用，动态新建一个临时独立窗口 Tab，绝不串行阻塞等待
+        从多标签池中借出一个独立的 Tab 槽位：
+        1. 优先选用历史健康良好 (not last_failed) 且预热就绪 (is_fresh=True) 的 Tab
+        2. 其次选用任意已预热就绪 Tab
+        3. 再次选用任意未占用的空闲 Tab
+        4. 若所有预热 Tab 均被占用，动态新建临时 Tab
         """
         with self._lock:
             n = len(self._slots)
             if n > 0:
                 start = self._rr_index % n
-                # 1. 优先找已预热好的空闲槽位
+                # 1. 优先找健康良好且已预热就绪的槽位
+                for offset in range(n):
+                    idx = (start + offset) % n
+                    s = self._slots[idx]
+                    if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
+                        s.in_use = True
+                        s.borrow_seq += 1
+                        self._rr_index = (idx + 1) % n
+                        return s
+                # 2. 找任意已预热好的槽位
                 for offset in range(n):
                     idx = (start + offset) % n
                     s = self._slots[idx]
@@ -718,7 +872,7 @@ class RecaptchaTokenProvider:
                         s.borrow_seq += 1
                         self._rr_index = (idx + 1) % n
                         return s
-                # 2. 找任意未占用的槽位
+                # 3. 找任意未占用的槽位
                 for offset in range(n):
                     idx = (start + offset) % n
                     s = self._slots[idx]
@@ -727,7 +881,7 @@ class RecaptchaTokenProvider:
                         s.borrow_seq += 1
                         self._rr_index = (idx + 1) % n
                         return s
-            # 3. 所有预热槽位都在忙 (并发单数 > 预热 Tab 数)，动态派生新 Tab
+            # 4. 所有预热槽位都在忙 (并发单数 > 预热 Tab 数)，动态派生新 Tab
             helper_ws = self._slots[0].ws_url if self._slots else None
             new_t = self._create_new_page_target(helper_ws)
             if new_t:
@@ -737,6 +891,24 @@ class RecaptchaTokenProvider:
                 self._slots.append(overflow_slot)
                 return overflow_slot
         return None
+
+    def mark_token_outcome(self, token: str, success: bool):
+        """记录令牌在官网实际核销的结果，用于动态维护各 Tab 槽位的信誉健康度与自愈重置"""
+        if not token:
+            return
+        with self._lock:
+            entry = self._active_token_slots.get(token)
+            if entry:
+                slot, seq, sitekey = entry
+                with slot.lock:
+                    if success:
+                        slot.success_count += 1
+                        slot.last_failed = False
+                    else:
+                        slot.fail_count += 1
+                        slot.last_failed = True
+                        # 遭遇官网拒绝拦截，立即强制该槽位下线重置刷新
+                        slot.is_fresh = False
 
     def release_slots(
         self,
@@ -1701,6 +1873,7 @@ class AutoOrderHook:
                             if r_probe:
                                 probe_text = r_probe.content.decode("utf-8", "ignore")
                                 if "reCAPTCHAの検証に失敗しました" in probe_text:
+                                    RecaptchaTokenProvider.get_instance().mark_token_outcome(probe_tok, success=False)
                                     recaptcha_probe_result = {
                                         "passed": False,
                                         "status": "rejected",
@@ -1710,6 +1883,7 @@ class AutoOrderHook:
                                     steps_log.append("官网 reCAPTCHA 实盘核验探针: ❌ 拦截 (官网提示 reCAPTCHAの検証に失敗しました)")
                                     logger.warning("⚠️ [Dry-Run 实盘探针] 官网拦截了该 reCAPTCHA 令牌: reCAPTCHAの検証に失敗しました")
                                 elif "「同意する」にチェックをいれてください" in probe_text or "規約" in probe_text or "同意" in probe_text:
+                                    RecaptchaTokenProvider.get_instance().mark_token_outcome(probe_tok, success=True)
                                     recaptcha_probe_result = {
                                         "passed": True,
                                         "status": "passed",
@@ -1719,6 +1893,7 @@ class AutoOrderHook:
                                     steps_log.append("官网 reCAPTCHA 实盘核验探针: 🟢 成功通过！(官网服务端已向 Google 成功核销该令牌)")
                                     logger.info("🎉 [Dry-Run 实盘探针] 官网成功核销并认可了 reCAPTCHA 令牌！")
                                 else:
+                                    RecaptchaTokenProvider.get_instance().mark_token_outcome(probe_tok, success=True)
                                     recaptcha_probe_result = {
                                         "passed": True,
                                         "status": "passed",
@@ -1859,6 +2034,8 @@ class AutoOrderHook:
                     complete_text = resp_complete.content.decode("utf-8", "ignore")
                     success = "注文完了" in complete_text or "/cart/complete" in resp_complete.url
                     if success:
+                        if final_data.get("recaptcha_token"):
+                            provider.mark_token_outcome(final_data["recaptcha_token"], success=True)
                         break
 
                     # 1. 优先检查商品是否已被他人抢先下单导致库存不足/售罄，若是立即终止，不浪费任何重试！
@@ -1870,11 +2047,14 @@ class AutoOrderHook:
                         break
 
                     # 2. 若因 reCAPTCHA 验证未通过，立即释放旧令牌并在下一个预热 Tab (Round-Robin) 上实时重签新 Token 原地重交
-                    if "reCAPTCHAの検証に失敗しました" in complete_text and submit_attempt < max_recaptcha_attempts - 1:
-                        logger.warning(
-                            f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，保持购物车与结算状态实时重签新令牌重试 "
-                            f"(第 {submit_attempt + 1}/{max_recaptcha_attempts - 1} 次)..."
-                        )
+                    if "reCAPTCHAの検証に失敗しました" in complete_text:
+                        if final_data.get("recaptcha_token"):
+                            provider.mark_token_outcome(final_data["recaptcha_token"], success=False)
+                        if submit_attempt < max_recaptcha_attempts - 1:
+                            logger.warning(
+                                f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，保持购物车与结算状态实时重签新令牌重试 "
+                                f"(第 {submit_attempt + 1}/{max_recaptcha_attempts - 1} 次)..."
+                            )
                         if final_data.get("recaptcha_token"):
                             provider.release_tokens([final_data["recaptcha_token"]])
                         fresh_tok = provider.get_token(

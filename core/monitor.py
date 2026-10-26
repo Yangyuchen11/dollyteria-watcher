@@ -133,6 +133,7 @@ class DollyteriaMonitor:
         self.last_check_status = "就绪"
         self._incomplete_from_page = 0
         self._pending_reorders: Dict[str, Dict] = {}
+        self._reorder_attempt_counts: Dict[str, int] = {}
         self._reorder_lock = threading.Lock()
 
         # 异步非阻塞下单常驻线程池 (抓取与抢购彻底解耦)
@@ -279,8 +280,11 @@ class DollyteriaMonitor:
     def reset_seen_items(self):
         """重置已记录商品 (下次检测将视全部匹配商品为新商品)"""
         self.state["seen_ids"] = []
+        with self._reorder_lock:
+            self._pending_reorders.clear()
+            self._reorder_attempt_counts.clear()
         self._save_state()
-        logger.info("已清空历史已记录商品集合")
+        logger.info("已清空历史已记录商品集合与待续抢队列")
 
     def initialize_baseline(self):
         """
@@ -417,6 +421,7 @@ class DollyteriaMonitor:
                 ):
                     with self._reorder_lock:
                         self._pending_reorders.pop(pid, None)
+                        self._reorder_attempt_counts.pop(pid, None)
                     if pid:
                         try:
                             self.archive_db.mark_sold_out(pid)
@@ -432,21 +437,21 @@ class DollyteriaMonitor:
                             logger.debug(f"同步商品 [{pid}] 售罄状态异常: {e}")
                 elif order_res and not order_res.get("success") and not order_res.get("is_sold_out"):
                     # 本轮抢购重试耗尽，但官网尚未售罄 (如 503 持续时间超过了 max_retries 或瞬时网络抖动)
-                    # 自动加入续抢队列，下一轮巡检只要该商品仍在库，将自动继续尝试购买！
+                    # 自动加入无限续抢队列，下一轮巡检只要该商品仍在库，将不设上限无限次自动继续尝试购买！
                     if pid:
                         with self._reorder_lock:
-                            prev_attempts = self._pending_reorders.get(pid, {}).get("attempts", 0)
-                            if prev_attempts < 10:
-                                self._pending_reorders[pid] = {
-                                    "item": item,
-                                    "rule": rule,
-                                    "attempts": prev_attempts + 1,
-                                    "last_failed_at": time.time(),
-                                }
-                                logger.warning(
-                                    f"🔁 [Auto-Order 自动续抢机制] 商品 [{pid}] 本轮重试耗尽但官网尚未售罄！"
-                                    f"已自动加入续抢待命队列 (续抢轮次: {prev_attempts + 1}/10)，下一轮巡检该商品仍在库时将自动继续尝试购买，直至成功或售罄！"
-                                )
+                            count = self._reorder_attempt_counts.get(pid, 0) + 1
+                            self._reorder_attempt_counts[pid] = count
+                            self._pending_reorders[pid] = {
+                                "item": item,
+                                "rule": rule,
+                                "attempts": count,
+                                "last_failed_at": time.time(),
+                            }
+                            logger.warning(
+                                f"🔁 [Auto-Order 无限续抢机制] 商品 [{pid}] 本轮重试耗尽但官网尚未售罄！"
+                                f"已自动加入续抢待命队列 (累计续抢轮次: 第 {count} 轮)，不设上限无限次自动续抢，直至抢购成功或官方售罄！"
+                            )
                 if order_res and order_res.get("success"):
                     try:
                         self.notifier.dispatch_order_success(item=item, order_result=order_res, rule=rule)
@@ -677,7 +682,9 @@ class DollyteriaMonitor:
                                     reorder_tasks.append((re_info["item"], re_info["rule"]))
                                     self._pending_reorders.pop(re_pid, None)
                                 else:
+                                    logger.info(f"🛑 [Auto-Order 续抢终止] 商品 [{re_pid}] 经单品询盘确认官网已售罄，自动移出续抢队列。")
                                     self._pending_reorders.pop(re_pid, None)
+                                    self._reorder_attempt_counts.pop(re_pid, None)
                 if reorder_tasks:
                     logger.info(f"⚡⚡ [Auto-Order 自动续抢触发] 发现 {len(reorder_tasks)} 件未售罄商品符合续抢条件，自动发起新一轮抢购！")
                     self._execute_auto_orders_concurrent(reorder_tasks)

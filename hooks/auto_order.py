@@ -34,6 +34,13 @@ logger = logging.getLogger("dollyteria.hooks.auto_order")
 
 DEFAULT_RECAPTCHA_SITEKEY = "6LcxWfwqAAAAAKB2iNaL09Of7o8NS7aiDLF6Pi1p"
 
+# 根据宿主运行环境自动匹配 User-Agent (Linux 容器环境使用 X11; Linux，Windows 使用 Windows NT)
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    if os.name != "nt"
+    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 class _SimpleCDPClient:
     """零外部依赖的轻量级 Chrome DevTools Protocol (WebSocket) 客户端"""
@@ -185,6 +192,8 @@ class RecaptchaTokenProvider:
         self._rr_index: int = 0
         self._is_ready: bool = False
         self._keepalive_started: bool = False
+        self.browser_user_agent: str = DEFAULT_USER_AGENT
+        self._ua_probed: bool = False
 
     @property
     def pool_size(self) -> int:
@@ -511,6 +520,20 @@ class RecaptchaTokenProvider:
 
                 for p in initial_pages:
                     self._slots.append(_RecaptchaTabSlot(p["id"], p["webSocketDebuggerUrl"]))
+
+                # 探测真实运行中的 Chrome/Chromium 内核 User-Agent，确保 Python 会话请求头与浏览器内核指纹 100% 绝对一致
+                if not self._ua_probed and self._slots:
+                    try:
+                        cdp_ua = _SimpleCDPClient(self._slots[0].ws_url, timeout=2.5)
+                        res_ua = cdp_ua.call("Runtime.evaluate", {"expression": "navigator.userAgent", "returnByValue": True})
+                        val_ua = res_ua.get("result", {}).get("value")
+                        if val_ua and "Mozilla" in val_ua:
+                            self.browser_user_agent = val_ua
+                            logger.info(f"🌐 [reCAPTCHA] 已同步浏览器内核原生指纹 User-Agent: {val_ua}")
+                        cdp_ua.close()
+                        self._ua_probed = True
+                    except Exception:
+                        pass
 
             # 校验现有槽位对应的 Tab 是否仍然存活，清理失效槽位
             live_pages = {p["id"]: p["webSocketDebuggerUrl"] for p in self._list_page_targets()}
@@ -841,6 +864,63 @@ class RecaptchaTokenProvider:
         token, _ = self.acquire_token(sitekey=sitekey, action=action, defer_release=False, hold_timeout_sec=15.0)
         return token
 
+    def test_token_generation(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, action: str = "submit") -> Dict:
+        """测试 reCAPTCHA v3 预热标签页池与令牌签发通道的可用性 (供 Web 界面一键仿真检测)"""
+        t0 = time.time()
+        browser_exe = self._find_browser_executable()
+        if not browser_exe:
+            return {
+                "success": False,
+                "message": "系统未检测到可用的 Chrome / Chromium 浏览器，无法启动后台无头进程",
+                "browser_exe": None,
+                "elapsed_sec": round(time.time() - t0, 3),
+            }
+
+        try:
+            tok, slot = self.acquire_token(sitekey=sitekey, action=action, defer_release=True)
+            elapsed = round(time.time() - t0, 3)
+            if not tok or not slot:
+                return {
+                    "success": False,
+                    "message": "未能从预热标签页签发令牌 (请检查网络是否能访问 google.com 静态资源与 dollyteria.com)",
+                    "browser_exe": browser_exe,
+                    "elapsed_sec": elapsed,
+                }
+
+            with self._lock:
+                slots_count = len(self._slots)
+                browser_pid = self._proc.pid if self._proc else None
+                ua = self.browser_user_agent
+                target_count = self._target_pool_size
+
+            # 立即释放占用的槽位与令牌
+            self.release_tokens([tok])
+
+            token_preview = f"{tok[:16]}...{tok[-12:]}" if len(tok) > 28 else tok
+            return {
+                "success": True,
+                "message": f"🎉 reCAPTCHA v3 预热通道畅通，全新令牌秒级签发成功！(耗时 {elapsed}s)",
+                "token_preview": token_preview,
+                "token_length": len(tok),
+                "elapsed_sec": elapsed,
+                "browser_exe": browser_exe,
+                "browser_pid": browser_pid,
+                "browser_user_agent": ua,
+                "pool_size": slots_count,
+                "target_pool_size": target_count,
+                "tab_id": slot.target_id[:8] if slot else "unknown",
+                "sitekey": sitekey,
+                "action": action,
+            }
+        except Exception as e:
+            logger.error(f"[reCAPTCHA] 测试令牌签发异常: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"测试令牌签发发生异常: {str(e)}",
+                "browser_exe": browser_exe,
+                "elapsed_sec": round(time.time() - t0, 3),
+            }
+
     def _sync_pool_in_bg(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY):
         try:
             self._ensure_browser_and_pool_ready(sitekey)
@@ -898,9 +978,10 @@ class AutoOrderHook:
         self.retry_delay = float(retry_delay) if retry_delay is not None else 0.15
         self.max_retries = int(max_retries) if max_retries is not None else 35
         self.standby_workers_count = int(standby_workers) if standby_workers is not None else 2
+        ua = RecaptchaTokenProvider.get_instance().browser_user_agent or DEFAULT_USER_AGENT
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "ja,zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "https://www.dollyteria.com/",
@@ -1656,9 +1737,12 @@ class AutoOrderHook:
                 resp_complete = None
                 complete_text = ""
                 success = False
+                is_sold_out_at_confirm = False
 
-                # 支持若遇到 reCAPTCHA 校验拦截时，保持购物车与确认页状态，自动轮换预热 Tab 实时重签新 Token 持续重试直至成功 (与 max_retries 联动，默认最多 35 轮)
-                max_recaptcha_attempts = max(8, self.max_retries)
+                # 支持若遇到 reCAPTCHA 校验拦截时，保持购物车与确认页状态，自动轮换预热 Tab 实时重签新 Token 持续重试直至成功
+                # 换签上限设为预热备用会话数的 2 倍 (如 4 会话对应 8 次，最多 8 轮)，耗时仅 ~2.5s，确保每个预热 Tab 得到充分轮换
+                # 若 8 轮均未通过且商品未售罄，由外层「未售罄自动续抢机制」在下个巡检周期无缝接管，杜绝单线程死锁或中途耗时冷启动
+                max_recaptcha_attempts = min(8, max(4, self.standby_workers_count * 2))
                 provider = RecaptchaTokenProvider.get_instance()
                 for submit_attempt in range(max_recaptcha_attempts):
                     resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
@@ -1669,7 +1753,15 @@ class AutoOrderHook:
                     if success:
                         break
 
-                    # 若因 reCAPTCHA 验证未通过，立即释放旧令牌并轮换下一个预热 Tab 实时重签新 Token 原地重交
+                    # 1. 优先检查商品是否已被他人抢先下单导致库存不足/售罄，若是立即终止，不浪费任何重试！
+                    soldout_kws = ["在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ", "現在、商品はございません"]
+                    if any(k in complete_text for k in soldout_kws):
+                        logger.warning("🛑 [Auto-Order] 确认页提示商品已售罄或已被抢购，智能熔断立即终止重试！")
+                        is_sold_out_at_confirm = True
+                        self.clear_cart()
+                        break
+
+                    # 2. 若因 reCAPTCHA 验证未通过，立即释放旧令牌并在下一个预热 Tab (Round-Robin) 上实时重签新 Token 原地重交
                     if "reCAPTCHAの検証に失敗しました" in complete_text and submit_attempt < max_recaptcha_attempts - 1:
                         logger.warning(
                             f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，保持购物车与结算状态实时重签新令牌重试 "
@@ -1677,11 +1769,6 @@ class AutoOrderHook:
                         )
                         if final_data.get("recaptcha_token"):
                             provider.release_tokens([final_data["recaptcha_token"]])
-                        # 若连续 5 次换签仍被拦截，自动触发一次浏览器环境深度自愈重建
-                        if (submit_attempt + 1) % 5 == 0:
-                            logger.warning("🔄 [Auto-Order] 连续多次遭遇 reCAPTCHA 拦截，正在自动重置预热浏览器环境自愈...")
-                            with provider._lock:
-                                provider._cleanup_proc_unlocked()
                         fresh_tok = provider.get_token(
                             sitekey=page_sitekey,
                             action="submit",
@@ -1705,7 +1792,6 @@ class AutoOrderHook:
 
                 # 提取确认页可能返回的具体错误原因（如库存不足被抢先结算、reCAPTCHA 失败等）
                 err_reasons = []
-                is_sold_out_at_confirm = False
                 if not success:
                     err_soup = BeautifulSoup(complete_text, "html.parser")
                     for el in err_soup.select(".error_status, .form_error, .error_msg, .err_msg"):
@@ -1714,8 +1800,9 @@ class AutoOrderHook:
                             err_reasons.append(txt)
                     soldout_kws = ["在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ", "現在、商品はございません"]
                     if any(k in complete_text for k in soldout_kws):
-                        is_sold_out_at_confirm = True
-                        self.clear_cart()
+                        if not is_sold_out_at_confirm:
+                            is_sold_out_at_confirm = True
+                            self.clear_cart()
 
                 err_detail_str = f" ({' / '.join(err_reasons[:2])})" if err_reasons else (" (商品在最后结算瞬间已被他人抢先买走售罄)" if is_sold_out_at_confirm else "")
                 steps_log.append(f"最终订单提交: {'下单成功！' if success else '提交返回异常' + err_detail_str}")

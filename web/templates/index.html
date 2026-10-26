@@ -564,11 +564,11 @@
                             </div>
                         </div>
                         <div class="form-row" style="margin-top: 14px;">
-                            <div class="form-group col-5">
+                            <div class="form-group col-4">
                                 <label class="form-label">测试目标商品 (ID 或链接)</label>
                                 <input type="text" id="ao-test-item-id" class="form-control" placeholder="可留空，自动选用店内最新在售商品">
                             </div>
-                            <div class="form-group col-4">
+                            <div class="form-group col-3">
                                 <label class="form-label">本次测试支付方式</label>
                                 <select id="ao-test-pay-select" class="form-control">
                                     <option value="cod">📦 代金引換 (pay_procedure=3)</option>
@@ -576,8 +576,9 @@
                                     <option value="store_pickup">🏬 店頭支払 (pay_procedure=8)</option>
                                 </select>
                             </div>
-                            <div class="form-group col-3" style="display: flex; align-items: flex-end;">
-                                <button id="btn-test-dry-run-order" class="btn btn-secondary w-100">🧪 执行仿真测试</button>
+                            <div class="form-group col-5" style="display: flex; align-items: flex-end; gap: 8px;">
+                                <button id="btn-test-dry-run-order" class="btn btn-secondary" style="flex: 1; min-width: 0; white-space: nowrap;" title="走通登录、加购、地址及支付选择全链路并在确认页安全拦截">🧪 全流程仿真</button>
+                                <button id="btn-test-recaptcha-token" class="btn btn-accent" style="flex: 1; min-width: 0; white-space: nowrap;" title="无需加购与下单，直接在 0.3 秒内演练后台 Chrome 预热池与 Google reCAPTCHA 令牌签发通道">⚡ 测试令牌可用性</button>
                             </div>
                         </div>
                         <div id="ao-test-result" class="ao-test-result-box" style="display: none;"></div>

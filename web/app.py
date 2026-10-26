@@ -395,6 +395,16 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = ao.execute_checkout(item_id=item_id, dry_run=True, clear_after_dry_run=True, payment_method=payment_method)
         return jsonify(res)
 
+    @app.route("/api/test_recaptcha", methods=["POST"])
+    def api_test_recaptcha():
+        from hooks.auto_order import RecaptchaTokenProvider, DEFAULT_RECAPTCHA_SITEKEY
+        provider = RecaptchaTokenProvider.get_instance()
+        data = request.json or {}
+        sitekey = (data.get("sitekey") or DEFAULT_RECAPTCHA_SITEKEY).strip()
+        action = (data.get("action") or "submit").strip()
+        res = provider.test_token_generation(sitekey=sitekey, action=action)
+        return jsonify(res)
+
     @app.route("/api/auto_order/buy", methods=["POST"])
     def api_auto_order_buy():
         data = request.json or {}

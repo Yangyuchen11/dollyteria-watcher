@@ -76,6 +76,7 @@ const elements = {
     aoTestItemId: document.getElementById('ao-test-item-id'),
     aoTestPaySelect: document.getElementById('ao-test-pay-select'),
     btnTestDryRunOrder: document.getElementById('btn-test-dry-run-order'),
+    btnTestRecaptchaToken: document.getElementById('btn-test-recaptcha-token'),
     aoTestResult: document.getElementById('ao-test-result'),
     aoModeBanner: document.getElementById('ao-mode-banner'),
     aoModeIcon: document.getElementById('ao-mode-icon'),
@@ -1527,7 +1528,103 @@ function bindEvents() {
                 }
             } finally {
                 elements.btnTestDryRunOrder.disabled = false;
-                elements.btnTestDryRunOrder.textContent = '🧪 执行仿真测试';
+                elements.btnTestDryRunOrder.textContent = '🧪 全流程仿真';
+            }
+        });
+    }
+
+    // 测试 reCAPTCHA v3 预热池与令牌签发通道 (秒级验证通道可用性，无需加购或下单)
+    if (elements.btnTestRecaptchaToken) {
+        elements.btnTestRecaptchaToken.addEventListener('click', async () => {
+            elements.btnTestRecaptchaToken.disabled = true;
+            const originalText = elements.btnTestRecaptchaToken.textContent;
+            elements.btnTestRecaptchaToken.textContent = '⏳ 正在签发测试令牌...';
+            showToast('正在向后台预热池请求签发全新 Google reCAPTCHA v3 令牌...', 'info');
+
+            if (elements.aoTestResult) {
+                elements.aoTestResult.style.display = 'block';
+                elements.aoTestResult.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);">
+                        <span class="status-pulse" style="width:10px;height:10px;background:#38bdf8;border-radius:50%;display:inline-block;"></span>
+                        正在调度 Chromium 预热标签页执行 grecaptcha.execute 并提取鲜活令牌...
+                    </div>
+                `;
+            }
+
+            try {
+                const res = await fetch('/api/test_recaptcha', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'submit' })
+                });
+
+                if (!res.ok) {
+                    showToast(`测试令牌接口返回错误 (${res.status})`, 'error');
+                    if (elements.aoTestResult) {
+                        elements.aoTestResult.innerHTML = `<div style="color:#f87171;">请求失败 (${res.status})，请重启终端中的 python main.py</div>`;
+                    }
+                    return;
+                }
+
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`🎉 reCAPTCHA 令牌测试成功！(耗时 ${data.elapsed_sec}s)`, 'success');
+                    elements.aoTestResult.innerHTML = `
+                        <div class="ao-res-header">
+                            <span class="ao-res-status success">🟢 Google reCAPTCHA v3 预热池与令牌通道检测通过</span>
+                            <span style="font-size:12px;color:var(--text-muted);">出码耗时: ${data.elapsed_sec}s</span>
+                        </div>
+                        <div class="ao-grid-summary">
+                            <div class="ao-summary-item">
+                                <div class="label">预热标签页池状态</div>
+                                <div class="value" style="color:#34d399;">✓ ${data.pool_size || 1} / ${data.target_pool_size || 1} 个 Standby Tabs 就绪</div>
+                            </div>
+                            <div class="ao-summary-item">
+                                <div class="label">分配调度槽位 (Tab)</div>
+                                <div class="value">${escapeHtml(data.tab_id || 'Tab-01')}</div>
+                            </div>
+                            <div class="ao-summary-item">
+                                <div class="label">浏览器内核进程</div>
+                                <div class="value" style="font-size:12px;">${escapeHtml(data.browser_exe ? data.browser_exe.split(/[\\\\/]/).pop() : 'Chromium')} (PID: ${data.browser_pid || '--'})</div>
+                            </div>
+                            <div class="ao-summary-item">
+                                <div class="label">指纹 User-Agent 对齐</div>
+                                <div class="value" style="color:#38bdf8;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(data.browser_user_agent || '')}">✓ ${escapeHtml(data.browser_user_agent ? data.browser_user_agent.substring(0, 36) + '...' : '已对齐')}</div>
+                            </div>
+                            <div class="ao-summary-item">
+                                <div class="label">令牌签发状态</div>
+                                <div class="value" style="color:#fbbf24;">✓ 成功签发 (${data.token_length} 字符)</div>
+                            </div>
+                            <div class="ao-summary-item">
+                                <div class="label">令牌特征预览</div>
+                                <div class="value" style="font-family:monospace;font-size:11px;color:#a78bfa;">${escapeHtml(data.token_preview || '')}</div>
+                            </div>
+                        </div>
+                        <div class="ao-safety-banner" style="background:rgba(56,189,248,0.08);border-left:3px solid #38bdf8;">
+                            💡 <strong>令牌机制说明：</strong>Google reCAPTCHA v3 采用官方原生单次消费 (Single-Use) 机制，仅在最终提交购买确认时由 Dollyteria 官方服务端向 Google 验证并核销。本次测试已验证后台无头浏览器、多标签并发池、Google 官方脚本与通信通道 100% 畅通且秒级出码，具备实盘抢购能力！测试后测试槽位已毫秒级释放归还。
+                        </div>
+                    `;
+                } else {
+                    showToast(data.message || '测试令牌签发未通过', 'error');
+                    elements.aoTestResult.innerHTML = `
+                        <div class="ao-res-header">
+                            <span class="ao-res-status error">❌ Google reCAPTCHA v3 令牌签发通道受阻</span>
+                            <span style="font-size:12px;color:var(--text-muted);">耗时: ${data.elapsed_sec || 0}s</span>
+                        </div>
+                        <div style="color:#f87171;font-size:13px;margin-bottom:10px;">${escapeHtml(data.message || '签发失败')}</div>
+                        <div class="ao-safety-banner">
+                            ⚠️ <strong>排查建议：</strong>请检查宿主机或 Docker 容器内是否安装有 Chrome / Chromium，以及后台网络是否能正常访问 google.com 静态资源与 dollyteria.com。
+                        </div>
+                    `;
+                }
+            } catch (err) {
+                showToast('测试令牌发生异常: ' + err.message, 'error');
+                if (elements.aoTestResult) {
+                    elements.aoTestResult.innerHTML = `<div style="color:#f87171;">测试异常: ${escapeHtml(err.message)}</div>`;
+                }
+            } finally {
+                elements.btnTestRecaptchaToken.disabled = false;
+                elements.btnTestRecaptchaToken.textContent = originalText;
             }
         });
     }

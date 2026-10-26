@@ -2009,6 +2009,46 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
         finally:
             provider._cleanup_proc_unlocked()
 
+    def test_33_web_api_recaptcha_instant_test_and_channel_diagnostics(self):
+        """
+        测试前端新增的【⚡ 测试令牌可用性】独立接口与诊断模块 (/api/test_recaptcha)：
+        1. 验证 test_token_generation() 能够模拟/真实签发鲜活令牌并立即安全释放
+        2. 验证 Web API /api/test_recaptcha 能够返回 200 及详细的诊断信息 (包括 token_preview, UA, 槽位等)
+        3. 验证异常情况下的自愈提示与错误信息结构
+        """
+        monitor = DollyteriaMonitor()
+        scheduler = DollyteriaScheduler(monitor)
+        from web.app import create_app
+        app = create_app(monitor, scheduler)
+        client = app.test_client()
+
+        provider = RecaptchaTokenProvider.get_instance()
+        fake_token = "03AFcWeA_mock_test_token_" + ("z" * 320)
+        from hooks.auto_order import _RecaptchaTabSlot
+        mock_slot = _RecaptchaTabSlot("tab_test_01", "ws://127.0.0.1:9222/devtools/page/test")
+
+        # 1. 成功测试
+        with patch.object(provider, "_find_browser_executable", return_value="C:\\chrome.exe"), \
+             patch.object(provider, "acquire_token", return_value=(fake_token, mock_slot)), \
+             patch.object(provider, "release_tokens") as mock_rel:
+            resp = client.post("/api/test_recaptcha", json={"action": "submit"})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertTrue(data["success"])
+            self.assertIn("03AFcWeA", data["token_preview"])
+            self.assertGreater(data["token_length"], 300)
+            self.assertEqual(data["tab_id"], "tab_test")
+            mock_rel.assert_called_once()
+
+        # 2. 失败异常测试 (例如未能签发)
+        with patch.object(provider, "_find_browser_executable", return_value="C:\\chrome.exe"), \
+             patch.object(provider, "acquire_token", return_value=("", None)):
+            resp_err = client.post("/api/test_recaptcha", json={"action": "submit"})
+            self.assertEqual(resp_err.status_code, 200)
+            data_err = resp_err.get_json()
+            self.assertFalse(data_err["success"])
+            self.assertIn("未能从预热标签页签发令牌", data_err["message"])
+
 
 if __name__ == "__main__":
     print("=" * 80)

@@ -2,6 +2,7 @@
 Dollyteria (dollyteria.com) 网站抓取与解析模块
 支持最新商品流 (/new) 与 关键词搜索 (/product-list/?keyword=...)
 """
+import os
 import re
 import time
 import logging
@@ -12,8 +13,16 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger("dollyteria.scraper")
 
 BASE_URL = "https://www.dollyteria.com"
+
+# 根据宿主运行环境自动匹配 User-Agent (Linux 容器环境使用 X11; Linux，Windows 使用 Windows NT)
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    if os.name != "nt"
+    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": DEFAULT_USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ja,zh-CN;q=0.9,en;q=0.8",
     "Referer": "https://www.dollyteria.com/",

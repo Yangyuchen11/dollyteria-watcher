@@ -26,6 +26,7 @@ import subprocess
 import logging
 import threading
 import urllib.parse
+import random
 from typing import Dict, Optional, Tuple, List
 import requests
 from bs4 import BeautifulSoup
@@ -244,6 +245,21 @@ class RecaptchaTokenProvider:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
+    @staticmethod
+    def _get_configured_proxy() -> Optional[str]:
+        """读取系统或 config.json 中配置的代理 (支持 auto_order.proxy 或全局 proxy，规避云厂商数据中心 IP 被 Google v3 扣分)"""
+        try:
+            cfg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                    p = (cdata.get("auto_order", {}).get("proxy") or cdata.get("proxy") or "").strip()
+                    if p:
+                        return p
+        except Exception:
+            pass
+        return None
+
     def _cleanup_proc_unlocked(self):
         self._is_ready = False
         self._active_token_slots.clear()
@@ -375,29 +391,38 @@ class RecaptchaTokenProvider:
             except Exception:
                 pass
 
+            webgl_renderer_str = (
+                "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)"
+                if os.name == "nt"
+                else "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER, OpenGL 4.5.0 Core)"
+            )
+
             # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
-            stealth_js = """
-            try {
-                // 1. 抹除自动化驱动标记
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+            stealth_js = f"""
+            try {{
+                // 1. 彻底清除自动化驱动属性 (不仅将值设为 undefined，同时移除属性本身，使 'webdriver' in navigator 为 false)
+                try {{
+                    delete Object.getPrototypeOf(navigator).webdriver;
+                    delete navigator.webdriver;
+                }} catch (e) {{}}
 
                 // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
                 const pluginList = [
-                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                    {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
+                    {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
+                    {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }}
                 ];
-                Object.defineProperty(navigator, 'plugins', { get: () => pluginList, configurable: true });
+                Object.defineProperty(navigator, 'plugins', {{ get: () => pluginList, configurable: true }});
 
                 // 3. 补齐 Chrome 专属运行时与性能指标 API (Google BotGuard 关键侦测项)
-                if (!window.chrome) { window.chrome = {}; }
-                window.chrome.runtime = window.chrome.runtime || {
-                    connect: function() {},
-                    sendMessage: function() {},
-                    onMessage: { addListener: function() {} }
-                };
-                window.chrome.loadTimes = window.chrome.loadTimes || function() {
-                    return {
+                if (!window.chrome) {{ window.chrome = {{}}; }}
+                window.chrome.runtime = window.chrome.runtime || {{
+                    connect: function() {{}},
+                    sendMessage: function() {{}},
+                    onMessage: {{ addListener: function() {{}} }}
+                }};
+                window.chrome.loadTimes = window.chrome.loadTimes || function() {{
+                    return {{
                         commitLoadTime: Date.now() / 1000 - 0.5,
                         connectionInfo: 'http/1.1',
                         finishDocumentLoadTime: Date.now() / 1000 - 0.2,
@@ -411,53 +436,53 @@ class RecaptchaTokenProvider:
                         wasAlternateProtocolAvailable: false,
                         wasFetchedViaSpdy: false,
                         wasNpnNegotiated: false
-                    };
-                };
-                window.chrome.csi = window.chrome.csi || function() {
-                    return {
+                    }};
+                }};
+                window.chrome.csi = window.chrome.csi || function() {{
+                    return {{
                         startE: Date.now() - 1000,
                         onloadT: Date.now() - 200,
                         pageT: 800,
                         tran: 15
-                    };
-                };
+                    }};
+                }};
 
                 // 4. 语言与可见性伪装 (强制 visible，杜绝多标签在后台被判定为 hidden 降分)
-                Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'], configurable: true });
-                Object.defineProperty(navigator, 'language', { get: () => 'ja-JP', configurable: true });
-                Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
-                Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
-                Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
+                Object.defineProperty(navigator, 'languages', {{ get: () => ['ja-JP', 'ja', 'en-US', 'en'], configurable: true }});
+                Object.defineProperty(navigator, 'language', {{ get: () => 'ja-JP', configurable: true }});
+                Object.defineProperty(document, 'hidden', {{ get: () => false, configurable: true }});
+                Object.defineProperty(document, 'visibilityState', {{ get: () => 'visible', configurable: true }});
+                Object.defineProperty(document, 'webkitVisibilityState', {{ get: () => 'visible', configurable: true }});
 
                 // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
-                const patchWebGL = (proto) => {
+                const patchWebGL = (proto) => {{
                     if (!proto || !proto.getParameter) return;
                     const origGetParam = proto.getParameter;
-                    proto.getParameter = function(param) {
+                    proto.getParameter = function(param) {{
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        if (param === 37446) return '{webgl_renderer_str}';
                         return origGetParam.apply(this, arguments);
-                    };
-                };
+                    }};
+                }};
                 if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
                 if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
 
                 // 6. 音频上下文通道修正 (修正 Linux 无声卡容器下 maxChannelCount=0 特征)
-                if (window.AudioContext || window.webkitAudioContext) {
+                if (window.AudioContext || window.webkitAudioContext) {{
                     const AC = window.AudioContext || window.webkitAudioContext;
                     const origDestDesc = Object.getOwnPropertyDescriptor(AC.prototype, 'destination');
-                    if (origDestDesc && origDestDesc.get) {
+                    if (origDestDesc && origDestDesc.get) {{
                         const origGet = origDestDesc.get;
-                        Object.defineProperty(AC.prototype, 'destination', {
-                            get: function() {
+                        Object.defineProperty(AC.prototype, 'destination', {{
+                            get: function() {{
                                 const dest = origGet.apply(this);
-                                try { Object.defineProperty(dest, 'maxChannelCount', { value: 2 }); } catch(e) {}
+                                try {{ Object.defineProperty(dest, 'maxChannelCount', {{ value: 2 }}); }} catch(e) {{}}
                                 return dest;
-                            }
-                        });
-                    }
-                }
-            } catch (e) {}
+                            }}
+                        }});
+                    }}
+                }}
+            }} catch (e) {{}}
             """
             try:
                 cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
@@ -601,7 +626,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=-32000,-32000",
+                    "--window-position=0,0",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -613,6 +638,12 @@ class RecaptchaTokenProvider:
                     "--ignore-gpu-blocklist",
                     "--lang=ja-JP,ja",
                 ]
+                cfg_proxy = self._get_configured_proxy()
+                if cfg_proxy:
+                    # Chromium 仅识别 socks5://，自动转换 socks5h:// 前缀
+                    chrome_proxy = cfg_proxy.replace("socks5h://", "socks5://")
+                    args.append(f"--proxy-server={chrome_proxy}")
+                    logger.info(f"🌐 [reCAPTCHA] 浏览器内核已挂载代理通道: {chrome_proxy}")
                 if os.name != "nt":
                     args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
                 args.append("about:blank")
@@ -779,13 +810,15 @@ class RecaptchaTokenProvider:
             except Exception:
                 pass
 
-            # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
+            # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入随机高熵交互信号)
             try:
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
-                time.sleep(0.015)
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 265, "y": 245})
-                time.sleep(0.015)
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 320, "y": 210})
+                base_x = random.randint(150, 260)
+                base_y = random.randint(200, 320)
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x, "y": base_y})
+                time.sleep(random.uniform(0.012, 0.022))
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x + random.randint(35, 75), "y": base_y + random.randint(-25, 25)})
+                time.sleep(random.uniform(0.012, 0.022))
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x + random.randint(85, 140), "y": base_y + random.randint(-40, 20)})
             except Exception:
                 pass
 
@@ -816,20 +849,20 @@ class RecaptchaTokenProvider:
                 cdp.close()
 
     def _try_borrow_fast_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
-        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab，按 Round-Robin 轮询"""
+        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab (粘性高分优先)"""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None or not self._slots:
                 return None
             n = len(self._slots)
             start = self._rr_index % n
-            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位
+            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位 (保持粘性，不盲目切走优质槽位)
             for offset in range(n):
                 idx = (start + offset) % n
                 s = self._slots[idx]
                 if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
                     s.in_use = True
                     s.borrow_seq += 1
-                    self._rr_index = (idx + 1) % n
+                    self._rr_index = idx  # 成功槽位保持粘性，下次优先继续使用
                     return s
             # 2. 次选任意已预热就绪槽位
             for offset in range(n):
@@ -845,7 +878,7 @@ class RecaptchaTokenProvider:
     def _borrow_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
         """
         从多标签池中借出一个独立的 Tab 槽位：
-        1. 优先选用历史健康良好 (not last_failed) 且预热就绪 (is_fresh=True) 的 Tab
+        1. 优先选用历史健康良好 (not last_failed) 且预热就绪 (is_fresh=True) 的 Tab (粘性优先)
         2. 其次选用任意已预热就绪 Tab
         3. 再次选用任意未占用的空闲 Tab
         4. 若所有预热 Tab 均被占用，动态新建临时 Tab
@@ -854,14 +887,14 @@ class RecaptchaTokenProvider:
             n = len(self._slots)
             if n > 0:
                 start = self._rr_index % n
-                # 1. 优先找健康良好且已预热就绪的槽位
+                # 1. 优先找健康良好且已预热就绪的槽位 (保持粘性)
                 for offset in range(n):
                     idx = (start + offset) % n
                     s = self._slots[idx]
                     if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
                         s.in_use = True
                         s.borrow_seq += 1
-                        self._rr_index = (idx + 1) % n
+                        self._rr_index = idx  # 成功槽位保持粘性
                         return s
                 # 2. 找任意已预热好的槽位
                 for offset in range(n):
@@ -1163,6 +1196,7 @@ class AutoOrderHook:
         retry_delay: float = 0.15,
         max_retries: int = 35,
         standby_workers: int = 2,
+        proxy: Optional[str] = None,
     ):
         self.username = (username or "").strip()
         self.password = (password or "").strip()
@@ -1171,14 +1205,26 @@ class AutoOrderHook:
         self.retry_delay = float(retry_delay) if retry_delay is not None else 0.15
         self.max_retries = int(max_retries) if max_retries is not None else 35
         self.standby_workers_count = int(standby_workers) if standby_workers is not None else 2
+        self.proxy = (proxy or "").strip() or (RecaptchaTokenProvider._get_configured_proxy() or "")
         ua = RecaptchaTokenProvider.get_instance().browser_user_agent or DEFAULT_USER_AGENT
         self.session = requests.Session()
+        if self.proxy:
+            # 对于 SOCKS5 代理，requests 优先使用 socks5h:// 确保 DNS 也在代理端远程解析，避免机房 DNS 泄露
+            req_proxy = self.proxy
+            if req_proxy.startswith("socks5://"):
+                req_proxy = req_proxy.replace("socks5://", "socks5h://", 1)
+            self.session.proxies.update({
+                "http": req_proxy,
+                "https": req_proxy,
+            })
+            logger.info(f"🌐 [Auto-Order] 结算网络会话已挂载代理通道: {req_proxy}")
         self.session.headers.update({
             "User-Agent": ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "ja,zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "https://www.dollyteria.com/",
         })
+        self._sync_browser_fingerprint_headers()
         self.is_logged_in = False
         self.last_result: Optional[Dict] = None
 
@@ -1187,6 +1233,20 @@ class AutoOrderHook:
         self._is_standby_worker = False
         self._pool_lock = threading.Lock()
         self._standby_workers: List['AutoOrderHook'] = []
+
+    def _sync_browser_fingerprint_headers(self):
+        """动态同步当前运行中 Chromium 浏览器内核的原生 User-Agent 与 Sec-Ch-Ua 请求头，确保 100% 吻合"""
+        provider = RecaptchaTokenProvider.get_instance()
+        b_ua = provider.browser_user_agent
+        if b_ua:
+            self.session.headers["User-Agent"] = b_ua
+        ua = self.session.headers.get("User-Agent", "")
+        m = re.search(r"Chrome/(\d+)", ua)
+        ver = m.group(1) if m else "124"
+        plat = "Windows" if os.name == "nt" else "Linux"
+        self.session.headers["sec-ch-ua"] = f'"Google Chrome";v="{ver}", "Chromium";v="{ver}", "Not?A_Brand";v="24"'
+        self.session.headers["sec-ch-ua-mobile"] = "?0"
+        self.session.headers["sec-ch-ua-platform"] = f'"{plat}"'
 
     def _safe_request(self, method: str, url: str, max_retries: Optional[int] = None, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
         """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器 (默认继承 auto_order.max_retries，如 35 次)"""
@@ -1320,6 +1380,7 @@ class AutoOrderHook:
 
     def login(self, username: str = None, password: str = None) -> Tuple[bool, str]:
         """登录 Dollyteria 官网账户"""
+        self._sync_browser_fingerprint_headers()
         user = (username if username is not None else self.username).strip()
         pwd = (password if password is not None else self.password).strip()
 
@@ -1411,6 +1472,7 @@ class AutoOrderHook:
         """
         retries = self.max_retries if max_retries is None else max_retries
         delay = self.retry_delay if retry_delay is None else retry_delay
+        self._sync_browser_fingerprint_headers()
         item_id = str(item_id).strip()
         if not item_id:
             return False, "无效的商品 ID", True
@@ -1518,6 +1580,7 @@ class AutoOrderHook:
         """
         推进结算流程并自动选择指定支付方式【代金引換 / 店頭支払 / 銀行振込】，直达下单前确认页面 (/cart/confirm)
         """
+        self._sync_browser_fingerprint_headers()
         method = (payment_method or self.payment_method or "cod").lower()
         if method in ["bank", "bank_transfer", "bank_wire", "銀行振込", "振込"]:
             target_method_name = "銀行振込"
@@ -1746,6 +1809,7 @@ class AutoOrderHook:
         item_id = str(item_id).strip()
         t0 = time.time()
         steps_log = []
+        self._sync_browser_fingerprint_headers()
 
         if method in ["bank", "bank_transfer", "bank_wire", "銀行振込", "振込"]:
             target_name = "銀行振込"

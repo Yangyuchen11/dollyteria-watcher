@@ -132,6 +132,8 @@ class DollyteriaMonitor:
         self.last_check_time = 0
         self.last_check_status = "就绪"
         self._incomplete_from_page = 0
+        self._pending_reorders: Dict[str, Dict] = {}
+        self._reorder_lock = threading.Lock()
 
         # 异步非阻塞下单常驻线程池 (抓取与抢购彻底解耦)
         max_workers = int(ao_cfg.get("max_workers", 6))
@@ -413,6 +415,8 @@ class DollyteriaMonitor:
                     (order_res.get("success") and not order_res.get("dry_run"))
                     or order_res.get("is_sold_out")
                 ):
+                    with self._reorder_lock:
+                        self._pending_reorders.pop(pid, None)
                     if pid:
                         try:
                             self.archive_db.mark_sold_out(pid)
@@ -426,6 +430,23 @@ class DollyteriaMonitor:
                                     pass
                         except Exception as e:
                             logger.debug(f"同步商品 [{pid}] 售罄状态异常: {e}")
+                elif order_res and not order_res.get("success") and not order_res.get("is_sold_out"):
+                    # 本轮抢购重试耗尽，但官网尚未售罄 (如 503 持续时间超过了 max_retries 或瞬时网络抖动)
+                    # 自动加入续抢队列，下一轮巡检只要该商品仍在库，将自动继续尝试购买！
+                    if pid:
+                        with self._reorder_lock:
+                            prev_attempts = self._pending_reorders.get(pid, {}).get("attempts", 0)
+                            if prev_attempts < 10:
+                                self._pending_reorders[pid] = {
+                                    "item": item,
+                                    "rule": rule,
+                                    "attempts": prev_attempts + 1,
+                                    "last_failed_at": time.time(),
+                                }
+                                logger.warning(
+                                    f"🔁 [Auto-Order 自动续抢机制] 商品 [{pid}] 本轮重试耗尽但官网尚未售罄！"
+                                    f"已自动加入续抢待命队列 (续抢轮次: {prev_attempts + 1}/10)，下一轮巡检该商品仍在库时将自动继续尝试购买，直至成功或售罄！"
+                                )
                 if order_res and order_res.get("success"):
                     try:
                         self.notifier.dispatch_order_success(item=item, order_result=order_res, rule=rule)
@@ -637,6 +658,29 @@ class DollyteriaMonitor:
                     self.archive_db.upsert_batch(list(pool_items.values()))
                 except Exception as e:
                     logger.warning(f"同步巡检商品至归档库失败: {e}")
+
+            # 3. 自动续抢机制 (Auto-Retry Until Sold Out)：
+            # 若之前轮次抢购由于官网 503 持续时间过长用尽了单轮重试次数，但商品依然有货未售罄，
+            # 系统会自动在此处接管并自动发起新一轮抢购，死磕到底直到买下或官方售罄！
+            if self.config.get("auto_order", {}).get("enabled", False) and self._pending_reorders:
+                reorder_tasks = []
+                with self._reorder_lock:
+                    now = time.time()
+                    for re_pid, re_info in list(self._pending_reorders.items()):
+                        if (now - re_info.get("last_failed_at", 0)) >= 1.0:
+                            if re_pid in pool_items:
+                                reorder_tasks.append((re_info["item"], re_info["rule"]))
+                                self._pending_reorders.pop(re_pid, None)
+                            else:
+                                stock_info = self.scraper.check_product_stock(re_pid)
+                                if stock_info.get("is_in_stock"):
+                                    reorder_tasks.append((re_info["item"], re_info["rule"]))
+                                    self._pending_reorders.pop(re_pid, None)
+                                else:
+                                    self._pending_reorders.pop(re_pid, None)
+                if reorder_tasks:
+                    logger.info(f"⚡⚡ [Auto-Order 自动续抢触发] 发现 {len(reorder_tasks)} 件未售罄商品符合续抢条件，自动发起新一轮抢购！")
+                    self._execute_auto_orders_concurrent(reorder_tasks)
 
             # 更新已见缓存与统计数据
             self.state["seen_ids"] = list(seen_set)

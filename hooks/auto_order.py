@@ -149,6 +149,7 @@ class _RecaptchaTabSlot:
         self.sitekey: str = ""
         self.prepared_at: float = 0.0
         self.borrow_seq: int = 0
+        self.prep_seq: int = 0
 
 
 class RecaptchaTokenProvider:
@@ -181,6 +182,7 @@ class RecaptchaTokenProvider:
         self._target_pool_size: int = 2
         self._slots: List[_RecaptchaTabSlot] = []
         self._active_token_slots: Dict[str, Tuple[_RecaptchaTabSlot, int, str]] = {}
+        self._rr_index: int = 0
         self._is_ready: bool = False
         self._keepalive_started: bool = False
 
@@ -285,7 +287,8 @@ class RecaptchaTokenProvider:
             cdp = None
             try:
                 cdp = _SimpleCDPClient(helper_ws_url, timeout=5.0)
-                res = cdp.call("Target.createTarget", {"url": "about:blank"})
+                # 使用 newWindow=True 创建独立窗口级 Tab，确保每个槽位均具有独立的 document.visibilityState='visible' 与焦点状态
+                res = cdp.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
                 new_tid = res.get("targetId")
             except Exception:
                 pass
@@ -331,18 +334,23 @@ class RecaptchaTokenProvider:
         self,
         slot: _RecaptchaTabSlot,
         sitekey: str = DEFAULT_RECAPTCHA_SITEKEY,
-        force_navigate: bool = False,
+        force_navigate: bool = True,
     ) -> bool:
         """
-        将单个 Tab 槽位准备至可随时执行 grecaptcha.execute 的就绪状态：
-        - 若该 Tab 已处于 https://www.dollyteria.com 域下且 window.grecaptcha.execute 已就绪（且未要求强制重导），
-          则直接复用当前 DOM 上下文（耗时 <5ms，0 次官网网络请求，100% 免疫官网高峰期 503 / アクセス集中 / 连接超时）
-        - 若为新建空白 Tab 或需强制重导，则导航至官网轻量静态路径（即使官网返回 503 或 アクセス集中 页面，
-          只要 Origin 为 https://www.dollyteria.com 即可正常注入 Google 脚本并签发有效令牌）
+        将单个 Tab 槽位导航至 www.dollyteria.com 极轻静态页并完成 grecaptcha v3 实例加载预热：
+        1. 开启 Emulation.setFocusEmulationEnabled 确保槽位始终保持 visible + focus 满信誉状态
+        2. 导航至带唯一序列号 ?_r={seq_tag} 的轻量 URL 并严格等待 document.readyState === 'complete'，
+           杜绝在旧页面未卸载完时抢先注入导致的令牌失效
+        3. 若官网在极端网络断连期无法完成导航，自动兜底复用当前已存在的 grecaptcha 上下文
         """
         cdp = None
         try:
-            cdp = _SimpleCDPClient(slot.ws_url, timeout=10.0)
+            cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
+            try:
+                cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+            except Exception:
+                pass
+
             if not force_navigate and slot.sitekey in ("", sitekey):
                 chk = cdp.call("Runtime.evaluate", {
                     "expression": (
@@ -357,25 +365,28 @@ class RecaptchaTokenProvider:
                     slot.prepared_at = time.time()
                     return True
 
-            # 需要导航至官网域下（支持 3 次重试应对极端 TCP 抖动；即使返回 503/排队页，Origin 依然合法）
+            slot.prep_seq += 1
+            seq_tag = f"{slot.target_id[:6]}_{slot.prep_seq}_{int(time.time() * 1000) % 100000}"
             nav_urls = [
-                "https://www.dollyteria.com/robots.txt",
-                "https://www.dollyteria.com/favicon.ico",
-                "https://www.dollyteria.com/robots.txt",
+                f"https://www.dollyteria.com/robots.txt?_r={seq_tag}",
+                f"https://www.dollyteria.com/favicon.ico?_r={seq_tag}",
             ]
-            origin_ok = False
+            nav_committed = False
             for nav_url in nav_urls:
                 cdp.call("Page.navigate", {"url": nav_url})
-                for _ in range(15):
-                    time.sleep(0.1)
-                    orig_res = cdp.call("Runtime.evaluate", {
-                        "expression": "window.location ? window.location.origin : ''",
+                for _ in range(35):
+                    time.sleep(0.05)
+                    r_state = cdp.call("Runtime.evaluate", {
+                        "expression": (
+                            f"Boolean(window.location && window.location.href.includes('_r={seq_tag}') "
+                            f"&& document.readyState === 'complete')"
+                        ),
                         "returnByValue": True,
                     })
-                    if orig_res.get("result", {}).get("value") == "https://www.dollyteria.com":
-                        origin_ok = True
+                    if r_state.get("result", {}).get("value") is True:
+                        nav_committed = True
                         break
-                if origin_ok:
+                if nav_committed:
                     break
 
             js_inject = f"""
@@ -596,6 +607,10 @@ class RecaptchaTokenProvider:
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=8.0)
+            try:
+                cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+            except Exception:
+                pass
             expr = (
                 f"new Promise((resolve, reject) => {{"
                 f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
@@ -623,37 +638,51 @@ class RecaptchaTokenProvider:
                 cdp.close()
 
     def _try_borrow_fast_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
-        """0ms 极速快车道：若浏览器进程存活且池中已有预热就绪 (is_fresh=True) 的空闲 Tab，直接秒借无需任何 HTTP 查询或等待其他 Tab"""
+        """0ms 极速快车道：按 Round-Robin 轮询借用池中已预热就绪 (is_fresh=True) 的空闲 Tab，避免总是重用第 0 号槽位"""
         with self._lock:
-            if self._proc is None or self._proc.poll() is not None:
+            if self._proc is None or self._proc.poll() is not None or not self._slots:
                 return None
-            for s in self._slots:
+            n = len(self._slots)
+            start = self._rr_index % n
+            for offset in range(n):
+                idx = (start + offset) % n
+                s = self._slots[idx]
                 if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey:
                     s.in_use = True
                     s.borrow_seq += 1
+                    self._rr_index = (idx + 1) % n
                     return s
         return None
 
     def _borrow_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
         """
-        从多标签池中借出一个独立的 Tab 槽位：
+        从多标签池中按 Round-Robin 轮询借出一个独立的 Tab 槽位：
         1. 优先选用空闲且已预热就绪 (is_fresh=True) 的 Tab，实现 0.15s~0.35s 极速出码
         2. 其次选用任意空闲 Tab
-        3. 若所有预热 Tab 均正被其他并发下单线程占用，动态新建一个临时独立 Tab，绝不串行阻塞等待
+        3. 若所有预热 Tab 均正被其他并发下单线程占用，动态新建一个临时独立窗口 Tab，绝不串行阻塞等待
         """
         with self._lock:
-            # 1. 优先找已预热好的空闲槽位
-            for s in self._slots:
-                if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey:
-                    s.in_use = True
-                    s.borrow_seq += 1
-                    return s
-            # 2. 找任意未占用的槽位
-            for s in self._slots:
-                if not s.in_use:
-                    s.in_use = True
-                    s.borrow_seq += 1
-                    return s
+            n = len(self._slots)
+            if n > 0:
+                start = self._rr_index % n
+                # 1. 优先找已预热好的空闲槽位
+                for offset in range(n):
+                    idx = (start + offset) % n
+                    s = self._slots[idx]
+                    if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey:
+                        s.in_use = True
+                        s.borrow_seq += 1
+                        self._rr_index = (idx + 1) % n
+                        return s
+                # 2. 找任意未占用的槽位
+                for offset in range(n):
+                    idx = (start + offset) % n
+                    s = self._slots[idx]
+                    if not s.in_use:
+                        s.in_use = True
+                        s.borrow_seq += 1
+                        self._rr_index = (idx + 1) % n
+                        return s
             # 3. 所有预热槽位都在忙 (并发单数 > 预热 Tab 数)，动态派生新 Tab
             helper_ws = self._slots[0].ws_url if self._slots else None
             new_t = self._create_new_page_target(helper_ws)
@@ -1505,8 +1534,15 @@ class AutoOrderHook:
                     "elapsed_sec": round(time.time() - t0, 2),
                 }
 
-            # 3. 推进至结算并选择指定支付方式，直达确认页
-            ok, msg, confirm_resp = self.proceed_to_confirmation(payment_method=method)
+            # 3. 推进至结算并选择指定支付方式，直达确认页 (保持购物车状态支持最多 3 轮整链重试)
+            ok, msg, confirm_resp = False, "", None
+            for conf_attempt in range(3):
+                ok, msg, confirm_resp = self.proceed_to_confirmation(payment_method=method)
+                if ok and confirm_resp:
+                    break
+                if conf_attempt < 2:
+                    logger.warning(f"⚠️ [Auto-Order] 保持购物车状态重新尝试推进结算流程 (第 {conf_attempt + 1}/2 次): {msg}")
+                    time.sleep(self.retry_delay)
             steps_log.append(f"推进结算并指定【{target_name}】: {'成功' if ok else '失败 (' + msg + ')'}")
             if not ok or not confirm_resp:
                 return {
@@ -1621,8 +1657,10 @@ class AutoOrderHook:
                 complete_text = ""
                 success = False
 
-                # 支持若首次因令牌过期被拦截时，立即强制重签新 Token 重试
-                for submit_attempt in range(3):
+                # 支持若遇到 reCAPTCHA 校验拦截时，保持购物车与确认页状态，自动轮换预热 Tab 实时重签新 Token 持续重试直至成功 (与 max_retries 联动，默认最多 35 轮)
+                max_recaptcha_attempts = max(8, self.max_retries)
+                provider = RecaptchaTokenProvider.get_instance()
+                for submit_attempt in range(max_recaptcha_attempts):
                     resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
                     if not resp_complete:
                         continue
@@ -1631,12 +1669,20 @@ class AutoOrderHook:
                     if success:
                         break
 
-                    # 若因 reCAPTCHA 验证未通过，立即强制重签一枚新 Token 并瞬时重交
-                    if "reCAPTCHAの検証に失敗しました" in complete_text and submit_attempt < 2:
-                        logger.warning(f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，正在实时重签新令牌重试 (第 {submit_attempt + 1} 次)...")
+                    # 若因 reCAPTCHA 验证未通过，立即释放旧令牌并轮换下一个预热 Tab 实时重签新 Token 原地重交
+                    if "reCAPTCHAの検証に失敗しました" in complete_text and submit_attempt < max_recaptcha_attempts - 1:
+                        logger.warning(
+                            f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，保持购物车与结算状态实时重签新令牌重试 "
+                            f"(第 {submit_attempt + 1}/{max_recaptcha_attempts - 1} 次)..."
+                        )
                         if final_data.get("recaptcha_token"):
-                            RecaptchaTokenProvider.get_instance().release_tokens([final_data["recaptcha_token"]])
-                        fresh_tok = RecaptchaTokenProvider.get_instance().get_token(
+                            provider.release_tokens([final_data["recaptcha_token"]])
+                        # 若连续 5 次换签仍被拦截，自动触发一次浏览器环境深度自愈重建
+                        if (submit_attempt + 1) % 5 == 0:
+                            logger.warning("🔄 [Auto-Order] 连续多次遭遇 reCAPTCHA 拦截，正在自动重置预热浏览器环境自愈...")
+                            with provider._lock:
+                                provider._cleanup_proc_unlocked()
+                        fresh_tok = provider.get_token(
                             sitekey=page_sitekey,
                             action="submit",
                             force_fresh=True,

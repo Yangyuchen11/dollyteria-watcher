@@ -58,7 +58,7 @@ from core.archive_db import DollyteriaArchiveDB
 from core.archiver import DollyteriaArchiver
 from core.monitor import DollyteriaMonitor
 from core.scheduler import DollyteriaScheduler
-from hooks.auto_order import AutoOrderHook
+from hooks.auto_order import AutoOrderHook, RecaptchaTokenProvider, DEFAULT_RECAPTCHA_SITEKEY
 from notifiers.manager import NotifierManager
 from web.app import create_app
 
@@ -202,11 +202,31 @@ def build_checkout_responses(pid: str, title: str, price_str: str = "55,000円",
                 <div>ご住所</div><div>:</div><div>東京都豊島区東池袋1-1-1</div>
                 <div>お支払い方法</div><div>変更</div><div>{payment_label}</div>
             </div>
-            <form action="https://www.dollyteria.com/cart/confirm" method="post">
+            <form id="register" name="register" action="https://www.dollyteria.com/cart/confirm" method="post">
                 <input type="hidden" name="csrf_token" value="tok_12345" />
-                <input type="checkbox" name="policy_agree" value="1" /> 同意する
-                <input type="submit" name="go-next" value="購入する" />
+                <input type="hidden" name="coupon_use" value="f" />
+                <input type="checkbox" id="coupon_use_check" name="coupon_use" value="t" />
+                <input type="text" id="couponCode" name="couponCode" value="" />
+                <input type="submit" name="coupon" value="適用" />
+                <input type="checkbox" id="policy_agree" name="policy_agree" value="1" /> 同意する
+                <input type="submit" name="go-next" value="購入する" class="recaptcha_button buyinput btn_size_xxlarge btn_color_emphasis" />
             </form>
+            <script>
+                let s = document.createElement('script');
+                s.src = 'https://www.google.com/recaptcha/api.js?render={DEFAULT_RECAPTCHA_SITEKEY}&824122141240';
+            </script>
+        </body></html>
+        """
+    )
+
+    resp_confirm_recaptcha_err = make_response(
+        200,
+        "https://www.dollyteria.com/cart/confirm",
+        """
+        <html><body>
+            <div class="error_box">
+                <p class="error_status">reCAPTCHAの検証に失敗しました。再度お試しください。</p>
+            </div>
         </body></html>
         """
     )
@@ -223,6 +243,7 @@ def build_checkout_responses(pid: str, title: str, price_str: str = "55,000円",
         "cust_ready": resp_cust_ready,
         "shipping": resp_shipping,
         "confirm": resp_confirm,
+        "confirm_recaptcha_err": resp_confirm_recaptcha_err,
         "complete": resp_complete,
     }
 
@@ -1025,13 +1046,19 @@ class TestAutoOrderCheckoutFullLifecycle(IsolatedMonitorTestCase):
     def test_18_normal_checkout_real_order_submission_all_payment_methods(self):
         """
         测试真实下单模式 (dry_run=False) 全链路及 3 种支付方式 (代金引換 / 店頭支払 / 銀行振込)：
-        验证正确选择对应 pay_procedure (3 / 8 / 1)、自动勾选 policy_agree='1'、提交 go-next='購入する' 并抵达注文完了页
+        严格校验：
+        1. 正确选择对应 pay_procedure (3 / 8 / 1)
+        2. 自动勾选 policy_agree='1'、提交 go-next='購入する'
+        3. 排除无关的优惠券 checkbox (coupon_use 保持 'f'，不误触 coupon='適用' 提交按钮)
+        4. 必须携带非空的 Google reCAPTCHA v3 令牌 (recaptcha_token)，若缺失则模拟官网返回 reCAPTCHA 报错拦截
         """
         payment_cases = [
             ("cod", "3", "代金引換"),
             ("store_pickup", "8", "店頭支払"),
             ("bank_transfer", "1", "銀行振込"),
         ]
+
+        mock_recaptcha_token = "0cAFcWeA_valid_recaptcha_v3_token_" + ("x" * 200)
 
         for method_code, expected_pay_val, expected_label in payment_cases:
             with self.subTest(payment_method=method_code):
@@ -1058,23 +1085,31 @@ class TestAutoOrderCheckoutFullLifecycle(IsolatedMonitorTestCase):
                         captured_shipping_data.update(kwargs.get("data", {}))
                         return resps["confirm"]
                     if method == "POST" and "/cart/confirm" in url:
-                        captured_final_data.update(kwargs.get("data", {}))
+                        data = kwargs.get("data", {})
+                        captured_final_data.update(data)
+                        # 模拟 Dollyteria 官网真实校验：缺少 recaptcha_token 或 policy_agree!=1 则拒绝完成订单！
+                        if not data.get("recaptcha_token") or data.get("policy_agree") != "1":
+                            return resps["confirm_recaptcha_err"]
                         return resps["complete"]
                     return make_response(200)
 
                 hook.session.request = mock_request
                 hook.session.post = MagicMock(return_value=resps["cart"])
 
-                res = hook.execute_checkout("809002", "SDGIRL/アナイス", dry_run=False, payment_method=method_code)
+                with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", return_value=mock_recaptcha_token):
+                    res = hook.execute_checkout("809002", "SDGIRL/アナイス", dry_run=False, payment_method=method_code)
 
-                self.assertTrue(res["success"], f"支付方式 {method_code} 真实下单应当成功")
+                self.assertTrue(res["success"], f"支付方式 {method_code} 真实下单应当成功: {res}")
                 self.assertFalse(res["dry_run"])
                 self.assertEqual(res["step"], "order_complete")
                 self.assertEqual(captured_shipping_data.get("pay_procedure"), expected_pay_val)
-                # 验证最终提交自动勾选了规约同意 (policy_agree=1) 与 購入する
+                # 验证最终提交自动勾选了规约同意 (policy_agree=1)、購入する、以及注入了 recaptcha_token
                 self.assertEqual(captured_final_data.get("policy_agree"), "1")
                 self.assertEqual(captured_final_data.get("go-next"), "購入する")
                 self.assertEqual(captured_final_data.get("csrf_token"), "tok_12345")
+                self.assertEqual(captured_final_data.get("coupon_use"), "f", "不应误勾选未使用的优惠券 checkbox")
+                self.assertNotIn("coupon", captured_final_data, "不应包含优惠券『適用』submit 按钮")
+                self.assertEqual(captured_final_data.get("recaptcha_token"), mock_recaptcha_token)
 
     def test_19_busy_period_add_to_cart_503_and_queue_page_retries(self):
         """
@@ -1149,7 +1184,8 @@ class TestAutoOrderCheckoutFullLifecycle(IsolatedMonitorTestCase):
         hook.session.post = MagicMock(return_value=resps["cart"])
         hook.session.request = MagicMock(side_effect=request_sequence)
 
-        res = hook.execute_checkout("809004", "DearSD/キラ", dry_run=False, payment_method="store_pickup")
+        with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", return_value="0cAFcWeA_valid_token_" + ("y" * 200)):
+            res = hook.execute_checkout("809004", "DearSD/キラ", dry_run=False, payment_method="store_pickup")
         self.assertTrue(res["success"], f"结算途中遭遇 503 应自动重试恢复并完成下单，实际结果: {res}")
         self.assertEqual(res["step"], "order_complete")
         self.assertEqual(hook.session.request.call_count, 10)
@@ -1353,7 +1389,10 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
         # 验证数据库中 6001 已被自动标记为售罄
         self.assertFalse(monitor.archive_db.get_product_by_id("6001")["is_in_stock"])
 
-        # 场景 B: 一键买断成功 -> 触发 dispatch_order_success
+        # 场景 B: 一键买断成功 -> 触发 dispatch_order_success 且自动将已买下的孤品标记为售罄
+        monitor.archive_db.upsert_batch([
+            {"id": "6002", "title": "DearSD 档案在售商品 2", "price": 68000, "is_in_stock": True}
+        ])
         mock_worker_ok = MagicMock()
         mock_worker_ok.execute_checkout.return_value = {
             "success": True,
@@ -1361,27 +1400,626 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
             "step": "order_complete",
             "elapsed_sec": 0.38,
             "payment_method": "代金引換",
-            "details": {"total_price": "65,000円", "payment_method": "代金引換"},
+            "details": {"total_price": "68,000円", "payment_method": "代金引換"},
         }
         monitor.auto_order.get_worker = MagicMock(return_value=mock_worker_ok)
         monitor.notifier.dispatch_order_success = MagicMock()
 
-        buy_resp_2 = client.post("/api/auto_order/buy", json={"item_id": "6001", "item_title": "DearSD 档案在售商品", "dry_run": False})
+        buy_resp_2 = client.post("/api/auto_order/buy", json={"item_id": "6002", "item_title": "DearSD 档案在售商品 2", "dry_run": False})
         self.assertEqual(buy_resp_2.status_code, 200)
         self.assertTrue(buy_resp_2.get_json()["success"])
         monitor.notifier.dispatch_order_success.assert_called_once()
+        self.assertFalse(monitor.archive_db.get_product_by_id("6002")["is_in_stock"], "真实下单购买成功后应立即将该商品标记为已售罄")
+
+
+# =====================================================================
+# 7. 真实下单可靠性专项强化测试：reCAPTCHA v3 令牌自愈、确认页残影隔离、并发预取与实弹探针
+# =====================================================================
+
+class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
+
+    def test_26_real_order_recaptcha_rejection_auto_resign_and_retry_recovery(self):
+        """
+        测试真实下单最后一步 (/cart/confirm) 遭遇 reCAPTCHA 令牌失效或拒签时的自动重签自愈：
+        1. 初次提交时携带旧令牌 expired_token，被官网返回「reCAPTCHAの検証に失敗しました。再度お試しください。」拦截
+        2. 验证 execute_checkout 自动捕获该特征，调用 get_token(force_fresh=True) 实时重签全新令牌 fresh_token_v2
+        3. 自动携带 fresh_token_v2 瞬时重交 POST /cart/confirm 并成功完成下单 (/cart/complete)！
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=False,
+            payment_method="store_pickup",
+            retry_delay=0.01,
+            max_retries=3,
+        )
+        hook.is_logged_in = True
+        resps = build_checkout_responses("809101", "SDGIRL/アナイス リアル注文テスト", "70,000円", payment_label="店頭支払")
+
+        submitted_tokens = []
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                data = kwargs.get("data", {})
+                tok = data.get("recaptcha_token", "")
+                submitted_tokens.append(tok)
+                if tok == "expired_token_v1":
+                    # 第 1 次模拟令牌过期被 Dollyteria 拒绝
+                    return resps["confirm_recaptcha_err"]
+                elif tok == "fresh_token_v2" and data.get("policy_agree") == "1":
+                    # 第 2 次重签新令牌后通过验证，成功跳转 /cart/complete
+                    return resps["complete"]
+                return resps["confirm_recaptcha_err"]
+            return make_response(200)
+
+        hook.session.request = mock_request
+        hook.session.post = MagicMock(return_value=resps["cart"])
+
+        token_calls = []
+
+        def fake_get_token(sitekey=DEFAULT_RECAPTCHA_SITEKEY, action="submit", force_fresh=False, max_age_sec=45.0):
+            token_calls.append(force_fresh)
+            return "fresh_token_v2" if force_fresh else "expired_token_v1"
+
+        with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", side_effect=fake_get_token):
+            res = hook.execute_checkout("809101", "SDGIRL/アナイス リアル注文テスト", dry_run=False, payment_method="store_pickup")
+
+        self.assertTrue(res["success"], f"首次令牌失效后应自动重签新令牌并重试成功: {res}")
+        self.assertEqual(res["step"], "order_complete")
+        self.assertEqual(submitted_tokens, ["expired_token_v1", "fresh_token_v2"])
+        self.assertIn(True, token_calls, "检测到 reCAPTCHA 拦截后必须以 force_fresh=True 强制重签新令牌")
+
+    def test_27_real_order_confirm_soldout_diagnosis_and_stale_cart_isolation(self):
+        """
+        测试真实下单两大极端边界可靠性：
+        - 场景 A：加购时购物车内残留有上一单失败留下的旧商品 (cart_remove_OLD888)，验证 add_to_cart 入车瞬间自动剔除旧商品，绝不串单或因旧品售罄卡死结算
+        - 场景 B：商品顺利抵达 /cart/confirm，但在点击「購入する」瞬间被他人抢先一步完成结账，官网返回「在庫が不足しております」错误提示：
+          验证系统精准提取日文报错原因、标记 is_sold_out=True，并自动调用 clear_cart() 清理失效购物车
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=False,
+            payment_method="store_pickup",
+            retry_delay=0.01,
+            max_retries=3,
+        )
+        hook.is_logged_in = True
+
+        # 购物车中同时存在残留旧商品 OLD888 与本次新加购商品 809102
+        cart_with_stale_item_html = """
+        <html><body>
+            <h1>ショッピングカート</h1>
+            <div>カートの中身: OLD888 809102</div>
+            <input type="submit" name="cart_remove_OLD888" value="削除" />
+            <input type="submit" name="cart_remove_809102" value="削除" />
+            <a href="/cart/customer">レジに進む</a>
+        </body></html>
+        """
+        resp_cart_mixed = make_response(200, "https://www.dollyteria.com/cart", cart_with_stale_item_html)
+
+        post_records = []
+
+        def mock_post(url, data=None, **kwargs):
+            post_records.append((url, data))
+            return resp_cart_mixed
+
+        hook.session.post = mock_post
+        ok, _, _ = hook.add_to_cart("809102")
+        self.assertTrue(ok)
+        # 验证自动发送了针对残留商品 OLD888 的删除请求，且未误删当前商品 809102
+        removed_names = [d for u, d in post_records if u.endswith("/cart") and d and any(k.startswith("cart_remove_") for k in d)]
+        self.assertEqual(len(removed_names), 1)
+        self.assertIn("cart_remove_OLD888", removed_names[0])
+        self.assertNotIn("cart_remove_809102", removed_names[0])
+
+        # 场景 B: 在 /cart/confirm 最终提交瞬间遭遇他人抢先结账导致库存不足
+        resps = build_checkout_responses("809102", "DearSD/めぐ ラスト1点", "68,000円", payment_label="店頭支払")
+        resp_confirm_soldout = make_response(
+            200,
+            "https://www.dollyteria.com/cart/confirm",
+            """
+            <html><body>
+                <div class="error_box">
+                    <p class="error_status">大変申し訳ございません。商品の在庫が不足しております。</p>
+                </div>
+            </body></html>
+            """
+        )
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                return resp_confirm_soldout
+            return make_response(200)
+
+        hook.session.request = mock_request
+        hook.clear_cart = MagicMock()
+
+        with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", return_value="valid_token_xyz"):
+            res = hook.execute_checkout("809102", "DearSD/めぐ ラスト1点", dry_run=False, payment_method="store_pickup")
+
+        self.assertFalse(res["success"])
+        self.assertTrue(res["is_sold_out"], "确认页提示库存不足时应准确标记 is_sold_out=True")
+        self.assertIn("在庫が不足しております", res["message"], "返回消息应透传确认页的具体错误原因")
+        hook.clear_cart.assert_called_once()
+
+    def test_28_real_order_parallel_recaptcha_prefetch_zero_extra_latency(self):
+        """
+        测试真实下单时的并发预取架构 (Parallel Token Prefetch)：
+        - 模拟加购 + 推进结算耗时 0.15s，同时模拟签发 reCAPTCHA 令牌耗时 0.15s
+        - 验证两者并行执行，总耗时显著低于串行相加 (0.30s)，实现确认页 0 额外等待直接提交
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=False,
+            payment_method="store_pickup",
+            retry_delay=0.01,
+            max_retries=2,
+        )
+        hook.is_logged_in = True
+        resps = build_checkout_responses("809103", "SDGIRL 速度テスト", "60,000円", payment_label="店頭支払")
+
+        def slow_add_to_cart( url, data=None, **kwargs):
+            time.sleep(0.12)
+            return resps["cart"]
+
+        def slow_get_token(*args, **kwargs):
+            time.sleep(0.12)
+            return "parallel_prefetched_token_999"
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                self.assertEqual(kwargs.get("data", {}).get("recaptcha_token"), "parallel_prefetched_token_999")
+                return resps["complete"]
+            return make_response(200)
+
+        hook.session.post = slow_add_to_cart
+        hook.session.request = mock_request
+
+        with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", side_effect=slow_get_token):
+            t0 = time.time()
+            res = hook.execute_checkout("809103", "SDGIRL 速度テスト", dry_run=False, payment_method="store_pickup")
+            elapsed = time.time() - t0
+
+        self.assertTrue(res["success"])
+        # 并行执行耗时应接近单边 0.12s，远小于串行的 0.24s+
+        self.assertLess(elapsed, 0.22, f"reCAPTCHA 令牌预取应当与加购结算并行重叠执行，实际耗时 {elapsed:.3f}s")
+
+    def test_29_live_dollyteria_confirm_page_recaptcha_v3_verification(self):
+        """
+        【实盘联调级安全验证】连接真实 Dollyteria 官网 (/cart/confirm) 检验 RecaptchaTokenProvider 签发的令牌：
+        - 使用真实浏览器内核签发 Google reCAPTCHA v3 令牌 (验证冷启动签发 + 预热缓存 0.00s 秒取)
+        - 若真实 config.json 配置了有效官网账号，则自动加购 1 件在库商品推进至真实 /cart/confirm 页面
+        - 安全探针机制：向真实 /cart/confirm 提交携带 recaptcha_token 但【故意不传 policy_agree】的请求
+          (100% 保证官网因未勾选同意规约而绝不生成订单，同时触发官网服务端对 recaptcha_token 的真实验证！)
+        - 断言：真实官网返回页面中绝不包含「reCAPTCHAの検証に失敗しました」，证明令牌 100% 通过官网风控！
+        """
+        provider = RecaptchaTokenProvider.get_instance()
+        browser_exe = provider._find_browser_executable()
+        if not browser_exe:
+            self.skipTest("当前环境未安装 Chrome/Edge/Chromium，跳过真实浏览器令牌联调")
+
+        try:
+            # 1. 验证多标签页预热池大小同步 (如设置 standby_workers=2 则创建 2 个独立预热 Tab) 及多线程并发独立签发
+            provider.set_pool_size(2)
+            ok_pool = provider._ensure_browser_and_pool_ready()
+            self.assertTrue(ok_pool, "多标签预热池应当成功就绪")
+            self.assertEqual(len(provider._slots), 2, "预热 Tab 数量应与配置的备用会话数 (2) 严格一致")
+
+            # 验证 2 个线程同时调用 get_token 时在各自的预热 Tab 上并行极速出码，且令牌互不相同
+            concurrent_tokens = [None, None]
+            t_start = time.time()
+
+            def _fetch_tok(idx):
+                concurrent_tokens[idx] = provider.get_token()
+
+            th1 = threading.Thread(target=_fetch_tok, args=(0,))
+            th2 = threading.Thread(target=_fetch_tok, args=(1,))
+            th1.start()
+            th2.start()
+            th1.join(timeout=8)
+            th2.join(timeout=8)
+            parallel_elapsed = time.time() - t_start
+
+            tok1, tok2 = concurrent_tokens[0], concurrent_tokens[1]
+            self.assertTrue(isinstance(tok1, str) and len(tok1) > 1000, "线程 1 应成功签发真实 reCAPTCHA v3 令牌")
+            self.assertTrue(isinstance(tok2, str) and len(tok2) > 1000, "线程 2 应成功签发真实 reCAPTCHA v3 令牌")
+            self.assertNotEqual(tok1, tok2, "多线程并发下单绝不能共用同一枚 reCAPTCHA 令牌")
+            self.assertLess(parallel_elapsed, 1.0, f"预热 Tab 并发实时签发应当在 1.0s 内极速完成，实际耗时 {parallel_elapsed:.3f}s")
+
+            # 2. 读取真实 config.json 账号向官网 /cart/confirm 发起无损探针验证
+            real_cfg_path = os.path.join(PROJECT_ROOT, "config.json")
+            if not os.path.exists(real_cfg_path):
+                return
+            with open(real_cfg_path, "r", encoding="utf-8") as f:
+                real_cfg = json.load(f)
+            user = (real_cfg.get("auto_order", {}).get("username") or "").strip()
+            pwd = (real_cfg.get("auto_order", {}).get("password") or "").strip()
+            if not user or not pwd:
+                return
+
+            scraper = DollyteriaScraper()
+            in_stock_items = scraper.fetch_new_arrivals(num=10, in_stock_only=True)
+            if not in_stock_items:
+                return
+            test_pid = in_stock_items[0]["id"]
+
+            live_hook = AutoOrderHook(username=user, password=pwd, dry_run=True, payment_method="store_pickup")
+            ok_login, _ = live_hook.login()
+            if not ok_login:
+                return
+            try:
+                ok_cart, _, _ = live_hook.add_to_cart(test_pid)
+                self.assertTrue(ok_cart, "实盘加购测试商品应成功")
+                ok_conf, _, r_conf = live_hook.proceed_to_confirmation(payment_method="store_pickup")
+                self.assertTrue(ok_conf and r_conf is not None, "实盘推进至 /cart/confirm 应成功")
+
+                # 故意不传 policy_agree（确保官网绝不生成真实订单），同时传入真实签发的 tok2 检验官网 reCAPTCHA 校验结果
+                r_probe = live_hook.session.post(
+                    "https://www.dollyteria.com/cart/confirm",
+                    data={
+                        "recaptcha_token": tok2,
+                        "coupon_use": "f",
+                        "couponCode": "",
+                        "go-next": "購入する",
+                    },
+                    timeout=12,
+                    allow_redirects=True,
+                )
+                probe_text = r_probe.content.decode("utf-8", "ignore")
+                self.assertNotIn(
+                    "reCAPTCHAの検証に失敗しました",
+                    probe_text,
+                    "真实官网 /cart/confirm 应当 100% 认可 RecaptchaTokenProvider 签发的令牌，不得出现 reCAPTCHA 验证失败！",
+                )
+                self.assertIn(
+                    "「同意する」にチェックをいれてください",
+                    probe_text,
+                    "安全探针未勾选同意规约，官网应当仅提示勾选同意而绝不产生真实扣款或订单",
+                )
+            finally:
+                live_hook.clear_cart()
+        finally:
+            provider._cleanup_proc_unlocked()
+
+    def test_30_checkout_faster_than_tab_token_signing_no_race_condition(self):
+        """
+        测试边界场景 A：【加购 + 选支付方式】快于【Tab 同步调用与令牌签发】
+        - 模拟加购与推进结算极快完成 (仅耗时 0.01s 即可到达 /cart/confirm)
+        - 模拟后台 Tab 签发 reCAPTCHA 令牌较慢 (耗时 0.25s 才返回)
+        - 验证：
+          1. execute_checkout 到达 /cart/confirm 时会通过 token_thread.join() 安全等待令牌签发完成
+          2. 绝不会因加购更快而漏传令牌、报错或重复发起多余签发请求
+          3. 最终提交结束时自动调用 release_tokens 归还 Tab 槽位
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=False,
+            payment_method="store_pickup",
+            retry_delay=0.01,
+            max_retries=2,
+        )
+        hook.is_logged_in = True
+        resps = build_checkout_responses("809201", "SD13 极速加购快于令牌测试", "45,000円", payment_label="店頭支払")
+
+        timeline = []
+        get_token_calls = []
+        released_tokens = []
+
+        def fast_add_to_cart(url, data=None, **kwargs):
+            timeline.append(("add_to_cart_done", time.time()))
+            return resps["cart"]
+
+        def slower_tab_get_token(*args, **kwargs):
+            get_token_calls.append(kwargs.get("force_fresh", False))
+            time.sleep(0.25)
+            timeline.append(("token_signed", time.time()))
+            return "delayed_tab_token_after_fast_checkout_777"
+
+        def track_release_tokens(tokens):
+            released_tokens.extend(tokens)
+            timeline.append(("token_released", time.time()))
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                timeline.append(("confirm_page_reached", time.time()))
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                timeline.append(("confirm_post_submitted", time.time()))
+                self.assertEqual(
+                    kwargs.get("data", {}).get("recaptcha_token"),
+                    "delayed_tab_token_after_fast_checkout_777",
+                    "即使加购与选支付方式比 Tab 签发更快，/cart/confirm 提交前也必须同步等待并注入完整令牌",
+                )
+                return resps["complete"]
+            return make_response(200)
+
+        hook.session.post = fast_add_to_cart
+        hook.session.request = mock_request
+
+        provider = RecaptchaTokenProvider.get_instance()
+        with patch.object(provider, "get_token", side_effect=slower_tab_get_token), \
+             patch.object(provider, "release_tokens", side_effect=track_release_tokens):
+            res = hook.execute_checkout("809201", "SD13 极速加购快于令牌测试", dry_run=False, payment_method="store_pickup")
+
+        self.assertTrue(res["success"], "加购快于令牌签发时应当平稳等待并下单成功")
+        self.assertEqual(len(get_token_calls), 1, "应当仅使用并行预取线程签发的 1 枚令牌，不触发多余重签")
+        event_names = [e[0] for e in timeline]
+        # 验证真实执行时序：到达确认页 -> 等待令牌签发完毕 -> 提交最终订单 -> 释放 Tab 槽位
+        self.assertLess(
+            event_names.index("confirm_page_reached"),
+            event_names.index("token_signed"),
+            "测试应当准确复现『到达确认页快于令牌签发完成』的时序",
+        )
+        self.assertLess(
+            event_names.index("token_signed"),
+            event_names.index("confirm_post_submitted"),
+            "最终 POST /cart/confirm 必须在令牌签发完成后才发起",
+        )
+        self.assertIn("delayed_tab_token_after_fast_checkout_777", released_tokens, "下单完成后必须立即释放持有的令牌与 Tab")
+
+    def test_31_checkout_slower_than_tab_signing_holds_tab_and_refreshes_if_expired(self):
+        """
+        测试边界场景 B：【加购 + 选支付方式】慢于【Tab 令牌签发】(例如遭遇 503 重试)
+        - 子场景 B1：Tab 在 0.02s 内极速签发完毕，而加购 + 选支付方式因 503 重试耗时 0.20s
+          验证：在 POST /cart/confirm 完成前，预热 Tab 绝不会被提前释放或刷新；直到订单提交完成后才触发 release_tokens。
+        - 子场景 B2：极端 503 阻塞导致加购 + 选支付方式耗时超过 12s 阈值
+          验证：execute_checkout 检测到预取令牌已老化 (>12s)，在提交 /cart/confirm 前自动释放旧令牌并重签全新令牌。
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=False,
+            payment_method="store_pickup",
+            retry_delay=0.05,
+            max_retries=5,
+        )
+        hook.is_logged_in = True
+        resps = build_checkout_responses("809202", "SDGr 503重试慢于令牌测试", "88,000円", payment_label="店頭支払")
+
+        # --- 子场景 B1：令牌 0.01s 签好，加购经历 2 次 503 后才成功 ---
+        cart_attempts = {"count": 0}
+        released_at_confirm = {"released_before_post": False}
+        released_list = []
+
+        def retry_503_add_to_cart(url, data=None, **kwargs):
+            cart_attempts["count"] += 1
+            if cart_attempts["count"] <= 2:
+                time.sleep(0.06)
+                return make_response(503, html="503 Service Temporarily Unavailable")
+            return resps["cart"]
+
+        def fast_tab_get_token(*args, **kwargs):
+            return "fast_signed_token_held_during_503"
+
+        def track_release(tokens):
+            released_list.extend(tokens)
+
+        def mock_request_b1(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                # 在提交 /cart/confirm 的瞬间，令牌绝不能已经被提前释放！
+                if released_list:
+                    released_at_confirm["released_before_post"] = True
+                self.assertEqual(kwargs.get("data", {}).get("recaptcha_token"), "fast_signed_token_held_during_503")
+                return resps["complete"]
+            return make_response(200)
+
+        hook.session.post = retry_503_add_to_cart
+        hook.session.request = mock_request_b1
+
+        provider = RecaptchaTokenProvider.get_instance()
+        with patch.object(provider, "get_token", side_effect=fast_tab_get_token), \
+             patch.object(provider, "release_tokens", side_effect=track_release):
+            res_b1 = hook.execute_checkout("809202", "SDGr 503重试慢于令牌测试", dry_run=False, payment_method="store_pickup")
+
+        self.assertTrue(res_b1["success"])
+        self.assertFalse(
+            released_at_confirm["released_before_post"],
+            "在加购/结算重试期间及 POST /cart/confirm 完成前，绝不能提前释放/刷新已签发令牌的 Tab",
+        )
+        self.assertEqual(released_list, ["fast_signed_token_held_during_503"], "POST /cart/confirm 完成后应立即释放 Tab 槽位")
+
+        # --- 子场景 B2：模拟加购重试极久导致预取令牌老化 (>12s)，验证自动换签新令牌 ---
+        token_seq = iter(["stale_token_over_12s", "fresh_token_after_long_503"])
+        released_b2 = []
+        real_time = time.time
+        fake_clock = {"offset": 0.0}
+
+        def mocked_time():
+            return real_time() + fake_clock["offset"]
+
+        def add_to_cart_long_delay(url, data=None, **kwargs):
+            # 模拟加购耗时 13.5 秒（令并行预取的 첫枚令牌超过 12s 保鲜阈值）
+            time.sleep(0.03)
+            fake_clock["offset"] += 13.5
+            return resps["cart"]
+
+        def mock_request_b2(method, url, **kwargs):
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "POST" and "/cart/confirm" in url:
+                self.assertEqual(
+                    kwargs.get("data", {}).get("recaptcha_token"),
+                    "fresh_token_after_long_503",
+                    "当加购重试耗时过长 (>12s) 时，应当自动弃用老化令牌并换签全新令牌提交",
+                )
+                return resps["complete"]
+            return make_response(200)
+
+        hook.session.post = add_to_cart_long_delay
+        hook.session.request = mock_request_b2
+
+        with patch("hooks.auto_order.time.time", side_effect=mocked_time), \
+             patch.object(provider, "get_token", side_effect=lambda *a, **kw: next(token_seq)), \
+             patch.object(provider, "release_tokens", side_effect=lambda toks: released_b2.extend(toks)):
+            res_b2 = hook.execute_checkout("809202", "SDGr 503超长重试自动换签测试", dry_run=False, payment_method="store_pickup")
+
+        self.assertTrue(res_b2["success"])
+        self.assertIn("stale_token_over_12s", released_b2, "老化的预取令牌应当被立即释放")
+        self.assertIn("fresh_token_after_long_503", released_b2, "新签发的令牌在下单结束后也应当被释放")
+
+    def test_32_live_multi_tab_dynamic_scaling_and_parallel_execute_checkout(self):
+        """
+        【真实 Chrome 多标签池 + 并行下单全链路压测】
+        1. 验证前端修改 Standby Sessions (例如从 2 扩容到 3) 时：
+           - 已就绪的 2 个 Tab 保持原地不动 (0 闪断)
+           - 立即在后台同一个 Chrome 进程中新增第 3 个预热 Tab
+        2. 启动 3 个并发下单线程同时调用真实 hook.execute_checkout(dry_run=False)：
+           - 线程 0：模拟加购极快 (0.01s)，快于真实 Chrome Tab 签发令牌 (~0.25s)
+           - 线程 1：模拟加购适中 (0.15s)，与真实 Chrome Tab 签发令牌几乎同时完成
+           - 线程 2：模拟加购较慢 (0.35s)，慢于真实 Chrome Tab 签发令牌
+        3. 断言：
+           - 3 个并发下单线程全部 100% 成功，各自拿到真实 Chrome 签发的独立 reCAPTCHA v3 令牌 (长度 > 1000 且互不相同)
+           - 在各自 POST /cart/confirm 执行期间，对应的 Chrome Tab 保持锁定 (`in_use=True`) 未被提前刷新
+           - 3 个下单全部返回后，所有 Tab 均被释放并触发后台原地刷新回填
+        """
+        provider = RecaptchaTokenProvider.get_instance()
+        browser_exe = provider._find_browser_executable()
+        if not browser_exe:
+            self.skipTest("当前环境未安装 Chrome/Edge/Chromium，跳过真实浏览器多标签并行下单测试")
+
+        try:
+            # 第一步：初始化 2 个预热 Tab
+            provider.set_pool_size(2)
+            self.assertTrue(provider._ensure_browser_and_pool_ready())
+            with provider._lock:
+                initial_ws_urls = [s.ws_url for s in provider._slots]
+            self.assertEqual(len(initial_ws_urls), 2)
+
+            # 第二步：模拟用户在前端将 Standby Sessions 从 2 修改为 3，验证增量扩容不打断原有 2 个 Tab
+            provider.set_pool_size(3)
+            # 等待后台增量扩容线程完成第 3 个 Tab 的创建与预热
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                with provider._lock:
+                    ready_slots = [s for s in provider._slots if s.is_fresh]
+                if len(ready_slots) >= 3:
+                    break
+                time.sleep(0.1)
+
+            with provider._lock:
+                expanded_ws_urls = [s.ws_url for s in provider._slots if s.is_fresh]
+            self.assertEqual(len(expanded_ws_urls), 3, "从 2 扩容到 3 后应当有 3 个就绪的预热 Tab")
+            for old_ws in initial_ws_urls:
+                self.assertIn(old_ws, expanded_ws_urls, "扩容时原有的 2 个预热 Tab 必须保持原样不重建")
+
+            # 第三步：3 个线程以不同加购速度并发执行完整 execute_checkout，使用真实 Chrome 多 Tab 池签发令牌
+            delays = [0.01, 0.15, 0.35]  # 分别代表：快于签发、同步于签发、慢于签发
+            results = [None, None, None]
+            submitted_tokens = [None, None, None]
+            slot_locked_during_confirm = [False, False, False]
+
+            def _run_concurrent_checkout(idx: int):
+                pid = f"80930{idx}"
+                hook = AutoOrderHook(
+                    username=f"buyer{idx}@example.com",
+                    password="secret_password",
+                    dry_run=False,
+                    payment_method="store_pickup",
+                    retry_delay=0.01,
+                    max_retries=2,
+                )
+                hook.is_logged_in = True
+                resps = build_checkout_responses(pid, f"并发商品 #{idx}", "50,000円", payment_label="店頭支払")
+
+                def simulated_add_to_cart(url, data=None, **kwargs):
+                    time.sleep(delays[idx])
+                    return resps["cart"]
+
+                def simulated_request(method, url, **kwargs):
+                    if method == "GET" and "/cart/customer" in url:
+                        return resps["cust_ready"]
+                    if method == "POST" and "shipping-list" in url:
+                        return resps["shipping"]
+                    if method == "POST" and "/cart/shipping" in url:
+                        return resps["confirm"]
+                    if method == "POST" and "/cart/confirm" in url:
+                        tok = kwargs.get("data", {}).get("recaptcha_token", "")
+                        submitted_tokens[idx] = tok
+                        # 检查此时该令牌绑定的 Tab 是否正处于锁定保护状态 (in_use=True)
+                        with provider._lock:
+                            bound_entry = provider._active_token_slots.get(tok)
+                            if bound_entry is not None and bound_entry[0].in_use:
+                                slot_locked_during_confirm[idx] = True
+                        return resps["complete"]
+                    return make_response(200)
+
+                hook.session.post = simulated_add_to_cart
+                hook.session.request = simulated_request
+                results[idx] = hook.execute_checkout(pid, f"并发商品 #{idx}", dry_run=False, payment_method="store_pickup")
+
+            threads = [threading.Thread(target=_run_concurrent_checkout, args=(i,)) for i in range(3)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=15.0)
+
+            for i in range(3):
+                self.assertIsNotNone(results[i], f"通道 {i} 下单应返回结果")
+                self.assertTrue(results[i]["success"], f"通道 {i} (加购延迟 {delays[i]}s) 应当下单成功")
+                self.assertTrue(
+                    isinstance(submitted_tokens[i], str) and len(submitted_tokens[i]) > 1000,
+                    f"通道 {i} 必须注入真实 Chrome 签发的有效 reCAPTCHA 令牌",
+                )
+                self.assertTrue(
+                    slot_locked_during_confirm[i],
+                    f"通道 {i} 在 POST /cart/confirm 提交瞬间，其对应的 Chrome Tab 必须处于锁定保护状态 (in_use=True)，防止被后台刷新冲掉",
+                )
+
+            # 3 个并发通道拿到的真实令牌必须两两互不相同
+            self.assertEqual(len(set(submitted_tokens)), 3, "3 个并发下单通道必须各自使用独立 Tab 签发互不相同的令牌")
+
+            # 下单全部完成后，_active_token_slots 应当已被清空（所有 Tab 均已释放并进入刷新回填）
+            with provider._lock:
+                self.assertEqual(len(provider._active_token_slots), 0, "所有并发下单结束后，持有的令牌与 Tab 应当全部释放归还")
+        finally:
+            provider._cleanup_proc_unlocked()
 
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("🚀 启动 Dollyteria 自动询盘、上新监控与自动下单全套功能测试套件 (25 项核心场景)")
+    print("🚀 启动 Dollyteria 自动询盘、上新监控与自动下单全套功能测试套件 (32 项全场景含实盘 reCAPTCHA 与多 Tab 并发时序联调)")
     print("=" * 80)
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     print("=" * 80)
     if result.wasSuccessful():
-        print(f"🎉 全部 {result.testsRun} 项全链路测试 100% 通过 (PASSED)！软件在常规与高峰繁忙期均表现正常！")
+        print(f"🎉 全部 {result.testsRun} 项全链路测试 100% 通过 (PASSED)！软件在常规、高峰繁忙期与真实下单确认环节均表现正常！")
     else:
         print(f"❌ 测试存在未通过项：失败 {len(result.failures)} 项，错误 {len(result.errors)} 项")
     print("=" * 80)

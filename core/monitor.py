@@ -244,6 +244,13 @@ class DollyteriaMonitor:
         self.auto_order.max_retries = int(ao_cfg.get("max_retries", 35))
         self.auto_order.standby_workers_count = int(ao_cfg.get("standby_workers", 2))
 
+        # 实时同步 reCAPTCHA v3 预热浏览器标签页池大小与备用会话数一致
+        try:
+            from hooks.auto_order import RecaptchaTokenProvider
+            RecaptchaTokenProvider.get_instance().set_pool_size(self.auto_order.standby_workers_count)
+        except Exception:
+            pass
+
         # 实时同步至已有备用 Worker 实例
         with self.auto_order._pool_lock:
             for w in self.auto_order._standby_workers:
@@ -401,6 +408,24 @@ class DollyteriaMonitor:
                 worker = self.auto_order.get_worker()
                 logger.info(f"⚡ [多线程抢购启动] 线程 [{threading.current_thread().name}] 开始抢购商品 [{item.get('id')}] {item.get('title', '')}...")
                 order_res = worker.on_item_matched(item, rule)
+                pid = str(item.get("id", "")).strip()
+                if order_res and (
+                    (order_res.get("success") and not order_res.get("dry_run"))
+                    or order_res.get("is_sold_out")
+                ):
+                    if pid:
+                        try:
+                            self.archive_db.mark_sold_out(pid)
+                            for h in self.state.get("history", []):
+                                if str(h.get("id", "")) == pid:
+                                    h["is_in_stock"] = False
+                            for listener in list(getattr(self.notifier, "listeners", [])):
+                                try:
+                                    listener({"type": "item_sold_out", "item_id": pid})
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.debug(f"同步商品 [{pid}] 售罄状态异常: {e}")
                 if order_res and order_res.get("success"):
                     try:
                         self.notifier.dispatch_order_success(item=item, order_result=order_res, rule=rule)

@@ -444,9 +444,16 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         finally:
             monitor.auto_order.release_worker(worker)
 
-        # 若加购返回商品已明确售罄，立即标记归档库并向 Web 前端广播 SoldOut 事件
-        if not res.get("success") and res.get("is_sold_out"):
+        # 若加购返回商品已明确售罄，或真实下单购买成功 (孤品已被本账号买断)，立即标记归档库与历史流并向 Web 前端广播 SoldOut 事件
+        is_bought_or_soldout = (
+            (not res.get("success") and res.get("is_sold_out"))
+            or (res.get("success") and not res.get("dry_run"))
+        )
+        if is_bought_or_soldout:
             monitor.archive_db.mark_sold_out(item_id)
+            for h in monitor.state.get("history", []):
+                if str(h.get("id", "")) == item_id:
+                    h["is_in_stock"] = False
             on_new_event({
                 "type": "item_sold_out",
                 "item_id": item_id,

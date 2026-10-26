@@ -1057,9 +1057,12 @@ function initSSE() {
             const data = JSON.parse(event.data);
             if (data.type === 'connected') return;
 
-            // 收到自动下单成功事件 (静默弹窗，不播放声音)
+            // 收到自动下单成功事件 (静默弹窗，不播放声音，且若为真实下单立即标记卡片售罄)
             if (data.type === 'order_success') {
                 const item = data.item || {};
+                if (item.id && !data.order_result?.dry_run) {
+                    markFeedProductSoldOut(item.id);
+                }
                 showToast(`🎉 【自动下单成功】已成功为您抢到: ${item.title || item.id}！`, 'success');
                 return;
             }
@@ -1821,7 +1824,7 @@ function renderArchiveProducts(items) {
         const modelStr = it.model_number ? escapeHtml(it.model_number) : '常规';
 
         return `
-            <div class="arch-card ${isStock ? '' : 'is-sold-out'}">
+            <div class="arch-card ${isStock ? '' : 'is-sold-out'}" data-id="${escapeHtml(it.id)}">
                 <div class="arch-card-thumb-wrap">
                     ${soldOutOverlay}
                     <img src="${escapeHtml(imgSrc)}"
@@ -2289,11 +2292,13 @@ function markFeedProductSoldOut(itemId) {
         }
     });
 
-    // 2. 同时若在全站档案卡片流中，也联动打上售罄状态
+    // 2. 同时若在全站档案卡片流中，也联动打上售罄状态并替换底部按钮为「⚪ 已售罄」
     const archCards = document.querySelectorAll('.arch-card');
     archCards.forEach(card => {
+        const cardId = card.getAttribute('data-id');
         const link = card.querySelector(`a[href*="/product/${itemId}"]`);
-        if (link) {
+        const buyBtn = card.querySelector(`.btn-card-buy[data-id="${itemId}"]`);
+        if (cardId === itemId || link || buyBtn) {
             card.classList.add('is-sold-out');
             const thumbWrap = card.querySelector('.arch-card-thumb-wrap');
             if (thumbWrap && !thumbWrap.querySelector('.arch-soldout-overlay')) {
@@ -2302,8 +2307,32 @@ function markFeedProductSoldOut(itemId) {
                 overlay.innerHTML = '<div class="soldout-watermark-text">SoldOut 売切</div>';
                 thumbWrap.prepend(overlay);
             }
+            const actionsWrap = card.querySelector('.arch-card-actions');
+            if (actionsWrap) {
+                actionsWrap.innerHTML = `
+                    <button type="button" class="btn-card-action btn-card-disabled" disabled title="该商品当前已售罄，无法加购">
+                        ⚪ 已售罄
+                    </button>
+                `;
+            }
         }
     });
+
+    // 3. 同步更新前端内存中的档案列表与历史列表缓存，防止重绘时回退为在售
+    if (Array.isArray(archiveState.lastItems)) {
+        archiveState.lastItems.forEach(it => {
+            if (String(it.id) === itemId) {
+                it.is_in_stock = 0;
+            }
+        });
+    }
+    if (Array.isArray(currentHistory)) {
+        currentHistory.forEach(it => {
+            if (String(it.id) === itemId) {
+                it.is_in_stock = false;
+            }
+        });
+    }
 }
 
 // 调用后台自动下单接口执行一键购买
@@ -2351,6 +2380,7 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
 
     showToast(`正在对商品 #${itemId} 执行自动下单流水线，请稍候...`, 'info');
 
+    let markedSoldOut = false;
     try {
         const res = await fetch('/api/auto_order/buy', {
             method: 'POST',
@@ -2365,12 +2395,18 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
 
         const data = await res.json();
         if (data.success) {
-            showToast(isDry ? '🎉 仿真测试成功！已顺利抵达最终确认页' : '🎉 真实下单购买成功！', 'success');
+            // 若为真实下单购买成功，该孤品已被本账号买断，立即将前端卡片置为 SoldOut 已售罄状态
+            if (!isDry) {
+                markFeedProductSoldOut(itemId);
+                markedSoldOut = true;
+            }
+            showToast(isDry ? '🎉 仿真测试成功！已顺利抵达最终确认页' : '🎉 真实下单购买成功！商品已标记为售罄', 'success');
             showBuyResultModal(data, itemTitle, itemId);
         } else {
             // 若发现已售罄，立即将前端卡片置为 SoldOut 状态
             if (data.is_sold_out) {
                 markFeedProductSoldOut(itemId);
+                markedSoldOut = true;
             }
             showToast(data.message || '购买流程中断，请检查账号或库存状态', 'error');
             if (data.steps_log) {
@@ -2380,7 +2416,8 @@ async function quickBuyItem(itemId, itemTitle, itemPrice, btnEl) {
     } catch (err) {
         showToast('发起自动购买异常: ' + err.message, 'error');
     } finally {
-        if (btnEl && !btnEl.disabled) {
+        if (btnEl && !markedSoldOut && document.body.contains(btnEl)) {
+            btnEl.disabled = false;
             btnEl.innerHTML = originalText;
         }
     }

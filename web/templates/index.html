@@ -530,8 +530,8 @@
                         </div>
                         <div class="form-group col-6">
                             <label class="form-label">定点前预热备用会话数 (Standby Sessions)</label>
-                            <input type="number" id="ao-standby-workers" class="form-control" value="2" min="1" max="5">
-                            <span class="form-tip">定点前 20 秒提前登录常驻待命，实现 0 秒开跑；建议 2 个</span>
+                            <input type="number" id="ao-standby-workers" class="form-control" value="2" min="1" max="8">
+                            <span class="form-tip">定点前提前登录待命，并在后台 Chrome 同步预热相同数量的独立 reCAPTCHA v3 标签页，实现多线程 0 秒并发签发；建议 2 ~ 4 个</span>
                         </div>
                     </div>
 

@@ -2049,6 +2049,77 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
             self.assertFalse(data_err["success"])
             self.assertIn("未能从预热标签页签发令牌", data_err["message"])
 
+    def test_34_dry_run_live_probe_recaptcha_verification(self):
+        """
+        测试仿真测试中的【零风险实盘风控探针】(probe_recaptcha=True)：
+        1. 验证在抵达确认页后，向真实/模拟官网发送携带 recaptcha_token 但故意缺少 policy_agree 的探针请求
+        2. 当官网返回「同意するにチェック」时，准确判定探针成功 (passed=True，官网已核销该令牌，且未生成订单)
+        3. 验证探针请求中绝对不含 policy_agree 规约同意字段，确保 100% 零扣款与零成单安全保障
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=True,
+            payment_method="cod",
+            retry_delay=0.01,
+            max_retries=2,
+        )
+
+        resps = build_checkout_responses("809001", "DearSD/めぐ フルセット", "68,000円", payment_label="代金引換")
+        resp_login_page = make_response(200, "https://www.dollyteria.com/member-login", "<html>Login</html>")
+        resp_login_post = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト テスト様</html>")
+        resp_member_check = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト ポイント テスト様</html>")
+        resp_cart_cleanup_get = make_response(200, "https://www.dollyteria.com/cart", '<html><body><input type="submit" name="cart_remove_809001" value="削除" /></body></html>')
+        resp_cart_cleanup_post = make_response(200, "https://www.dollyteria.com/cart", "<html>Empty</html>")
+
+        # 模拟官网探针返回：提示未同意规约 (代表令牌验证成功通过，且绝未成单)
+        resp_probe_ok = make_response(200, "https://www.dollyteria.com/cart/confirm", "<html><body>「同意する」にチェックをいれてください</body></html>")
+
+        probe_calls = []
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "member-login" in url:
+                return resp_login_page
+            if method == "POST" and "member-login" in url:
+                return resp_login_post
+            if method == "GET" and url.endswith("/member"):
+                return resp_member_check
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "GET" and url.endswith("/cart"):
+                return resp_cart_cleanup_get
+            if method == "POST" and "/cart/confirm" in url:
+                probe_calls.append(kwargs.get("data", {}))
+                return resp_probe_ok
+            return make_response(200)
+
+        def mock_post(url, data=None, **kwargs):
+            if "/product/809001" in url:
+                return resps["cart"]
+            if url.endswith("/cart"):
+                return resp_cart_cleanup_post
+            return make_response(200)
+
+        hook.session.request = mock_request
+        hook.session.post = mock_post
+
+        with patch.object(RecaptchaTokenProvider.get_instance(), "get_token", return_value="03AFcWeA_sample_probe_token_123"):
+            res = hook.execute_checkout("809001", "DearSD/めぐ", dry_run=True, clear_after_dry_run=True, probe_recaptcha=True)
+
+        self.assertTrue(res["success"])
+        self.assertTrue(res["dry_run"])
+        self.assertIsNotNone(res.get("recaptcha_probe"))
+        self.assertTrue(res["recaptcha_probe"]["passed"])
+        self.assertEqual(res["recaptcha_probe"]["status"], "passed")
+        self.assertIn("核销该令牌", res["recaptcha_probe"]["message"])
+        self.assertEqual(len(probe_calls), 1, "实盘探针应当向 /cart/confirm 提交一次请求")
+        self.assertNotIn("policy_agree", probe_calls[0], "实盘探针必须故意不包含 policy_agree，确保绝不产生真实扣款与订单！")
+        self.assertEqual(probe_calls[0]["recaptcha_token"], "03AFcWeA_sample_probe_token_123")
+
 
 if __name__ == "__main__":
     print("=" * 80)

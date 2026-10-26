@@ -1431,15 +1431,15 @@ function bindEvents() {
             const payName = payMethod === 'store_pickup' ? '店頭支払' : (payMethod === 'bank_transfer' ? '銀行振込' : '代金引換');
 
             elements.btnTestDryRunOrder.disabled = true;
-            elements.btnTestDryRunOrder.textContent = '⏳ 正在全流程仿真测试中...';
-            showToast(`正在执行【${payName}】全流程仿真测试，直达确认页 (/cart/confirm)...`, 'info');
+            elements.btnTestDryRunOrder.textContent = '⏳ 正在执行实盘风控探针测试...';
+            showToast(`正在执行【${payName}】全流程仿真测试 (含官网 reCAPTCHA 实盘核验探针)...`, 'info');
 
             if (elements.aoTestResult) {
                 elements.aoTestResult.style.display = 'block';
                 elements.aoTestResult.innerHTML = `
                     <div style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);">
                         <span class="status-pulse" style="width:10px;height:10px;background:#38bdf8;border-radius:50%;display:inline-block;"></span>
-                        正在执行登录、秒级加购、收件人选择并锁定【${escapeHtml(payName)}】支付方式...
+                        正在执行登录、秒级加购、锁定【${escapeHtml(payName)}】支付并向官网发送零风险实盘探针检验令牌...
                     </div>
                 `;
             }
@@ -1448,7 +1448,7 @@ function bindEvents() {
                 const res = await fetch('/api/test_auto_order', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, item_id: itemId, payment_method: payMethod })
+                    body: JSON.stringify({ username, password, item_id: itemId, payment_method: payMethod, probe_recaptcha: true })
                 });
 
                 if (!res.ok) {
@@ -1464,6 +1464,26 @@ function bindEvents() {
                     showToast('🎉 Dry-Run 仿真测试成功！已顺利抵达最终确认页', 'success');
                     const d = data.details;
                     const stepsHtml = (data.steps_log || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+
+                    let probeCardHtml = '';
+                    if (d.recaptcha_probe) {
+                        const p = d.recaptcha_probe;
+                        const isPass = p.passed;
+                        probeCardHtml = `
+                            <div class="ao-summary-item" style="grid-column: 1 / -1; background: ${isPass ? 'rgba(52, 211, 153, 0.08)' : 'rgba(248, 113, 113, 0.12)'}; border: 1px solid ${isPass ? 'rgba(52, 211, 153, 0.3)' : 'rgba(248, 113, 113, 0.3)'}; margin-top: 4px;">
+                                <div class="label" style="color: ${isPass ? '#34d399' : '#f87171'}; font-weight: bold; font-size: 12px;">
+                                    ${isPass ? '🛡️ 官网实盘风控探针核验：🟢 成功通过 (官方已认可并核销令牌)' : '⚠️ 官网实盘风控探针核验：❌ 遭遇官网拦截'}
+                                </div>
+                                <div class="value" style="font-size: 13px; color: ${isPass ? '#34d399' : '#f87171'}; margin-top: 4px;">
+                                    ${escapeHtml(p.message || '')}
+                                </div>
+                                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                                    探针令牌特征: <span style="font-family: monospace;">${escapeHtml(p.token_preview || '--')}</span> • 采用未勾选规约的零风险实盘探针技术，绝不产生实际扣款或订单！
+                                </div>
+                            </div>
+                        `;
+                    }
+
                     elements.aoTestResult.innerHTML = `
                         <div class="ao-res-header">
                             <span class="ao-res-status success">✅ 仿真测试成功：已安全抵达下单前最终确认页面 (/cart/confirm)</span>
@@ -1498,6 +1518,7 @@ function bindEvents() {
                                 <div class="label">规约同意要点 (* 同意する)</div>
                                 <div class="value" style="color:#34d399;">✓ policy_agree=1 (自动勾选)</div>
                             </div>
+                            ${probeCardHtml}
                         </div>
                         <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">
                             <strong>收货人与地址：</strong>${escapeHtml(d.recipient_name || '')} • ${escapeHtml(d.recipient_address || '')}
@@ -1528,7 +1549,7 @@ function bindEvents() {
                 }
             } finally {
                 elements.btnTestDryRunOrder.disabled = false;
-                elements.btnTestDryRunOrder.textContent = '🧪 全流程仿真';
+                elements.btnTestDryRunOrder.textContent = '🧪 仿真下单 (含实盘风控探针)';
             }
         });
     }

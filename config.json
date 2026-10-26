@@ -6,9 +6,9 @@
     "enabled": true,
     "payment_method": "store_pickup",
     "max_workers": 10,
-    "standby_workers": 3,
+    "standby_workers": 4,
     "retry_delay_sec": 0.1,
-    "max_retries": 40
+    "max_retries": 300
   },
   "notifications": {
     "desktop_enabled": true,
@@ -37,7 +37,7 @@
   },
   "schedule": {
     "burst_duration_sec": 180,
-    "burst_interval_sec": 0.3,
+    "burst_interval_sec": 0.2,
     "daily_stock_sync": {
       "enabled": true,
       "time": "05:00:00"
@@ -50,19 +50,19 @@
   },
   "watches": [
     {
+      "auto_order": false,
+      "enabled": false,
+      "exclude_keywords": [],
       "id": "w_1792669729612",
-      "name": "SDGIRL/アナイス",
       "keywords": [
         "SDGIRL",
         "アナイス"
       ],
-      "exclude_keywords": [],
-      "min_price": 70000,
-      "max_price": 72000,
-      "search_mode": "both",
       "match_mode": "all",
-      "auto_order": false,
-      "enabled": false
+      "max_price": 72000,
+      "min_price": 70000,
+      "name": "SDGIRL/アナイス",
+      "search_mode": "both"
     }
   ],
   "web_password": ""

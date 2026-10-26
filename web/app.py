@@ -392,7 +392,14 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
             max_retries=int(ao_cfg.get("max_retries", 35)),
         )
-        res = ao.execute_checkout(item_id=item_id, dry_run=True, clear_after_dry_run=True, payment_method=payment_method)
+        probe_recaptcha = bool(data.get("probe_recaptcha", True))
+        res = ao.execute_checkout(
+            item_id=item_id,
+            dry_run=True,
+            clear_after_dry_run=True,
+            payment_method=payment_method,
+            probe_recaptcha=probe_recaptcha,
+        )
         return jsonify(res)
 
     @app.route("/api/test_recaptcha", methods=["POST"])

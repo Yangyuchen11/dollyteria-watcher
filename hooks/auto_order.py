@@ -1543,7 +1543,7 @@ class AutoOrderHook:
         except Exception as e:
             logger.debug(f"[Auto-Order] 清理购物车时异常: {e}")
 
-    def execute_checkout(self, item_id: str, item_title: str = "", dry_run: bool = None, clear_after_dry_run: bool = True, payment_method: str = None) -> Dict:
+    def execute_checkout(self, item_id: str, item_title: str = "", dry_run: bool = None, clear_after_dry_run: bool = True, payment_method: str = None, probe_recaptcha: bool = False) -> Dict:
         """
         完整下单流水线：
         登录 -> 加购 (带 503 迅速微重试直至售罄) -> 地址/配送 -> 选中指定支付方式 -> 直达最终确认页 -> [Dry-Run 安全拦截 / 真实下单]
@@ -1563,11 +1563,11 @@ class AutoOrderHook:
         logger.info(f"⚡ [Auto-Order 启动] 目标商品 [{item_id}] (指定支付: 【{target_name}】, 模式: {'🛡️ Dry-Run 仿真测试' if is_dry else '🚨 真实下单模式'})")
         steps_log.append(f"启动自动下单流水线 (指定支付: 【{target_name}】, 模式: {'Dry-Run 仿真' if is_dry else '真实下单'})")
 
-        # 真实下单模式下，在加购与推进结算的同时，并行启动 reCAPTCHA v3 令牌预取，实现确认页 0 等待
+        # 真实下单模式或 Dry-Run 开启风控探针时，在加购与推进结算的同时，并行启动 reCAPTCHA v3 令牌预取，实现确认页 0 等待
         token_box = {"token": "", "issued_at": 0.0}
         used_tokens: List[str] = []
         token_thread: Optional[threading.Thread] = None
-        if not is_dry:
+        if not is_dry or probe_recaptcha:
             def _prefetch_recaptcha():
                 try:
                     tok = RecaptchaTokenProvider.get_instance().get_token(
@@ -1644,12 +1644,98 @@ class AutoOrderHook:
 
             # 5. 安全拦截 (Dry-Run 模式)
             if is_dry:
+                recaptcha_probe_result = None
+                if probe_recaptcha:
+                    # 核心进阶：零风险实盘风控探针 (Zero-Risk Live Probe)
+                    # 向真实官网 /cart/confirm 发送携带真实签发 recaptcha_token、但【故意不传 policy_agree】的请求
+                    # 100% 确保因未勾选规约同意而绝对不产生订单/扣款，同时实打实验证官网服务端与 Google 对该令牌的风控态度！
+                    probe_tok = None
+                    if token_thread is not None:
+                        token_thread.join(timeout=8.0)
+                        probe_tok = token_box.get("token")
+                    if not probe_tok:
+                        probe_tok = RecaptchaTokenProvider.get_instance().get_token(force_fresh=True)
+
+                    if probe_tok:
+                        try:
+                            confirm_html = confirm_resp.content.decode("utf-8", "ignore")
+                            confirm_soup = BeautifulSoup(confirm_html, "html.parser")
+                            f_action = confirm_soup.find("form", action=lambda a: a and "cart/confirm" in a) or confirm_soup.find("form")
+                            action_url = f_action.get("action") if f_action else "https://www.dollyteria.com/cart/confirm"
+
+                            # 关键机制：故意不放 policy_agree，仅放 recaptcha_token 与 go-next
+                            probe_data = {
+                                "recaptcha_token": probe_tok,
+                                "go-next": "購入する",
+                            }
+                            if f_action:
+                                for inp in f_action.find_all("input"):
+                                    itype = inp.get("type", "text").lower()
+                                    n = inp.get("name")
+                                    v = inp.get("value", "")
+                                    if n and n != "policy_agree" and itype != "submit":
+                                        probe_data.setdefault(n, v)
+
+                            r_probe = self._safe_request("POST", action_url, data=probe_data, timeout=12, allow_redirects=True)
+                            if r_probe:
+                                probe_text = r_probe.content.decode("utf-8", "ignore")
+                                if "reCAPTCHAの検証に失敗しました" in probe_text:
+                                    recaptcha_probe_result = {
+                                        "passed": False,
+                                        "status": "rejected",
+                                        "message": "官网拒绝 (提示 reCAPTCHAの検証に失敗しました，Google 评分低于安全阈值)",
+                                        "token_preview": f"{probe_tok[:16]}...{probe_tok[-12:]}" if len(probe_tok) > 28 else probe_tok,
+                                    }
+                                    steps_log.append("官网 reCAPTCHA 实盘核验探针: ❌ 拦截 (官网提示 reCAPTCHAの検証に失敗しました)")
+                                    logger.warning("⚠️ [Dry-Run 实盘探针] 官网拦截了该 reCAPTCHA 令牌: reCAPTCHAの検証に失敗しました")
+                                elif "「同意する」にチェックをいれてください" in probe_text or "規約" in probe_text or "同意" in probe_text:
+                                    recaptcha_probe_result = {
+                                        "passed": True,
+                                        "status": "passed",
+                                        "message": "官网核验通过 (官网服务端已向 Google 成功核销该令牌！仅提示「同意する」规约未勾选，绝对安全未产生订单)",
+                                        "token_preview": f"{probe_tok[:16]}...{probe_tok[-12:]}" if len(probe_tok) > 28 else probe_tok,
+                                    }
+                                    steps_log.append("官网 reCAPTCHA 实盘核验探针: 🟢 成功通过！(官网服务端已向 Google 成功核销该令牌)")
+                                    logger.info("🎉 [Dry-Run 实盘探针] 官网成功核销并认可了 reCAPTCHA 令牌！")
+                                else:
+                                    recaptcha_probe_result = {
+                                        "passed": True,
+                                        "status": "passed",
+                                        "message": "官网响应正常 (未出现 reCAPTCHA 拦截特征)",
+                                        "token_preview": f"{probe_tok[:16]}...{probe_tok[-12:]}" if len(probe_tok) > 28 else probe_tok,
+                                    }
+                                    steps_log.append("官网 reCAPTCHA 实盘核验探针: 🟢 响应正常 (未出现 reCAPTCHA 拦截特征)")
+                            else:
+                                recaptcha_probe_result = {
+                                    "passed": False,
+                                    "status": "error",
+                                    "message": "探针提交遭遇网络超时或官网 503 繁忙",
+                                }
+                        except Exception as e:
+                            logger.debug(f"[Dry-Run 实盘探针] 异常: {e}")
+                            recaptcha_probe_result = {
+                                "passed": False,
+                                "status": "error",
+                                "message": f"探针请求异常: {str(e)}",
+                            }
+                        finally:
+                            RecaptchaTokenProvider.get_instance().release_tokens([probe_tok])
+
+                if recaptcha_probe_result:
+                    details["recaptcha_probe"] = recaptcha_probe_result
+
+                probe_summary = ""
+                if recaptcha_probe_result:
+                    p_icon = "🟢" if recaptcha_probe_result.get("passed") else "❌"
+                    probe_summary = f"\n🛡️ 官网实盘风控探针: {p_icon} {recaptcha_probe_result.get('message')}"
+
                 msg = (
                     f"🎉 【Dry-Run 仿真测试完美成功！】\n"
                     f"已实时走通完整链路，顺利抵达下单前最终确认页面 (/cart/confirm)！\n"
                     f"💰 总金额: {details['total_price']} (商品小计: {details['subtotal']}, 运费: {details['shipping_fee']}, 手续费: {details['cod_fee']})\n"
                     f"📦 支付方式: 【{details['payment_method']}】 | 收货人: {details['recipient_name']}\n"
                     f"🛡️ 安全拦截生效：未点击最终「購入する」购买按钮，绝对没有产生任何扣款或订单！"
+                    f"{probe_summary}"
                 )
                 logger.info(f"🛑 [Auto-Order Dry-Run] {msg}")
 
@@ -1665,6 +1751,7 @@ class AutoOrderHook:
                     "elapsed_sec": elapsed,
                     "steps_log": steps_log,
                     "details": details,
+                    "recaptcha_probe": recaptcha_probe_result,
                 }
                 self.last_result = result
                 return result

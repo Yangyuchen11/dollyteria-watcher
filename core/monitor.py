@@ -131,6 +131,7 @@ class DollyteriaMonitor:
         self.is_checking = False
         self.last_check_time = 0
         self.last_check_status = "就绪"
+        self._incomplete_from_page = 0
 
         # 异步非阻塞下单常驻线程池 (抓取与抢购彻底解耦)
         max_workers = int(ao_cfg.get("max_workers", 6))
@@ -459,6 +460,11 @@ class DollyteriaMonitor:
                     logger.info(f"⚡ 正在抓取 Dollyteria /new 页面最新上新流 (第 {page_idx}/{max_pages} 页, {'爆发抢购' if is_burst else '常规巡检'})...")
                     new_arrivals = self.scraper.fetch_new_arrivals(num=100, page=page_idx, in_stock_only=True)
                     if not new_arrivals:
+                        if getattr(self.scraper, "last_fetch_failed", False):
+                            self._incomplete_from_page = max(self._incomplete_from_page, page_idx)
+                            logger.warning(f"⚠️ /new 第 {page_idx} 页因网络或 503 繁忙未能拉取，已记录断点，下一轮巡检将自动穿透续扫！")
+                        else:
+                            self._incomplete_from_page = 0
                         break
 
                     for it in new_arrivals:
@@ -524,8 +530,17 @@ class DollyteriaMonitor:
                         seen_set.add(it["id"])
 
                     # 智能早停：若当前页已没有哪怕 1 件全新商品 (整页均为已见历史商品)，说明此次大上新已完全接驳完毕；或当前页已不足 100 件
-                    if len(page_new_items) == 0 or len(new_arrivals) < 100:
+                    if len(new_arrivals) < 100:
+                        self._incomplete_from_page = 0
                         break
+                    if len(page_new_items) == 0:
+                        if page_idx < self._incomplete_from_page:
+                            logger.info(f"🔄 第 {page_idx} 页已见，但上一轮在第 {self._incomplete_from_page} 页曾遇繁忙中断，继续向下穿透扫描...")
+                            continue
+                        self._incomplete_from_page = 0
+                        break
+                else:
+                    self._incomplete_from_page = 0
 
             # 2. 关键词全店搜索 (/product-list/?keyword=...)
             # 核心策略：爆发抢购模式下专攻 /new 主干道，完全跳过耗时的关键词全店搜索，杜绝 503 官网限流！

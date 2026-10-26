@@ -28,11 +28,13 @@ class DollyteriaScraper:
     def __init__(self, timeout: int = 15, max_retries: int = 2):
         self.timeout = timeout
         self.max_retries = max_retries
+        self.last_fetch_failed = False
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
 
     def _get(self, url: str, params: Optional[dict] = None) -> Optional[str]:
         """带重试机制的 HTTP GET 请求，针对集中上新访问繁忙与网络抖动进行弹性退避重试"""
+        self.last_fetch_failed = False
         last_exc = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -40,12 +42,14 @@ class DollyteriaScraper:
                 if resp.status_code == 200:
                     # 识别 200 状态码下的伪正常"访问集中/繁忙"占位页
                     text = resp.text
-                    if any(busy_kw in text for busy_kw in ["アクセス集中", "大変混み合っております", "回線が混雑"]):
+                    if any(busy_kw in text for busy_kw in ["アクセス集中", "大変混み合っております", "回線が混雑", "ただいま混雑"]):
                         logger.warning(f"Dollyteria 提示访问繁忙排队中 (尝试 {attempt + 1}/{self.max_retries + 1})")
                         if attempt < self.max_retries:
                             retry_delay = round(min(0.5, 0.15 * (attempt + 1)), 2)
                             time.sleep(retry_delay)
                             continue
+                        self.last_fetch_failed = True
+                        return None
                     return text
 
                 # 常见的瞬时繁忙状态码 (503 Service Unavailable, 429 Too Many Requests, 502/504 Gateway error)
@@ -63,6 +67,7 @@ class DollyteriaScraper:
                 if attempt < self.max_retries:
                     retry_delay = round(min(0.5, 0.2 * (attempt + 1)), 2)
                     time.sleep(retry_delay)
+        self.last_fetch_failed = True
         logger.error(f"无法访问页面: {url}, 错误: {last_exc}")
         return None
 

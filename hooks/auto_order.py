@@ -13,15 +13,442 @@
    - 🛡️ 安全拦截：坚决不点击最后的「購入する」提交按钮！
    - 自动清空测试加购的商品，保持购物车整洁。
 """
+import os
 import re
+import json
 import time
+import socket
+import struct
+import base64
+import shutil
+import tempfile
+import subprocess
 import logging
 import threading
+import urllib.parse
 from typing import Dict, Optional, Tuple, List
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("dollyteria.hooks.auto_order")
+
+DEFAULT_RECAPTCHA_SITEKEY = "6LcxWfwqAAAAAKB2iNaL09Of7o8NS7aiDLF6Pi1p"
+
+
+class _SimpleCDPClient:
+    """零外部依赖的轻量级 Chrome DevTools Protocol (WebSocket) 客户端"""
+
+    def __init__(self, ws_url: str, timeout: float = 10.0):
+        parsed = urllib.parse.urlparse(ws_url)
+        self.host = parsed.hostname or "127.0.0.1"
+        self.port = parsed.port or 9222
+        self.path = parsed.path or "/"
+        if parsed.query:
+            self.path += "?" + parsed.query
+        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        self._handshake()
+        self._msg_id = 0
+
+    def _handshake(self):
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        req = (
+            f"GET {self.path} HTTP/1.1\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(req.encode("ascii"))
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = self.sock.recv(1024)
+            if not chunk:
+                raise ConnectionError("CDP WebSocket 握手意外断开")
+            buf += chunk
+
+    def _send_frame(self, text: str):
+        payload = text.encode("utf-8")
+        mask_key = os.urandom(4)
+        header = bytearray([0x81])  # FIN + text frame
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", length))
+        header.extend(mask_key)
+        masked = bytearray(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + masked)
+
+    def _recv_exact(self, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("CDP WebSocket 读取中断")
+            buf += chunk
+        return buf
+
+    def _recv_frame(self) -> str:
+        while True:
+            b1, b2 = self._recv_exact(2)
+            opcode = b1 & 0x0F
+            masked = bool(b2 & 0x80)
+            length = b2 & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._recv_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._recv_exact(8))[0]
+            mask_key = self._recv_exact(4) if masked else None
+            payload = self._recv_exact(length) if length > 0 else b""
+            if masked and mask_key:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            if opcode == 0x8:  # Close
+                raise ConnectionError("CDP WebSocket 已关闭")
+            if opcode == 0x9:  # Ping -> Pong
+                pong = bytearray([0x8A, 0x80]) + os.urandom(4)
+                self.sock.sendall(pong)
+                continue
+            if opcode in (0x1, 0x0):
+                return payload.decode("utf-8", "ignore")
+
+    def call(self, method: str, params: Optional[Dict] = None) -> Dict:
+        self._msg_id += 1
+        cid = self._msg_id
+        self._send_frame(json.dumps({"id": cid, "method": method, "params": params or {}}))
+        while True:
+            raw = self._recv_frame()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            if data.get("id") == cid:
+                return data.get("result", {})
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+class RecaptchaTokenProvider:
+    """
+    Dollyteria 最终确认页 (/cart/confirm) Google reCAPTCHA v3 令牌预热与极速签发引擎：
+    - 后台常驻轻量级无界面浏览器上下文，锁定 https://www.dollyteria.com 域名的 grecaptcha 实例
+    - 注意：绝不调用 Runtime.enable（规避 Google BotGuard 对 CDP 序列化探测导致的低分拦截）
+    - 支持后台定时刷新令牌缓存 + 下单并发预取（0.15s~0.4s 极速出码）
+    """
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> 'RecaptchaTokenProvider':
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
+        self._port: int = 0
+        self._user_data_dir: Optional[str] = None
+        self._sitekey: str = DEFAULT_RECAPTCHA_SITEKEY
+        self._is_ready: bool = False
+        self._cached_token: str = ""
+        self._cached_time: float = 0.0
+        self._keepalive_started: bool = False
+
+    @staticmethod
+    def _find_browser_executable() -> Optional[str]:
+        if os.name == "nt":
+            candidates = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+            ]
+            for path in candidates:
+                if path and os.path.isfile(path):
+                    return path
+        for cmd in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "msedge"]:
+            found = shutil.which(cmd)
+            if found:
+                return found
+        return None
+
+    @staticmethod
+    def _allocate_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _cleanup_proc_unlocked(self):
+        self._is_ready = False
+        if self._proc:
+            pid = self._proc.pid
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=4,
+                    )
+                else:
+                    self._proc.terminate()
+                    self._proc.wait(timeout=3)
+            except Exception:
+                pass
+            self._proc = None
+        if self._user_data_dir and os.path.isdir(self._user_data_dir):
+            shutil.rmtree(self._user_data_dir, ignore_errors=True)
+            self._user_data_dir = None
+
+    def _ensure_browser_ready_unlocked(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> bool:
+        if self._proc and self._proc.poll() is None and self._is_ready and self._sitekey == sitekey:
+            return True
+
+        self._cleanup_proc_unlocked()
+        exe = self._find_browser_executable()
+        if not exe:
+            logger.error("❌ [reCAPTCHA] 未找到本机 Chrome / Edge / Chromium 浏览器，无法签发 reCAPTCHA v3 令牌")
+            return False
+
+        self._port = self._allocate_free_port()
+        self._user_data_dir = tempfile.mkdtemp(prefix="dolly_recaptcha_")
+        self._sitekey = sitekey
+
+        args = [
+            exe,
+            f"--remote-debugging-port={self._port}",
+            "--remote-allow-origins=*",
+            f"--user-data-dir={self._user_data_dir}",
+            "--window-position=-32000,-32000",
+            "--window-size=1280,900",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ]
+        if os.name != "nt":
+            args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
+        args.append("about:blank")
+
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE: 完全隐藏窗口，不占用任务栏与前台焦点
+            kwargs["startupinfo"] = si
+        else:
+            # Linux 容器若无 DISPLAY，优先配合 xvfb-run 以非 headless 渲染确保高分通过 reCAPTCHA v3
+            if not os.environ.get("DISPLAY"):
+                xvfb = shutil.which("xvfb-run")
+                if xvfb:
+                    args = [xvfb, "-a", "-s", "-screen 0 1280x900x24"] + args
+                else:
+                    args.insert(1, "--headless=new")
+
+        try:
+            self._proc = subprocess.Popen(args, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ [reCAPTCHA] 启动浏览器进程失败: {e}")
+            self._cleanup_proc_unlocked()
+            return False
+
+        # 等待 CDP 端口就绪
+        ws_url = None
+        for _ in range(25):
+            time.sleep(0.15)
+            try:
+                r = requests.get(f"http://127.0.0.1:{self._port}/json", timeout=1.5)
+                if r.status_code == 200:
+                    for target in r.json():
+                        if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+                            ws_url = target["webSocketDebuggerUrl"]
+                            break
+                if ws_url:
+                    break
+            except Exception:
+                pass
+
+        if not ws_url:
+            logger.error("❌ [reCAPTCHA] 无法连接浏览器 CDP 调试端口")
+            self._cleanup_proc_unlocked()
+            return False
+
+        # 导航至 www.dollyteria.com 极轻静态页并注入 reCAPTCHA v3
+        if self._prepare_page_unlocked(ws_url, sitekey):
+            self._is_ready = True
+            logger.info("🛡️ [reCAPTCHA] Dollyteria 官网 reCAPTCHA v3 令牌引擎预热就绪！")
+            return True
+        self._cleanup_proc_unlocked()
+        return False
+
+    def _prepare_page_unlocked(self, ws_url: str, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> bool:
+        cdp = None
+        try:
+            cdp = _SimpleCDPClient(ws_url, timeout=10.0)
+            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/robots.txt"})
+            time.sleep(0.55)
+            js_inject = f"""
+            new Promise((resolve, reject) => {{
+                const s = document.createElement('script');
+                s.src = 'https://www.google.com/recaptcha/api.js?render={sitekey}';
+                s.onload = () => {{
+                    let ticks = 0;
+                    const timer = setInterval(() => {{
+                        ticks++;
+                        if (window.grecaptcha && window.grecaptcha.execute) {{
+                            clearInterval(timer);
+                            window.grecaptcha.ready(() => resolve(true));
+                        }} else if (ticks > 150) {{
+                            clearInterval(timer);
+                            reject('grecaptcha init timeout');
+                        }}
+                    }}, 30);
+                }};
+                s.onerror = () => reject('grecaptcha script load error');
+                (document.head || document.documentElement).appendChild(s);
+            }})
+            """
+            res = cdp.call("Runtime.evaluate", {
+                "expression": js_inject,
+                "awaitPromise": True,
+                "returnByValue": True,
+            })
+            if res.get("result", {}).get("value") is True:
+                self._page_fresh = True
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ [reCAPTCHA] 页面注入异常: {e}")
+            return False
+        finally:
+            if cdp:
+                cdp.close()
+
+    def _execute_token_unlocked(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, action: str = "submit") -> str:
+        if not self._ensure_browser_ready_unlocked(sitekey):
+            return ""
+
+        cdp = None
+        try:
+            r = requests.get(f"http://127.0.0.1:{self._port}/json", timeout=2.0)
+            ws_url = next(
+                (t["webSocketDebuggerUrl"] for t in r.json() if t.get("type") == "page" and t.get("webSocketDebuggerUrl")),
+                None,
+            )
+            if not ws_url:
+                self._is_ready = False
+                return ""
+
+            # 每次签发均确保在全新导航的页面上下文中执行，避免同一页面连续多次 execute 被降权
+            if not getattr(self, "_page_fresh", False):
+                if not self._prepare_page_unlocked(ws_url, sitekey):
+                    self._is_ready = False
+                    return ""
+
+            cdp = _SimpleCDPClient(ws_url, timeout=8.0)
+            expr = (
+                f"new Promise((resolve, reject) => {{"
+                f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
+                f"  window.grecaptcha.ready(() => {{"
+                f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
+                f"  }});"
+                f"}})"
+            )
+            res = cdp.call("Runtime.evaluate", {
+                "expression": expr,
+                "awaitPromise": True,
+                "returnByValue": True,
+            })
+            self._page_fresh = False
+            token = res.get("result", {}).get("value", "")
+            if isinstance(token, str) and len(token) > 100:
+                self._cached_token = token
+                self._cached_time = time.time()
+                return token
+            self._is_ready = False
+            return ""
+        except Exception as e:
+            logger.warning(f"⚠️ [reCAPTCHA] 签发令牌时异常: {e}")
+            self._is_ready = False
+            return ""
+        finally:
+            if cdp:
+                cdp.close()
+
+    def get_token(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, action: str = "submit", force_fresh: bool = False, max_age_sec: float = 45.0) -> str:
+        """获取有效的 Google reCAPTCHA v3 令牌 (支持缓存秒回与强制实时重签)"""
+        with self._lock:
+            now = time.time()
+            if (
+                not force_fresh
+                and self._cached_token
+                and self._sitekey == sitekey
+                and (now - self._cached_time) <= max_age_sec
+            ):
+                tok = self._cached_token
+                # 消费后清空缓存并触发后台异步补货一枚新 Token，确保并发或多单不复用同一枚 Token
+                self._cached_token = ""
+                self._cached_time = 0.0
+                threading.Thread(target=self._refresh_in_bg, args=(sitekey,), daemon=True).start()
+                return tok
+
+            t0 = time.time()
+            token = self._execute_token_unlocked(sitekey=sitekey, action=action)
+            if not token:
+                # 若首次因为浏览器休眠失败，自动重建一次再试
+                self._cleanup_proc_unlocked()
+                token = self._execute_token_unlocked(sitekey=sitekey, action=action)
+            if token:
+                # 实时签发被当前请求使用，清空缓存并在后台预备下一枚
+                self._cached_token = ""
+                self._cached_time = 0.0
+                logger.info(f"🔑 [reCAPTCHA] 实时签发 reCAPTCHA v3 令牌成功 (耗时: {time.time() - t0:.2f}s, 长度: {len(token)})")
+                threading.Thread(target=self._refresh_in_bg, args=(sitekey,), daemon=True).start()
+            return token
+
+    def _refresh_in_bg(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY):
+        with self._lock:
+            try:
+                self._execute_token_unlocked(sitekey=sitekey, action="submit")
+            except Exception:
+                pass
+
+    def start_prewarm(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY):
+        """启动后台预热与定时保活线程 (每 40 秒自动刷新热备 Token，保证下单 0 延迟拿码)"""
+        def _loop():
+            with self._lock:
+                ok = self._ensure_browser_ready_unlocked(sitekey)
+                if ok:
+                    self._execute_token_unlocked(sitekey=sitekey, action="submit")
+            while True:
+                time.sleep(40)
+                with self._lock:
+                    if not self._cached_token or (time.time() - self._cached_time) > 38:
+                        self._execute_token_unlocked(sitekey=self._sitekey, action="submit")
+
+        with self._lock:
+            if self._keepalive_started:
+                return
+            self._keepalive_started = True
+        threading.Thread(target=_loop, name="RecaptchaPrewarmThread", daemon=True).start()
+
 
 
 class AutoOrderHook:
@@ -85,8 +512,17 @@ class AutoOrderHook:
         return None
 
     def preload_standby_workers(self, count: Optional[int] = None):
-        """预先登录并储备备用 Worker 会话 (在后台独立线程执行，不阻塞主线程)"""
-        if self._is_standby_worker or not self.username or not self.password:
+        """预先登录并储备备用 Worker 会话 + 预热 reCAPTCHA v3 令牌引擎 (在后台独立线程执行，不阻塞主线程)"""
+        if self._is_standby_worker:
+            return
+
+        # 同步启动 reCAPTCHA v3 后台热备引擎
+        try:
+            RecaptchaTokenProvider.get_instance().start_prewarm()
+        except Exception as e:
+            logger.debug(f"[Auto-Order] 启动 reCAPTCHA 预热异常: {e}")
+
+        if not self.username or not self.password:
             return
 
         target_count = self.standby_workers_count if count is None else int(count)
@@ -304,6 +740,18 @@ class AutoOrderHook:
                 # 1. 检查是否成功进入购物车
                 if r.url and "/cart" in r.url and ("カートの中身" in r_text or "ショッピングカート" in r_text or "レジに進む" in r_text):
                     if item_id in r_text or "買い物を続ける" in r_text or "レジに進む" in r_text:
+                        # 自动剔除购物车中残留的非本单旧商品，避免旧商品售罄或串单阻塞本次结算
+                        try:
+                            cart_soup = BeautifulSoup(r_text, "html.parser")
+                            for inp in cart_soup.find_all("input", {"type": "submit"}):
+                                rname = inp.get("name", "")
+                                if rname.startswith("cart_remove_") and rname != f"cart_remove_{item_id}":
+                                    self.session.post("https://www.dollyteria.com/cart", data={
+                                        "cart_operation_page": "step_zero_cart",
+                                        rname: "削除"
+                                    }, timeout=5)
+                        except Exception:
+                            pass
                         logger.info(f"✅ [Auto-Order] 商品 [{item_id}] 成功加入购物车！(尝试次数: {attempt + 1})")
                         return True, "商品已成功加购并进入购物车", False
 
@@ -598,6 +1046,22 @@ class AutoOrderHook:
         logger.info(f"⚡ [Auto-Order 启动] 目标商品 [{item_id}] (指定支付: 【{target_name}】, 模式: {'🛡️ Dry-Run 仿真测试' if is_dry else '🚨 真实下单模式'})")
         steps_log.append(f"启动自动下单流水线 (指定支付: 【{target_name}】, 模式: {'Dry-Run 仿真' if is_dry else '真实下单'})")
 
+        # 真实下单模式下，在加购与推进结算的同时，并行启动 reCAPTCHA v3 令牌预取，实现确认页 0 等待
+        token_box = {"token": ""}
+        token_thread: Optional[threading.Thread] = None
+        if not is_dry:
+            def _prefetch_recaptcha():
+                try:
+                    token_box["token"] = RecaptchaTokenProvider.get_instance().get_token(
+                        sitekey=DEFAULT_RECAPTCHA_SITEKEY,
+                        action="submit",
+                    )
+                except Exception as e:
+                    logger.warning(f"[Auto-Order] 并行预取 reCAPTCHA 令牌异常: {e}")
+
+            token_thread = threading.Thread(target=_prefetch_recaptcha, name=f"RecaptchaFetch_{item_id}", daemon=True)
+            token_thread.start()
+
         # 1. 登录验证
         if not self.is_logged_in:
             ok, msg = self.login()
@@ -678,7 +1142,8 @@ class AutoOrderHook:
         else:
             # 真实下单执行
             logger.warning("🚨 [Auto-Order 真实下单模式] 正在提交最终「購入する」订单确认...")
-            confirm_soup = BeautifulSoup(confirm_resp.content.decode("utf-8", "ignore"), "html.parser")
+            confirm_html = confirm_resp.content.decode("utf-8", "ignore")
+            confirm_soup = BeautifulSoup(confirm_html, "html.parser")
             final_form = confirm_soup.find("form", action=lambda a: a and "cart/confirm" in a) or confirm_soup.find("form")
             if not final_form:
                 return {
@@ -705,13 +1170,59 @@ class AutoOrderHook:
                     continue
                 final_data[n] = v
 
-            # 核心：自动完成「* 同意する」规约要点勾选 (policy_agree=1)
+            # 核心 1：自动完成「* 同意する」规约要点勾选 (policy_agree=1)
             final_data["policy_agree"] = "1"
-            # 提交最终「購入する」点击完成下单
+            # 核心 2：提交最终「購入する」点击完成下单
             final_data["go-next"] = "購入する"
 
+            # 核心 3：获取并注入 Google reCAPTCHA v3 令牌 (recaptcha_token)
+            m_sitekey = re.search(r"recaptcha/api\.js\?render=([0-9A-Za-z_-]+)", confirm_html)
+            page_sitekey = m_sitekey.group(1) if m_sitekey else DEFAULT_RECAPTCHA_SITEKEY
+
+            if token_thread is not None:
+                token_thread.join(timeout=8.0)
+            recaptcha_token = token_box.get("token", "")
+            if not recaptcha_token or page_sitekey != DEFAULT_RECAPTCHA_SITEKEY:
+                recaptcha_token = RecaptchaTokenProvider.get_instance().get_token(
+                    sitekey=page_sitekey,
+                    action="submit",
+                    force_fresh=True,
+                )
+
+            if recaptcha_token:
+                final_data["recaptcha_token"] = recaptcha_token
+                steps_log.append("Google reCAPTCHA v3 验证: 令牌已自动签发并注入 (recaptcha_token)")
+            else:
+                steps_log.append("Google reCAPTCHA v3 验证: 警告 (未能签发令牌，尝试直接提交)")
+
             action_url = final_form.get("action") or "https://www.dollyteria.com/cart/confirm"
-            resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
+            resp_complete = None
+            complete_text = ""
+            success = False
+
+            # 支持若首次因令牌过期被拦截时，立即强制重签新 Token 重试
+            for submit_attempt in range(3):
+                resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
+                if not resp_complete:
+                    continue
+                complete_text = resp_complete.content.decode("utf-8", "ignore")
+                success = "注文完了" in complete_text or "/cart/complete" in resp_complete.url
+                if success:
+                    break
+
+                # 若因 reCAPTCHA 验证未通过，立即强制重签一枚新 Token 并瞬时重交
+                if "reCAPTCHAの検証に失敗しました" in complete_text and submit_attempt < 2:
+                    logger.warning(f"⚠️ [Auto-Order] 最终提交遭遇 reCAPTCHA 校验拦截，正在实时重签新令牌重试 (第 {submit_attempt + 1} 次)...")
+                    fresh_tok = RecaptchaTokenProvider.get_instance().get_token(
+                        sitekey=page_sitekey,
+                        action="submit",
+                        force_fresh=True,
+                    )
+                    if fresh_tok:
+                        final_data["recaptcha_token"] = fresh_tok
+                        continue
+                break
+
             if not resp_complete:
                 return {
                     "success": False,
@@ -719,18 +1230,36 @@ class AutoOrderHook:
                     "dry_run": False,
                     "message": "最终下单提交遭遇网络超时或官网 503 持续繁忙",
                     "steps_log": steps_log,
-                    "elapsed_sec": elapsed,
+                    "elapsed_sec": round(time.time() - t0, 2),
                 }
-            complete_text = resp_complete.content.decode("utf-8", "ignore")
 
-            success = "注文完了" in complete_text or "/cart/complete" in resp_complete.url
-            steps_log.append(f"最终订单提交: {'下单成功！' if success else '提交返回异常'}")
+            # 提取确认页可能返回的具体错误原因（如库存不足被抢先结算、reCAPTCHA 失败等）
+            err_reasons = []
+            is_sold_out_at_confirm = False
+            if not success:
+                err_soup = BeautifulSoup(complete_text, "html.parser")
+                for el in err_soup.select(".error_status, .form_error, .error_msg, .err_msg"):
+                    txt = el.get_text(" ", strip=True)
+                    if txt and txt not in err_reasons and len(txt) < 200:
+                        err_reasons.append(txt)
+                soldout_kws = ["在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ", "現在、商品はございません"]
+                if any(k in complete_text for k in soldout_kws):
+                    is_sold_out_at_confirm = True
+                    self.clear_cart()
+
+            err_detail_str = f" ({' / '.join(err_reasons[:2])})" if err_reasons else (" (商品在最后结算瞬间已被他人抢先买走售罄)" if is_sold_out_at_confirm else "")
+            steps_log.append(f"最终订单提交: {'下单成功！' if success else '提交返回异常' + err_detail_str}")
 
             return {
                 "success": success,
                 "step": "order_complete",
                 "dry_run": False,
-                "message": f"🎉 商品已成功完成自动下单！支付方式为【{details.get('payment_method', target_name)}】。" if success else "最终下单提交未确认成功，请立即手动核对！",
+                "is_sold_out": is_sold_out_at_confirm,
+                "message": (
+                    f"🎉 商品已成功完成自动下单！支付方式为【{details.get('payment_method', target_name)}】。"
+                    if success
+                    else f"最终下单提交未确认成功{err_detail_str}，请立即手动核对！"
+                ),
                 "elapsed_sec": round(time.time() - t0, 2),
                 "steps_log": steps_log,
                 "final_url": resp_complete.url,

@@ -17,10 +17,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Tokyo \
     DATA_DIR=/app/data
 
-# 安装基础系统依赖及时区数据 (用于设置 JST 日本时区)
+# 安装基础系统依赖、时区数据与 Chromium + Xvfb (用于最终确认页 Google reCAPTCHA v3 令牌签发)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     curl \
+    chromium \
+    xvfb \
+    xauth \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 

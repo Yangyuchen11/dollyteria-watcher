@@ -775,7 +775,7 @@ class RecaptchaTokenProvider:
                         continue
                     try:
                         slot.is_preparing = True
-                        self._prepare_slot(slot, sitekey)
+                        self._prepare_slot(slot, sitekey, force_navigate=True)
                     except Exception:
                         slot.is_fresh = False
                     finally:
@@ -969,7 +969,7 @@ class RecaptchaTokenProvider:
                     for s in stale_slots:
                         with s.lock:
                             if not s.in_use and (not s.is_fresh or (time.time() - s.prepared_at) > 180):
-                                self._prepare_slot(s, self._sitekey)
+                                self._prepare_slot(s, self._sitekey, force_navigate=True)
                 except Exception:
                     pass
 

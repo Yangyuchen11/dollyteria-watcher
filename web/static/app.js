@@ -13,6 +13,8 @@ const elements = {
     // 状态与指示器
     statusIndicator: document.getElementById('status-indicator'),
     statusText: document.getElementById('status-text'),
+    orderModeIndicator: document.getElementById('order-mode-indicator'),
+    orderModeText: document.getElementById('order-mode-text'),
     nextDropLabel: document.getElementById('next-drop-label'),
     nextDropCountdown: document.getElementById('next-drop-countdown'),
     statActiveWatches: document.getElementById('stat-active-watches'),
@@ -72,6 +74,7 @@ const elements = {
     aoPassword: document.getElementById('ao-password'),
     aoDryRun: document.getElementById('ao-dry-run'),
     aoEnabled: document.getElementById('ao-enabled'),
+    aoEnabledLabel: document.getElementById('ao-enabled-label'),
     btnSaveAutoOrder: document.getElementById('btn-save-auto-order'),
     aoTestItemId: document.getElementById('ao-test-item-id'),
     aoTestPaySelect: document.getElementById('ao-test-pay-select'),
@@ -347,17 +350,35 @@ function initTabs() {
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const tabId = btn.getAttribute('data-tab');
+            if (!tabId) return;
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             btn.classList.add('active');
             const targetPane = document.getElementById(tabId);
             if (targetPane) targetPane.classList.add('active');
             if (tabId === 'tab-feed') {
-                elements.feedBadge.style.display = 'none';
-                elements.feedBadge.textContent = '0';
+                if (elements.feedBadge) {
+                    elements.feedBadge.style.display = 'none';
+                    elements.feedBadge.textContent = '0';
+                }
+            }
+            if (tabId === 'tab-orders') {
+                const ordersBadge = document.getElementById('orders-badge');
+                if (ordersBadge) {
+                    ordersBadge.style.display = 'none';
+                    ordersBadge.textContent = '0';
+                }
+                loadOrders();
+                loadOrderStats();
+            }
+            if (tabId === 'tab-terminal') {
+                loadTerminalLogs();
             }
             if (tabId === 'tab-archive') {
                 onArchiveTabActive();
+            }
+            if (tabId === 'tab-schedule') {
+                pollArchiveCrawlerStatus();
             }
         });
     });
@@ -370,6 +391,11 @@ function initMainApp() {
     try { loadConfig(); } catch (e) { console.error('loadConfig err:', e); }
     try { loadHistory(); } catch (e) { console.error('loadHistory err:', e); }
     try { initArchiveModule(); } catch (e) { console.error('initArchiveModule err:', e); }
+    try { pollArchiveCrawlerStatus(); } catch (e) { console.error('pollArchiveCrawlerStatus err:', e); }
+    try { initTerminalModule(); } catch (e) { console.error('initTerminalModule err:', e); }
+    try { initOrdersModule(); } catch (e) { console.error('initOrdersModule err:', e); }
+    try { initWatchesFilter(); } catch (e) { console.error('initWatchesFilter err:', e); }
+    try { initFeedFilter(); } catch (e) { console.error('initFeedFilter err:', e); }
     try { initSSE(); } catch (e) { console.error('initSSE err:', e); }
     try {
         pollStatus();
@@ -392,6 +418,7 @@ async function loadConfig() {
         populateNotifiersForm();
         populateAutoOrderForm();
         populateQuickBuyForm();
+        updateTopOrderModeIndicator();
     } catch (e) {
         showToast('读取配置失败: ' + e.message, 'error');
     }
@@ -412,6 +439,7 @@ async function saveConfig(silent = false) {
         const data = await res.json();
         if (!silent) showToast(data.message || '配置已保存', 'success');
         renderWatches();
+        updateTopOrderModeIndicator();
     } catch (e) {
         showToast('保存配置异常: ' + e.message, 'error');
     }
@@ -505,7 +533,6 @@ function renderWatches() {
 
         const autoOrderEnabled = Boolean(rule.auto_order);
         const globalAoEnabled = Boolean(currentConfig.auto_order?.enabled);
-        const isDryRun = currentConfig.auto_order?.dry_run !== false;
 
         let modeCardClass = 'mode-notify';
         let statusBadgeHtml = '';
@@ -515,16 +542,11 @@ function renderWatches() {
             statusBadgeHtml = '<span class="rule-status-badge status-paused" title="规则已停用，不参与检测与提醒">⏸️ 已暂停监控</span>';
         } else if (autoOrderEnabled) {
             if (globalAoEnabled) {
-                if (isDryRun) {
-                    modeCardClass = 'mode-dry-run';
-                    statusBadgeHtml = '<span class="rule-status-badge status-dry-run" title="已加入自动购买名单，当前全局处于安全仿真模式 (直达确认页拦截，不产生真实扣款)">🛡️ 仿真抢购</span>';
-                } else {
-                    modeCardClass = 'mode-live-buy';
-                    statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，当前处于真实下单模式，命中时将自动以真实订单下单！">🚨 真实抢购</span>';
-                }
+                modeCardClass = 'mode-live-buy';
+                statusBadgeHtml = '<span class="rule-status-badge status-live-buy" title="已加入自动购买名单，当前处于自动下单模式，命中时将自动以真实订单下单！">🚨 真实抢购</span>';
             } else {
-                modeCardClass = isDryRun ? 'mode-dry-run' : 'mode-live-buy';
-                statusBadgeHtml = '<span class="rule-status-badge status-standby" title="已开启自动购买，但自动下单全局总开关未开启，当前仅发送提醒">🛒 自动购买就绪 (全局未开)</span>';
+                modeCardClass = 'mode-live-buy';
+                statusBadgeHtml = '<span class="rule-status-badge status-standby" title="已开启自动购买，但真实自动下单未开启，当前仅发送提醒">🛒 自动购买就绪 (未启动真实下单)</span>';
             }
         } else {
             modeCardClass = 'mode-notify';
@@ -627,9 +649,9 @@ function renderWatches() {
             const ruleName = currentConfig.watches[idx].name;
             if (isChecked) {
                 const globalOn = currentConfig.auto_order?.enabled;
-                showToast(`已将 [${ruleName}] 加入自动购买名单${globalOn ? '（全局自动下单已就绪）' : '（注：需在自动下单接口开启总开关）'}`, 'success');
+                showToast(`已将 [${ruleName}] 加入自动购买名单${globalOn ? '（已启动真实自动下单）' : '（注：需在自动下单界面启动真实自动下单）'}`, 'success');
             } else {
-                showToast(`已将 [${ruleName}] 设为【仅提醒模式】（命中时绝不自动下单）`, 'info');
+                showToast(`已将 [${ruleName}] 设为【提醒模式】（命中时绝不自动下单）`, 'info');
             }
         });
     });
@@ -724,31 +746,26 @@ function renderDropTimesChips() {
 // 动态刷新自动下单运行状态横幅
 function updateAoModeBanner() {
     if (!elements.aoModeBanner) return;
-    const isEnabled = elements.aoEnabled ? elements.aoEnabled.checked : false;
-    const isDryRun = elements.aoDryRun ? elements.aoDryRun.checked : true;
+    const isEnabled = elements.aoEnabled ? elements.aoEnabled.checked : Boolean(currentConfig.auto_order?.enabled);
 
-    const dryRunLabel = document.getElementById('ao-dry-run-label');
-    if (dryRunLabel) {
-        dryRunLabel.innerHTML = isDryRun
-            ? '<span>启用安全仿真测试 (Dry-Run 模式)</span>'
-            : '<span style="color:#f87171;font-weight:700;">🚨 真实自动下单模式已激活！</span>';
+    updateTopOrderModeIndicator();
+    const enabledLabel = document.getElementById('ao-enabled-label');
+    if (enabledLabel) {
+        enabledLabel.innerHTML = isEnabled
+            ? '<span style="color:#f87171;font-weight:700;">🚨 启动真实自动下单 (已开启)</span>'
+            : '<span>启动真实自动下单 (已关闭)</span>';
     }
 
     if (!isEnabled) {
         elements.aoModeBanner.className = 'ao-mode-banner idle';
         if (elements.aoModeIcon) elements.aoModeIcon.textContent = '🔔';
-        if (elements.aoModeTitle) elements.aoModeTitle.textContent = '当前运行状态：仅提醒通知模式';
-        if (elements.aoModeDesc) elements.aoModeDesc.textContent = '自动下单执行已关闭。当监控命中匹配的新商品时，仅触发声音、桌面弹窗、Discord 与邮件提醒，绝不自动加购下单。';
-    } else if (isDryRun) {
-        elements.aoModeBanner.className = 'ao-mode-banner safe';
-        if (elements.aoModeIcon) elements.aoModeIcon.textContent = '🛡️';
-        if (elements.aoModeTitle) elements.aoModeTitle.textContent = '当前运行状态：Dry-Run 仿真测试模式 (绝对安全，不产生实际订单)';
-        if (elements.aoModeDesc) elements.aoModeDesc.textContent = '自动下单已启用，但受 Dry-Run 仿真安全保护：命中商品时自动登录加购、选择地址并指定支付方式，推进至【下单前确认页 (/cart/confirm)】后自动安全拦截停止，绝不提交真实订单或扣款！测试后自动清空购物车。';
+        if (elements.aoModeTitle) elements.aoModeTitle.textContent = '当前运行状态：提醒模式 (不下单)';
+        if (elements.aoModeDesc) elements.aoModeDesc.textContent = '真实自动下单已关闭。当监控命中匹配的新商品时，仅触发声音、桌面弹窗、Discord 与邮件提醒，绝不自动加购下单。';
     } else {
         elements.aoModeBanner.className = 'ao-mode-banner warning';
         if (elements.aoModeIcon) elements.aoModeIcon.textContent = '🚨';
-        if (elements.aoModeTitle) elements.aoModeTitle.textContent = '当前运行状态：真实自动下单模式 (将直接提交官方订单！)';
-        if (elements.aoModeDesc) elements.aoModeDesc.textContent = '【重要警示】已解除 Dry-Run 安全仿真保护！当监控命中匹配的全新在售商品时，系统将全自动推进至确认页并在确认页直接点击「購入する」正式提交订单（支付方式为所选的代金引换或店頭支付）！请务必确认您需要真实抢购。';
+        if (elements.aoModeTitle) elements.aoModeTitle.textContent = '当前运行状态：自动下单模式 (真实下单)';
+        if (elements.aoModeDesc) elements.aoModeDesc.textContent = '【重要警示】已启动真实自动下单！当监控命中匹配的全新在售商品时，系统将全自动推进至确认页并正式提交官方订单并扣款购买！请务必确认您需要真实抢购。';
     }
 }
 
@@ -766,6 +783,23 @@ function populateScheduleForm() {
     const dailySync = s.daily_stock_sync || {};
     if (elements.schedDailySyncEnabled) elements.schedDailySyncEnabled.checked = dailySync.enabled ?? true;
     if (elements.schedDailySyncTime) elements.schedDailySyncTime.value = dailySync.time || '05:00:00';
+    updateDailySyncBadge();
+}
+
+function updateDailySyncBadge() {
+    const badge = document.getElementById('sched-sync-status-badge');
+    const isEnabled = elements.schedDailySyncEnabled ? elements.schedDailySyncEnabled.checked : true;
+    const timeVal = (elements.schedDailySyncTime?.value || '05:00:00').trim();
+    const timeShort = timeVal.length >= 5 ? timeVal.slice(0, 5) : timeVal;
+    if (badge) {
+        if (isEnabled) {
+            badge.textContent = `⏰ 每日 ${timeShort} 自动盘点`;
+            badge.style.opacity = '1';
+        } else {
+            badge.textContent = '⏸️ 每日自动盘点已停用';
+            badge.style.opacity = '0.65';
+        }
+    }
 }
 
 // 通知表单同步
@@ -792,8 +826,7 @@ function populateAutoOrderForm() {
     const ao = currentConfig?.auto_order || {};
     if (elements.aoUsername) elements.aoUsername.value = ao.username || '';
     if (elements.aoPassword) elements.aoPassword.value = ao.password || '';
-    if (elements.aoDryRun) elements.aoDryRun.checked = ao.dry_run ?? true;
-    if (elements.aoEnabled) elements.aoEnabled.checked = ao.enabled ?? false;
+    if (elements.aoEnabled) elements.aoEnabled.checked = Boolean(ao.enabled);
 
     const pm = ao.payment_method || 'cod';
     const radioCod = document.getElementById('ao-pay-cod');
@@ -833,10 +866,10 @@ function updateQuickBuyStatusTag() {
             tag.textContent = '⚪ 一键下单未启用';
         } else if (dryRun) {
             tag.className = 'status-pill status-busy';
-            tag.textContent = '🛡️ 安全仿真测试模式 (Dry-Run)';
+            tag.textContent = '🛡️ 一键模拟下单';
         } else {
             tag.className = 'status-pill status-bursting';
-            tag.textContent = '🚨 真实下单模式 (已激活)';
+            tag.textContent = '🚨 一键真实下单';
         }
     }
 
@@ -845,12 +878,12 @@ function updateQuickBuyStatusTag() {
     feedBuyBtns.forEach(btn => {
         if (!enabled) {
             btn.classList.add('qb-disabled');
-            btn.title = '⚡ 一键购买 (功能未开启，请先在【全站档案】开启一键下单开关)';
+            btn.title = '⚡ 一键购买 (功能未开启，请先在【自动下单】设置中启动一键下单)';
         } else {
             btn.classList.remove('qb-disabled');
             btn.title = dryRun
-                ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)'
-                : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)';
+                ? '⚡ 点击执行一键购买 (一键模拟下单模式)'
+                : '⚡ 点击执行一键购买 (🚨 一键真实下单模式)';
         }
     });
 }
@@ -973,8 +1006,8 @@ function renderProductCard(item, prepend = true) {
     const isQbDry = qbCfg.dry_run !== false;
     let qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
     let qbBtnTitle = isQbEnabled
-        ? (isQbDry ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)' : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)')
-        : '⚡ 一键购买 (功能未开启，请先在【全站档案】开启一键下单开关)';
+        ? (isQbDry ? '⚡ 点击执行一键购买 (一键模拟下单模式)' : '⚡ 点击执行一键购买 (🚨 一键真实下单模式)')
+        : '⚡ 一键购买 (功能未开启，请先在【自动下单】设置中启动一键下单)';
     let qbBtnText = '⚡ 一键购买';
     let qbDisabledAttr = '';
 
@@ -1065,6 +1098,18 @@ function initSSE() {
                     markFeedProductSoldOut(item.id);
                 }
                 showToast(`🎉 【自动下单成功】已成功为您抢到: ${item.title || item.id}！`, 'success');
+                return;
+            }
+
+            // 收到终端实时日志事件
+            if (data.type === 'terminal_log' && data.log) {
+                onNewTerminalLog(data.log);
+                return;
+            }
+
+            // 收到新购买记录事件
+            if (data.type === 'order_recorded' && data.order) {
+                onNewOrderRecorded(data.order);
                 return;
             }
 
@@ -1333,6 +1378,13 @@ function bindEvents() {
         });
     }
 
+    if (elements.schedDailySyncEnabled) {
+        elements.schedDailySyncEnabled.addEventListener('change', updateDailySyncBadge);
+    }
+    if (elements.schedDailySyncTime) {
+        elements.schedDailySyncTime.addEventListener('input', updateDailySyncBadge);
+    }
+
     // 保存通知设置
     if (elements.btnSaveNotifiers) {
         elements.btnSaveNotifiers.addEventListener('click', () => {
@@ -1362,54 +1414,64 @@ function bindEvents() {
         elements.btnSaveAutoOrder.addEventListener('click', () => {
             const selectedPayRadio = document.querySelector('input[name="ao-payment-method"]:checked');
             const payMethod = selectedPayRadio ? selectedPayRadio.value : 'cod';
+            const isEnabled = elements.aoEnabled ? elements.aoEnabled.checked : false;
             currentConfig.auto_order = {
                 username: elements.aoUsername.value.trim(),
                 password: elements.aoPassword.value.trim(),
-                dry_run: elements.aoDryRun.checked,
-                enabled: elements.aoEnabled.checked,
+                dry_run: false,
+                enabled: isEnabled,
                 payment_method: payMethod,
                 max_workers: parseInt(elements.aoMaxWorkers?.value) || 6,
                 standby_workers: parseInt(elements.aoStandbyWorkers?.value) || 2,
                 retry_delay_sec: parseFloat(elements.aoRetryDelay?.value) || 0.15,
                 max_retries: parseInt(elements.aoMaxRetries?.value) || 35
             };
+            if (elements.quickBuyEnabled) {
+                if (!currentConfig.quick_buy) currentConfig.quick_buy = {};
+                currentConfig.quick_buy.enabled = elements.quickBuyEnabled.checked;
+                currentConfig.quick_buy.dry_run = elements.quickBuyDryRun ? elements.quickBuyDryRun.checked : true;
+            }
             saveConfig();
             updateAoModeBanner();
         });
     }
 
     // 自动下单开关联动实时状态横幅与即时保存
+    // 顶部下单模式指示器点击快捷跳转
+    if (elements.orderModeIndicator) {
+        elements.orderModeIndicator.addEventListener('click', () => {
+            const tabBtn = document.querySelector('.tab-btn[data-tab="tab-auto-order"]');
+            if (tabBtn) tabBtn.click();
+        });
+    }
+
     if (elements.aoEnabled) {
         elements.aoEnabled.addEventListener('change', () => {
             if (!currentConfig.auto_order) currentConfig.auto_order = {};
-            currentConfig.auto_order.enabled = elements.aoEnabled.checked;
-            updateAoModeBanner();
-            saveConfig(true);
-            showToast(elements.aoEnabled.checked ? '已开启全局自动下单' : '已关闭全局自动下单', 'info');
-        });
-    }
-    if (elements.aoDryRun) {
-        elements.aoDryRun.addEventListener('change', () => {
-            if (!currentConfig.auto_order) currentConfig.auto_order = {};
-            if (!elements.aoDryRun.checked && elements.aoEnabled?.checked) {
+            if (elements.aoEnabled.checked) {
                 const confirmed = confirm(
                     "⚠️ 重要安全提示：\n\n" +
-                    "您正在开启【真实自动下单】模式！\n" +
-                    "解除 Dry-Run 仿真保护后，一旦监控命中您开启自动购买的商品，系统将在确认页直接点击「購入する」正式提交官方真实订单并扣款购买！\n\n" +
-                    "确定要开启真实下单吗？"
+                    "您正在开启【启动真实自动下单】！\n" +
+                    "开启后，一旦监控命中您开启自动购买的商品，系统将在确认页直接正式提交官方真实订单并扣款购买！\n\n" +
+                    "确定要开启真实自动下单吗？"
                 );
                 if (!confirmed) {
-                    elements.aoDryRun.checked = true;
+                    elements.aoEnabled.checked = false;
                     return;
                 }
-            }
-            currentConfig.auto_order.dry_run = elements.aoDryRun.checked;
-            updateAoModeBanner();
-            saveConfig(true);
-            if (!elements.aoDryRun.checked) {
-                showToast('🚨 已开启真实下单模式！命中监控时将向官网直接提交订单', 'warning');
+                currentConfig.auto_order.enabled = true;
+                currentConfig.auto_order.dry_run = false;
+                updateAoModeBanner();
+                saveConfig(true);
+                renderWatches();
+                showToast('🚨 已启动真实自动下单！命中监控时将向官网直接提交订单', 'warning');
             } else {
-                showToast('🛡️ 已切换为 Dry-Run 安全仿真测试模式', 'info');
+                currentConfig.auto_order.enabled = false;
+                currentConfig.auto_order.dry_run = false;
+                updateAoModeBanner();
+                saveConfig(true);
+                renderWatches();
+                showToast('🔔 已切换为提醒模式（不下单）', 'info');
             }
         });
     }
@@ -1703,6 +1765,10 @@ const archiveState = {
     pageSize: 30,
     keyword: '',
     inStock: 'all',
+    isNew: 'all',
+    presetKeywords: [],
+    selectedPresetKeywords: [],
+    presetMatchMode: 'all',
     sortBy: 'id_desc',
     totalPages: 1,
     totalCount: 0,
@@ -1746,13 +1812,14 @@ async function pollArchiveCrawlerStatus() {
         // 盘点时间与状态条显示
         const elSyncTime = document.getElementById('arch-sync-last-time');
         const elSyncDetail = document.getElementById('arch-sync-last-detail');
+        const cfgTime = (elements.schedDailySyncTime?.value || '05:00:00').trim().slice(0, 5) || '05:00';
         if (elSyncTime) {
             if (stats.last_stock_sync_at && stats.last_stock_sync_at > 0) {
                 const syncDate = new Date(stats.last_stock_sync_at * 1000);
                 const timeStr = syncDate.toLocaleString('zh-CN', { hour12: false });
                 elSyncTime.textContent = `上次盘点: ${timeStr}`;
             } else {
-                elSyncTime.textContent = '上次盘点: 暂无盘点记录 (每日 05:00 自动执行)';
+                elSyncTime.textContent = `上次盘点: 暂无盘点记录 (每日 ${cfgTime} 自动执行)`;
             }
         }
         if (elSyncDetail) {
@@ -1762,6 +1829,7 @@ async function pollArchiveCrawlerStatus() {
                 elSyncDetail.textContent = '仅抓取官网在售清单差集比对，单次仅约 8MB 流量';
             }
         }
+        updateDailySyncBadge();
 
         // 按钮元素
         const btnStart = document.getElementById('btn-crawler-start');
@@ -1862,6 +1930,9 @@ async function loadArchiveProducts(page = 1) {
         const params = new URLSearchParams({
             keyword: archiveState.keyword,
             in_stock: archiveState.inStock,
+            is_new: archiveState.isNew,
+            preset_keywords: archiveState.selectedPresetKeywords.join(','),
+            preset_match_mode: archiveState.presetMatchMode,
             sort_by: archiveState.sortBy,
             page: String(archiveState.page),
             page_size: String(archiveState.pageSize),
@@ -1925,8 +1996,8 @@ function renderArchiveProducts(items) {
     const isQbDry = qbCfg.dry_run !== false;
     const qbBtnClass = isQbEnabled ? '' : 'qb-disabled';
     const qbBtnTitle = isQbEnabled
-        ? (isQbDry ? '⚡ 点击执行一键购买 (Dry-Run 安全仿真测试模式)' : '⚡ 点击执行一键购买 (🚨 真实下单购买模式)')
-        : '⚡ 一键购买 (功能未开启，请先在上方卡片开启一键下单开关)';
+        ? (isQbDry ? '⚡ 点击执行一键购买 (一键模拟下单模式)' : '⚡ 点击执行一键购买 (🚨 一键真实下单模式)')
+        : '⚡ 一键购买 (功能未开启，请先在【自动下单】设置中启动一键下单)';
 
     grid.innerHTML = items.map(it => {
         const isStock = it.is_in_stock;
@@ -1937,6 +2008,10 @@ function renderArchiveProducts(items) {
                </div>`
             : '';
 
+        const newBadge = it.is_new
+            ? `<div class="arch-card-new-badge">✨ 新品</div>`
+            : '';
+
         const imgSrc = it.img_url || 'https://www.dollyteria.com/html/template/default/img/common/no_image.gif';
         const priceStr = it.price_str || `￥${(it.price || 0).toLocaleString()}`;
         const modelStr = it.model_number ? escapeHtml(it.model_number) : '常规';
@@ -1944,6 +2019,7 @@ function renderArchiveProducts(items) {
         return `
             <div class="arch-card ${isStock ? '' : 'is-sold-out'}" data-id="${escapeHtml(it.id)}">
                 <div class="arch-card-thumb-wrap">
+                    ${newBadge}
                     ${soldOutOverlay}
                     <img src="${escapeHtml(imgSrc)}"
                          alt="${escapeHtml(it.title || '')}"
@@ -1994,7 +2070,7 @@ function initArchiveModule() {
             currentConfig.quick_buy.dry_run = elements.quickBuyDryRun ? elements.quickBuyDryRun.checked : true;
             saveConfig(true);
             updateQuickBuyStatusTag();
-            showToast(elements.quickBuyEnabled.checked ? '已开启商品档案一键下单功能' : '已关闭商品档案一键下单功能', 'info');
+            showToast(elements.quickBuyEnabled.checked ? '已启动一键下单功能' : '已关闭一键下单功能', 'info');
             if (archiveState.lastItems && archiveState.lastItems.length > 0) {
                 renderArchiveProducts(archiveState.lastItems);
             }
@@ -2020,7 +2096,7 @@ function initArchiveModule() {
             currentConfig.quick_buy.dry_run = elements.quickBuyDryRun.checked;
             saveConfig(true);
             updateQuickBuyStatusTag();
-            showToast(elements.quickBuyDryRun.checked ? '一键下单安全仿真模式已开启' : '⚠️ 一键下单已切换为真实购买模式', elements.quickBuyDryRun.checked ? 'info' : 'warning');
+            showToast(elements.quickBuyDryRun.checked ? '已切换为一键模拟下单' : '⚠️ 已切换为一键真实下单', elements.quickBuyDryRun.checked ? 'info' : 'warning');
             if (archiveState.lastItems && archiveState.lastItems.length > 0) {
                 renderArchiveProducts(archiveState.lastItems);
             }
@@ -2216,6 +2292,20 @@ function initArchiveModule() {
             loadArchiveProducts(1);
         });
     });
+
+    // 新品状态过滤 Chip
+    const newChips = document.querySelectorAll('#filter-new-chips .filter-chip');
+    newChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+            newChips.forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+            archiveState.isNew = chip.getAttribute('data-new') || 'all';
+            loadArchiveProducts(1);
+        });
+    });
+
+    // 初始化预设关键词模块
+    initPresetKeywords();
 
     // 排序变更
     const sortSelect = document.getElementById('archive-sort-select');
@@ -2640,3 +2730,988 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.error('checkAuthStatus err:', e);
     }
 });
+
+
+/* ==========================================================================
+   实时运行终端模块 (Real-time Terminal Module)
+   ========================================================================== */
+
+let terminalLimit = 100;
+let terminalLevel = 'ALL';
+let terminalKeyword = '';
+let terminalAutoScroll = true;
+let isUserScrolledUp = false;
+let terminalLogs = [];
+
+function initTerminalModule() {
+    const screen = document.getElementById('terminal-screen');
+    const btnClear = document.getElementById('btn-term-clear');
+    const btnCopy = document.getElementById('btn-term-copy');
+    const pill = document.getElementById('term-scroll-pill');
+    const autoScrollToggle = document.getElementById('term-autoscroll-toggle');
+    const autoScrollText = document.getElementById('term-autoscroll-text');
+    const levelSelect = document.getElementById('term-level-select');
+    const searchInput = document.getElementById('term-search-input');
+    const limitBtns = document.querySelectorAll('#term-limit-group .btn-segment');
+
+    if (!screen) return;
+
+    // 清屏
+    if (btnClear) btnClear.addEventListener('click', () => clearTerminal());
+
+    // 复制全部日志
+    if (btnCopy) {
+        btnCopy.addEventListener('click', () => {
+            const text = terminalLogs.map(l => l.formatted || `[${l.time}] [${l.level}] ${l.logger}: ${l.message}`).join('\n');
+            if (!text) {
+                showToast('当前暂无可复制的终端日志', 'warning');
+                return;
+            }
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('📋 已成功复制终端全部日志到剪贴板', 'success');
+            }).catch(() => {
+                showToast('复制失败，请手动选取文字', 'error');
+            });
+        });
+    }
+
+    // 自动滚屏切换
+    if (autoScrollToggle) {
+        autoScrollToggle.addEventListener('change', () => {
+            terminalAutoScroll = autoScrollToggle.checked;
+            if (autoScrollText) {
+                autoScrollText.textContent = terminalAutoScroll ? '⏬ 自动滚屏: 开启' : '⏸️ 自动滚屏: 暂停';
+            }
+            if (terminalAutoScroll) {
+                isUserScrolledUp = false;
+                if (pill) pill.style.display = 'none';
+                scrollTerminalToBottom();
+            }
+        });
+    }
+
+    // 监听滚轮上下滚动，智能检测是否向上查阅历史
+    screen.addEventListener('scroll', () => {
+        const distFromBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight;
+        if (distFromBottom > 35) {
+            isUserScrolledUp = true;
+            if (pill && terminalAutoScroll) pill.style.display = 'block';
+        } else {
+            isUserScrolledUp = false;
+            if (pill) pill.style.display = 'none';
+        }
+    });
+
+    // 点击浮动提示条跳至底部
+    if (pill) {
+        pill.addEventListener('click', () => {
+            isUserScrolledUp = false;
+            pill.style.display = 'none';
+            scrollTerminalToBottom(true);
+        });
+    }
+
+    // 切换 100 / 300 / 1000 行限制
+    limitBtns.forEach(b => {
+        b.addEventListener('click', () => {
+            limitBtns.forEach(btn => btn.classList.remove('active'));
+            b.classList.add('active');
+            const lim = parseInt(b.getAttribute('data-limit') || '100', 10);
+            terminalLimit = lim;
+            const maxLabel = document.getElementById('term-max-limit-label');
+            if (maxLabel) maxLabel.textContent = String(lim);
+            loadTerminalLogs();
+        });
+    });
+
+    // 级别筛选
+    if (levelSelect) {
+        levelSelect.addEventListener('change', () => {
+            terminalLevel = levelSelect.value;
+            loadTerminalLogs();
+        });
+    }
+
+    // 关键词筛选
+    if (searchInput) {
+        let searchTimer = null;
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                terminalKeyword = searchInput.value.trim();
+                loadTerminalLogs();
+            }, 250);
+        });
+    }
+
+    // Ctrl+L 清屏快捷键
+    window.addEventListener('keydown', (e) => {
+        const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+        if (activeTab === 'tab-terminal' && e.ctrlKey && e.key.toLowerCase() === 'l') {
+            e.preventDefault();
+            clearTerminal();
+        }
+    });
+
+    // 页面启动时预载一次日志
+    loadTerminalLogs();
+
+    // 当用户停留在终端面板时，每 2 秒轮询更新日志
+    setInterval(() => {
+        const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+        if (activeTab === 'tab-terminal') {
+            loadTerminalLogs();
+        }
+    }, 2000);
+}
+
+async function loadTerminalLogs() {
+    try {
+        const url = `/api/terminal/logs?limit=${terminalLimit}&level=${terminalLevel}&keyword=${encodeURIComponent(terminalKeyword)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+            console.error('加载终端日志接口异常, HTTP 状态码:', res.status);
+            const screen = document.getElementById('terminal-screen');
+            if (screen && (!terminalLogs || terminalLogs.length === 0)) {
+                screen.innerHTML = `
+                    <div class="term-welcome-line" style="color:#f87171;">
+                        <span class="term-prefix">[WARNING]</span> 后台终端服务尚未就绪或正在重启更新中 (HTTP ${res.status})，正在重连...
+                    </div>
+                `;
+            }
+            return;
+        }
+        const data = await res.json();
+        terminalLogs = data.logs || [];
+
+        const bufBadge = document.getElementById('term-buffer-badge');
+        if (bufBadge) bufBadge.textContent = `缓冲 ${data.total_buffered || 0} 行`;
+
+        renderTerminalLogs();
+        if (terminalAutoScroll && !isUserScrolledUp) {
+            scrollTerminalToBottom(false);
+        }
+    } catch (e) {
+        console.error('加载终端日志失败:', e);
+    }
+}
+
+function renderTerminalLogs() {
+    const screen = document.getElementById('terminal-screen');
+    const countLabel = document.getElementById('term-rendered-count');
+    if (!screen) return;
+
+    if (!terminalLogs || terminalLogs.length === 0) {
+        screen.innerHTML = `
+            <div class="term-welcome-line">
+                <span class="term-prefix">[SYSTEM]</span> 终端运行就绪。暂无匹配条件的日志输出。
+            </div>
+        `;
+        if (countLabel) countLabel.textContent = '0';
+        return;
+    }
+
+    let html = `
+        <div class="term-welcome-line">
+            <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100/300/1000 行切换与上下滚动查看。
+        </div>
+    `;
+
+    terminalLogs.forEach(entry => {
+        html += buildTerminalRowHtml(entry);
+    });
+
+    screen.innerHTML = html;
+    if (countLabel) countLabel.textContent = String(terminalLogs.length);
+}
+
+function buildTerminalRowHtml(entry) {
+    const lvl = (entry.level || 'INFO').toUpperCase();
+    let lvlClass = 'term-lvl-info';
+    let msgClass = '';
+    if (lvl === 'WARN' || lvl === 'WARNING') {
+        lvlClass = 'term-lvl-warn';
+        msgClass = 'is-warn';
+    } else if (lvl === 'ERROR' || lvl === 'CRITICAL') {
+        lvlClass = 'term-lvl-error';
+        msgClass = 'is-error';
+    }
+
+    const t = entry.time_short || (entry.time ? entry.time.slice(11, 19) : '--:--:--');
+    const loggerName = entry.logger || 'root';
+    const msg = escapeHtml(entry.message || '');
+
+    return `
+        <div class="term-row" data-id="${entry.id || 0}">
+            <span class="term-time">[${t}]</span>
+            <span class="term-lvl ${lvlClass}">${lvl.slice(0, 4)}</span>
+            <span class="term-logger">[${escapeHtml(loggerName)}]</span>
+            <span class="term-msg ${msgClass}">${msg}</span>
+        </div>
+    `;
+}
+
+function onNewTerminalLog(logEntry) {
+    if (!logEntry) return;
+
+    // 更新缓冲统计
+    const bufBadge = document.getElementById('term-buffer-badge');
+    if (bufBadge) {
+        const cur = parseInt(bufBadge.textContent.replace(/\D/g, '') || '0', 10);
+        bufBadge.textContent = `缓冲 ${cur + 1} 行`;
+    }
+
+    // 检查是否符合当前筛选条件
+    if (terminalLevel !== 'ALL') {
+        const lvl = (logEntry.level || '').toUpperCase();
+        if (terminalLevel === 'WARN' && lvl !== 'WARNING' && lvl !== 'WARN') return;
+        if (terminalLevel !== 'WARN' && lvl !== terminalLevel) return;
+    }
+    if (terminalKeyword) {
+        const kw = terminalKeyword.toLowerCase();
+        const msg = (logEntry.message || '').toLowerCase();
+        const lgr = (logEntry.logger || '').toLowerCase();
+        if (!msg.includes(kw) && !lgr.includes(kw)) return;
+    }
+
+    terminalLogs.push(logEntry);
+    if (terminalLogs.length > terminalLimit) {
+        terminalLogs.shift();
+    }
+
+    const screen = document.getElementById('terminal-screen');
+    const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+    if (!screen || activeTab !== 'tab-terminal') return;
+
+    // 追加到 DOM
+    const rowDiv = document.createElement('div');
+    rowDiv.innerHTML = buildTerminalRowHtml(logEntry);
+    const child = rowDiv.firstElementChild;
+    if (child) screen.appendChild(child);
+
+    // 移除超出上限的多余旧节点
+    const rows = screen.querySelectorAll('.term-row');
+    if (rows.length > terminalLimit) {
+        for (let i = 0; i < rows.length - terminalLimit; i++) {
+            rows[i].remove();
+        }
+    }
+
+    const countLabel = document.getElementById('term-rendered-count');
+    if (countLabel) countLabel.textContent = String(Math.min(rows.length, terminalLimit));
+
+    if (terminalAutoScroll) {
+        if (!isUserScrolledUp) {
+            scrollTerminalToBottom(false);
+        } else {
+            const pill = document.getElementById('term-scroll-pill');
+            if (pill) pill.style.display = 'block';
+        }
+    }
+}
+
+function scrollTerminalToBottom(smooth = false) {
+    const screen = document.getElementById('terminal-screen');
+    if (!screen) return;
+    if (smooth) {
+        screen.scrollTo({ top: screen.scrollHeight, behavior: 'smooth' });
+    } else {
+        screen.scrollTop = screen.scrollHeight;
+    }
+}
+
+async function clearTerminal() {
+    try {
+        await fetch('/api/terminal/clear', { method: 'POST' });
+        terminalLogs = [];
+        const screen = document.getElementById('terminal-screen');
+        if (screen) {
+            screen.innerHTML = `
+                <div class="term-welcome-line">
+                    <span class="term-prefix">[SYSTEM]</span> 终端日志已清屏。
+                </div>
+            `;
+        }
+        const countLabel = document.getElementById('term-rendered-count');
+        if (countLabel) countLabel.textContent = '0';
+        showToast('终端显示与日志缓冲已清空', 'info');
+    } catch (e) {
+        console.error('清空终端异常:', e);
+    }
+}
+
+
+/* ==========================================================================
+   购买记录模块 (Orders & Purchase Records Module)
+   ========================================================================== */
+
+let ordersCurrentPage = 1;
+const ordersPageSize = 15;
+let ordersFilterStatus = 'all';
+let ordersFilterType = 'all';
+let ordersFilterKeyword = '';
+
+function initOrdersModule() {
+    const statusSelect = document.getElementById('filter-order-status');
+    const typeSelect = document.getElementById('filter-order-type');
+    const kwInput = document.getElementById('filter-order-keyword');
+    const btnRefresh = document.getElementById('btn-refresh-orders');
+    const btnExport = document.getElementById('btn-export-orders');
+    const btnClear = document.getElementById('btn-clear-orders');
+    const detailModal = document.getElementById('order-detail-modal');
+    const detailClose = document.getElementById('order-detail-close');
+    const detailOk = document.getElementById('order-detail-btn-ok');
+
+    if (statusSelect) {
+        statusSelect.addEventListener('change', () => {
+            ordersFilterStatus = statusSelect.value;
+            ordersCurrentPage = 1;
+            loadOrders();
+        });
+    }
+
+    if (typeSelect) {
+        typeSelect.addEventListener('change', () => {
+            ordersFilterType = typeSelect.value;
+            ordersCurrentPage = 1;
+            loadOrders();
+        });
+    }
+
+    if (kwInput) {
+        let kwTimer = null;
+        kwInput.addEventListener('input', () => {
+            clearTimeout(kwTimer);
+            kwTimer = setTimeout(() => {
+                ordersFilterKeyword = kwInput.value.trim();
+                ordersCurrentPage = 1;
+                loadOrders();
+            }, 300);
+        });
+    }
+
+    if (btnRefresh) {
+        btnRefresh.addEventListener('click', () => {
+            loadOrders();
+            loadOrderStats();
+            showToast('已刷新购买记录流水', 'info');
+        });
+    }
+
+    if (btnExport) {
+        btnExport.addEventListener('click', () => {
+            window.location.href = '/api/orders/export?format=csv';
+        });
+    }
+
+    if (btnClear) {
+        btnClear.addEventListener('click', async () => {
+            if (!confirm('确定要清空全部购买与抢购历史记录吗？此操作无法撤销。')) return;
+            try {
+                const res = await fetch('/api/orders/clear', { method: 'POST' });
+                const d = await res.json();
+                if (d.status === 'ok') {
+                    showToast('已成功清空购买记录', 'success');
+                    loadOrders();
+                    loadOrderStats();
+                } else {
+                    showToast(d.message || '清空失败', 'error');
+                }
+            } catch (e) {
+                showToast('清空请求异常: ' + e.message, 'error');
+            }
+        });
+    }
+
+    if (detailClose) detailClose.addEventListener('click', () => { if (detailModal) detailModal.style.display = 'none'; });
+    if (detailOk) detailOk.addEventListener('click', () => { if (detailModal) detailModal.style.display = 'none'; });
+    if (detailModal) {
+        detailModal.addEventListener('click', (e) => {
+            if (e.target === detailModal) detailModal.style.display = 'none';
+        });
+    }
+}
+
+async function loadOrderStats() {
+    try {
+        const res = await fetch('/api/orders/stats');
+        if (!res.ok) return;
+        const s = await res.json();
+
+        const elTotal = document.getElementById('stat-orders-total');
+        const elSuccess = document.getElementById('stat-orders-success');
+        const elDry = document.getElementById('stat-orders-dry-run');
+        const elSoldout = document.getElementById('stat-orders-soldout');
+        const elSpent = document.getElementById('stat-orders-spent');
+
+        if (elTotal) elTotal.textContent = String(s.total || 0);
+        if (elSuccess) elSuccess.textContent = String(s.success_count || 0);
+        if (elDry) elDry.textContent = String(s.dry_run_count || 0);
+        if (elSoldout) elSoldout.textContent = String(s.soldout_count || 0);
+        if (elSpent) {
+            const spent = parseInt(s.total_spent || 0, 10);
+            elSpent.textContent = `￥${spent.toLocaleString()}`;
+        }
+    } catch (e) {
+        console.error('加载订单统计异常:', e);
+    }
+}
+
+async function loadOrders() {
+    const container = document.getElementById('orders-container');
+    const pagination = document.getElementById('orders-pagination');
+    if (!container) return;
+
+    try {
+        const url = `/api/orders?status=${ordersFilterStatus}&trigger_type=${ordersFilterType}&keyword=${encodeURIComponent(ordersFilterKeyword)}&page=${ordersCurrentPage}&page_size=${ordersPageSize}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        const orders = data.orders || [];
+
+        if (orders.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-icon">🛍️</div>
+                    <div class="empty-title">暂未查询到符合条件的购买记录</div>
+                    <div class="empty-desc">当监控规则自动触发加购下单、或在【全数据收录】中点击一键抢购时，详细流水与执行回执将记录于此处。</div>
+                </div>
+            `;
+            if (pagination) pagination.style.display = 'none';
+            return;
+        }
+
+        let html = '';
+        orders.forEach(o => {
+            html += buildOrderCardHtml(o);
+        });
+        container.innerHTML = html;
+
+        // 绑定卡片上的按钮事件
+        container.querySelectorAll('.btn-order-detail').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const orderId = btn.getAttribute('data-id');
+                const order = orders.find(x => x.id === orderId);
+                if (order) openOrderDetailModal(order);
+            });
+        });
+
+        container.querySelectorAll('.btn-order-delete').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const orderId = btn.getAttribute('data-id');
+                if (!confirm(`确定要删除此条记录 #${orderId} 吗？`)) return;
+                try {
+                    const r = await fetch('/api/orders/delete', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: orderId }),
+                    });
+                    const d = await r.json();
+                    if (d.status === 'ok') {
+                        showToast('记录已删除', 'info');
+                        loadOrders();
+                        loadOrderStats();
+                    }
+                } catch (e) {
+                    showToast('删除失败: ' + e.message, 'error');
+                }
+            });
+        });
+
+        // 渲染分页
+        renderOrdersPagination(data.total, data.page, data.total_pages);
+    } catch (e) {
+        console.error('加载订单列表失败:', e);
+    }
+}
+
+function buildOrderCardHtml(o) {
+    const isDry = Boolean(o.dry_run);
+    const status = o.status || 'FAILED';
+
+    let statusBadge = '';
+    if (status === 'SUCCESS') {
+        statusBadge = `<span class="badge-order-status status-success">🟢 实盘下单成功</span>`;
+    } else if (status === 'DRY_RUN_SUCCESS') {
+        statusBadge = `<span class="badge-order-status status-dryrun">🔵 仿真模拟成功</span>`;
+    } else if (status === 'SOLDOUT') {
+        statusBadge = `<span class="badge-order-status status-soldout">🛑 官方已售罄</span>`;
+    } else {
+        statusBadge = `<span class="badge-order-status status-failed">🔴 下单未完成</span>`;
+    }
+
+    let triggerTag = '';
+    if (o.trigger_type === 'auto') {
+        triggerTag = `<span class="badge-tag" style="background:rgba(139,92,246,0.15);color:#a78bfa;">📌 监控自动抢购: ${escapeHtml(o.rule_name || '默认规则')}</span>`;
+    } else if (o.trigger_type === 'quick_buy') {
+        triggerTag = `<span class="badge-tag" style="background:rgba(236,72,153,0.15);color:#f472b6;">⚡ 看板一键抢购</span>`;
+    } else {
+        triggerTag = `<span class="badge-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;">🧪 接口联调测试</span>`;
+    }
+
+    const imgUrl = o.img_url ? `/img_proxy?url=${encodeURIComponent(o.img_url)}` : '';
+    const thumbHtml = imgUrl
+        ? `<img src="${escapeHtml(imgUrl)}" class="order-thumb" alt="商品" loading="lazy" onerror="this.src='/static/favicon.ico'">`
+        : `<span style="font-size:24px;">🧸</span>`;
+
+    const priceText = o.price_str || (o.price ? `￥${Number(o.price).toLocaleString()}` : '--');
+    const payMethodMap = { cod: '代金引換 (货到付款)', credit: 'クレジットカード', bank: '銀行振込', store: '店頭支払' };
+    const payText = payMethodMap[o.payment_method] || o.payment_method || '默认方式';
+
+    return `
+        <div class="order-card" data-id="${o.id}">
+            <div class="order-thumb-wrap">
+                ${thumbHtml}
+            </div>
+            <div class="order-info">
+                <div class="order-title-line">
+                    ${statusBadge}
+                    <a href="${escapeHtml(o.url || 'https://www.dollyteria.com/product/' + o.item_id)}" target="_blank" class="order-title" title="${escapeHtml(o.title)}">
+                        [#${escapeHtml(o.item_id)}] ${escapeHtml(o.title)}
+                    </a>
+                </div>
+                <div class="order-meta-line">
+                    <span style="font-weight:700;color:#fbbf24;">${escapeHtml(priceText)}</span>
+                    <span class="sep">•</span>
+                    <span>${triggerTag}</span>
+                    <span class="sep">•</span>
+                    <span>支付: ${escapeHtml(payText)}</span>
+                    <span class="sep">•</span>
+                    <span>耗时: ⚡ ${o.duration_ms || 0}ms</span>
+                    <span class="sep">•</span>
+                    <span>${escapeHtml(o.time_str || '')}</span>
+                </div>
+                ${o.message ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">反馈: ${escapeHtml(o.message)}</div>` : ''}
+            </div>
+            <div class="order-actions">
+                <button class="btn btn-sm btn-ghost btn-order-detail" data-id="${o.id}" title="查看详细执行流水与官网回执">
+                    <span>📄 详情回执</span>
+                </button>
+                <a href="${escapeHtml(o.url || 'https://www.dollyteria.com/product/' + o.item_id)}" target="_blank" class="btn btn-sm btn-secondary" title="在官网打开商品详情页">
+                    <span>🌐 官网页面</span>
+                </a>
+                <button class="btn btn-sm btn-danger-soft btn-order-delete" data-id="${o.id}" title="删除此记录">
+                    <span>🗑️</span>
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function renderOrdersPagination(total, page, totalPages) {
+    const el = document.getElementById('orders-pagination');
+    if (!el) return;
+    if (totalPages <= 1) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = 'flex';
+    let html = `
+        <div class="pagination-info">共 ${total} 条记录，第 ${page} / ${totalPages} 页</div>
+        <div class="pagination-btns">
+            <button class="btn btn-xs btn-ghost" ${page <= 1 ? 'disabled' : ''} id="btn-order-page-prev">上一页</button>
+            <span class="page-current">${page}</span>
+            <button class="btn btn-xs btn-ghost" ${page >= totalPages ? 'disabled' : ''} id="btn-order-page-next">下一页</button>
+        </div>
+    `;
+    el.innerHTML = html;
+
+    const prev = document.getElementById('btn-order-page-prev');
+    const next = document.getElementById('btn-order-page-next');
+    if (prev && page > 1) {
+        prev.addEventListener('click', () => {
+            ordersCurrentPage--;
+            loadOrders();
+        });
+    }
+    if (next && page < totalPages) {
+        next.addEventListener('click', () => {
+            ordersCurrentPage++;
+            loadOrders();
+        });
+    }
+}
+
+function openOrderDetailModal(order) {
+    const modal = document.getElementById('order-detail-modal');
+    const body = document.getElementById('order-detail-body');
+    if (!modal || !body) return;
+
+    const details = order.raw_details || {};
+    const stepsLog = details.steps_log || [];
+
+    let stepsHtml = '';
+    if (stepsLog && stepsLog.length > 0) {
+        stepsHtml = stepsLog.map(s => `<li>${escapeHtml(s)}</li>`).join('');
+    } else {
+        stepsHtml = `<li>${escapeHtml(order.message || '无额外流水日志')}</li>`;
+    }
+
+    body.innerHTML = `
+        <div class="order-detail-grid">
+            <div class="order-detail-key">订单流水号:</div>
+            <div class="order-detail-val"><code>${escapeHtml(order.id)}</code></div>
+
+            <div class="order-detail-key">商品名称与ID:</div>
+            <div class="order-detail-val">
+                <strong>[#${escapeHtml(order.item_id)}]</strong> ${escapeHtml(order.title)}
+            </div>
+
+            <div class="order-detail-key">下单状态:</div>
+            <div class="order-detail-val">
+                <strong>${escapeHtml(order.status)}</strong> (${order.dry_run ? '仿真模拟 DRY-RUN' : '实盘真实下单'})
+            </div>
+
+            <div class="order-detail-key">支付方式:</div>
+            <div class="order-detail-val">${escapeHtml(order.payment_method || 'cod')}</div>
+
+            <div class="order-detail-key">触发来源:</div>
+            <div class="order-detail-val">${escapeHtml(order.rule_name || order.trigger_type || 'auto')}</div>
+
+            <div class="order-detail-key">执行耗时:</div>
+            <div class="order-detail-val">⚡ ${order.duration_ms || 0} ms (${order.retries || 0} 轮重试)</div>
+
+            <div class="order-detail-key">记录时间:</div>
+            <div class="order-detail-val">${escapeHtml(order.time_str || '')}</div>
+        </div>
+
+        <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">抢购链路流水与官网返回:</div>
+        <ul class="order-steps-log">
+            ${stepsHtml}
+        </ul>
+    `;
+
+    modal.style.display = 'flex';
+}
+
+function onNewOrderRecorded(order) {
+    if (!order) return;
+    const currentTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+
+    // Toast 提示
+    const isSuccess = order.status === 'SUCCESS' || order.status === 'DRY_RUN_SUCCESS';
+    const title = `🛍️ 下单结果: [${order.item_id}] ${order.status}`;
+    showToast(title, isSuccess ? 'success' : 'warning');
+
+    if (currentTab !== 'tab-orders') {
+        const badge = document.getElementById('orders-badge');
+        if (badge) {
+            badge.style.display = 'inline-block';
+            const count = parseInt(badge.textContent || '0', 10) + 1;
+            badge.textContent = String(count);
+        }
+    } else {
+        loadOrders();
+        loadOrderStats();
+    }
+}
+
+
+/* ==========================================================================
+   监控规则快速检索与批量控制 (Watches Filter & Batch Controls)
+   ========================================================================== */
+
+function initWatchesFilter() {
+    const input = document.getElementById('watch-filter-keyword');
+    const btnEnableAll = document.getElementById('btn-batch-enable-watches');
+    const btnDisableAll = document.getElementById('btn-batch-disable-watches');
+
+    if (input) {
+        input.addEventListener('input', () => {
+            const kw = input.value.trim().toLowerCase();
+            const cards = document.querySelectorAll('#watches-container .watch-card');
+            cards.forEach(card => {
+                const text = card.textContent.toLowerCase();
+                card.style.display = (!kw || text.includes(kw)) ? '' : 'none';
+            });
+        });
+    }
+
+    if (btnEnableAll) {
+        btnEnableAll.addEventListener('click', async () => {
+            if (!currentConfig || !currentConfig.watches) return;
+            currentConfig.watches.forEach(w => w.enabled = true);
+            await saveConfig();
+            renderWatches();
+            showToast('已一键开启全部监控规则', 'success');
+        });
+    }
+
+    if (btnDisableAll) {
+        btnDisableAll.addEventListener('click', async () => {
+            if (!currentConfig || !currentConfig.watches) return;
+            currentConfig.watches.forEach(w => w.enabled = false);
+            await saveConfig();
+            renderWatches();
+            showToast('已一键暂停全部监控规则', 'info');
+        });
+    }
+}
+
+
+/* ==========================================================================
+   上新发现库存筛选与检索 (Feed Filter & Actions)
+   ========================================================================== */
+
+function initFeedFilter() {
+    const filterBtns = document.querySelectorAll('#feed-stock-filter-group .btn-segment');
+    const searchInput = document.getElementById('feed-search-input');
+    const btnCheckNow = document.getElementById('btn-check-now-feed');
+
+    filterBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            filterBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            applyFeedFilter();
+        });
+    });
+
+    if (searchInput) {
+        searchInput.addEventListener('input', () => applyFeedFilter());
+    }
+
+    if (btnCheckNow) {
+        btnCheckNow.addEventListener('click', async () => {
+            btnCheckNow.disabled = true;
+            btnCheckNow.innerHTML = `<span>⏳ 检测中...</span>`;
+            try {
+                const res = await fetch('/api/check_now', { method: 'POST' });
+                const d = await res.json();
+                showToast(`检测完成: 扫描 ${d.scanned_count || 0} 件，命中 ${d.new_items_count || 0} 件`, 'info');
+            } catch (e) {
+                showToast('检测失败: ' + e.message, 'error');
+            } finally {
+                btnCheckNow.disabled = false;
+                btnCheckNow.innerHTML = `<span>🔍 立即检测一次</span>`;
+            }
+        });
+    }
+
+}
+
+function applyFeedFilter() {
+    const activeFilterBtn = document.querySelector('#feed-stock-filter-group .btn-segment.active');
+    const filterType = activeFilterBtn ? activeFilterBtn.getAttribute('data-filter') : 'all';
+    const searchInput = document.getElementById('feed-search-input');
+    const kw = searchInput ? searchInput.value.trim().toLowerCase() : '';
+
+    const cards = document.querySelectorAll('#feed-container .product-card');
+    cards.forEach(card => {
+        let matchFilter = true;
+        const isSoldOut = card.classList.contains('sold-out') || card.querySelector('.badge-sold-out');
+
+        if (filterType === 'in_stock') {
+            matchFilter = !isSoldOut;
+        } else if (filterType === 'sold_out') {
+            matchFilter = Boolean(isSoldOut);
+        }
+
+        let matchKw = true;
+        if (kw) {
+            matchKw = card.textContent.toLowerCase().includes(kw);
+        }
+
+        card.style.display = (matchFilter && matchKw) ? '' : 'none';
+    });
+}
+
+// ==================== 预设关键词筛选与管理模块 ====================
+async function initPresetKeywords() {
+    // 1. 先尝试从 localStorage 恢复
+    const localKw = localStorage.getItem('dollyteria_archive_preset_kw');
+    if (localKw) {
+        try {
+            const parsed = JSON.parse(localKw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                archiveState.presetKeywords = parsed;
+            }
+        } catch (e) {
+            archiveState.presetKeywords = [];
+        }
+    }
+    const localMode = localStorage.getItem('dollyteria_preset_match_mode');
+    if (localMode === 'any' || localMode === 'all') {
+        archiveState.presetMatchMode = localMode;
+    }
+
+    updatePresetModeUI();
+    renderPresetKeywordChips();
+
+    // 2. 从服务端获取最新同步的关键词列表并对齐
+    try {
+        const res = await fetch('/api/archive/preset_keywords');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.status === 'ok' && Array.isArray(data.keywords)) {
+                archiveState.presetKeywords = data.keywords;
+                localStorage.setItem('dollyteria_archive_preset_kw', JSON.stringify(data.keywords));
+                renderPresetKeywordChips();
+            }
+        }
+    } catch (err) {
+        console.warn('获取服务端预设关键词失败，使用本地缓存:', err);
+    }
+
+    // 3. 组合模式切换 (AND / OR)
+    const modeBtns = document.querySelectorAll('#preset-mode-switch .btn-mode');
+    modeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const mode = btn.getAttribute('data-mode') || 'all';
+            if (archiveState.presetMatchMode !== mode) {
+                archiveState.presetMatchMode = mode;
+                localStorage.setItem('dollyteria_preset_match_mode', mode);
+                updatePresetModeUI();
+                if (archiveState.selectedPresetKeywords.length > 1) {
+                    loadArchiveProducts(1);
+                }
+            }
+        });
+    });
+
+    // 4. 添加关键词输入框与按钮
+    const inputNewKw = document.getElementById('input-new-preset-kw');
+    const btnAddKw = document.getElementById('btn-add-preset-kw');
+
+    const doAddKeyword = async () => {
+        if (!inputNewKw) return;
+        const kw = inputNewKw.value.trim();
+        if (!kw) {
+            showToast('请输入关键词内容', 'warning');
+            return;
+        }
+        if (archiveState.presetKeywords.includes(kw)) {
+            showToast(`关键词 "${kw}" 已在预设列表中`, 'info');
+            inputNewKw.value = '';
+            return;
+        }
+
+        archiveState.presetKeywords.push(kw);
+        renderPresetKeywordChips();
+        inputNewKw.value = '';
+        savePresetKeywords();
+        showToast(`已添加预设筛选词: "${kw}"`, 'success');
+    };
+
+    if (btnAddKw) {
+        btnAddKw.addEventListener('click', doAddKeyword);
+    }
+    if (inputNewKw) {
+        inputNewKw.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                doAddKeyword();
+            }
+        });
+    }
+
+}
+
+function updatePresetModeUI() {
+    const modeBtns = document.querySelectorAll('#preset-mode-switch .btn-mode');
+    modeBtns.forEach(btn => {
+        if (btn.getAttribute('data-mode') === archiveState.presetMatchMode) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+
+function renderPresetKeywordChips() {
+    const container = document.getElementById('preset-keywords-container');
+    if (!container) return;
+
+    if (!archiveState.presetKeywords || archiveState.presetKeywords.length === 0) {
+        container.innerHTML = '<span style="font-size: 12px; color: var(--text-muted); padding: 4px 0;">暂无预设词，可在右侧输入框添加常用搜索词</span>';
+        return;
+    }
+
+    container.innerHTML = archiveState.presetKeywords.map(kw => {
+        const isSelected = archiveState.selectedPresetKeywords.includes(kw);
+        return `
+            <button type="button" class="filter-chip preset-chip ${isSelected ? 'active' : ''}" data-kw="${escapeHtml(kw)}" title="点击多选切换筛选 [${escapeHtml(kw)}]">
+                <span class="preset-chip-text">${escapeHtml(kw)}</span>
+                <span class="btn-del-preset" title="删除预设词 [${escapeHtml(kw)}]" data-del-kw="${escapeHtml(kw)}">&times;</span>
+            </button>
+        `;
+    }).join('');
+
+    container.querySelectorAll('.preset-chip').forEach(chip => {
+        const kw = chip.getAttribute('data-kw');
+        const delBtn = chip.querySelector('.btn-del-preset');
+
+        chip.addEventListener('click', (e) => {
+            if (e.target === delBtn || delBtn.contains(e.target)) return;
+
+            const idx = archiveState.selectedPresetKeywords.indexOf(kw);
+            if (idx >= 0) {
+                archiveState.selectedPresetKeywords.splice(idx, 1);
+                chip.classList.remove('active');
+            } else {
+                archiveState.selectedPresetKeywords.push(kw);
+                chip.classList.add('active');
+            }
+
+
+            // 即时触发库存状态、新品状态与关键词的三组组合筛选
+            loadArchiveProducts(1);
+        });
+
+        if (delBtn) {
+            delBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                removePresetKeyword(kw);
+            });
+        }
+    });
+}
+
+async function removePresetKeyword(kw) {
+    archiveState.presetKeywords = archiveState.presetKeywords.filter(k => k !== kw);
+    const selIdx = archiveState.selectedPresetKeywords.indexOf(kw);
+    const wasSelected = selIdx >= 0;
+    if (wasSelected) {
+        archiveState.selectedPresetKeywords.splice(selIdx, 1);
+    }
+    renderPresetKeywordChips();
+    savePresetKeywords();
+    showToast(`已删除预设关键词: "${kw}"`, 'info');
+    if (wasSelected) {
+        loadArchiveProducts(1);
+    }
+}
+
+async function savePresetKeywords() {
+    localStorage.setItem('dollyteria_archive_preset_kw', JSON.stringify(archiveState.presetKeywords));
+    try {
+        await fetch('/api/archive/preset_keywords', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keywords: archiveState.presetKeywords })
+        });
+    } catch (e) {
+        console.warn('保存预设关键词到服务端异常:', e);
+    }
+}
+
+// ==================== 顶部下单模式指示器 ====================
+function updateTopOrderModeIndicator() {
+    const indicator = elements.orderModeIndicator || document.getElementById('order-mode-indicator');
+    const textEl = elements.orderModeText || document.getElementById('order-mode-text');
+    if (!indicator || !textEl) return;
+
+    const ao = currentConfig?.auto_order || {};
+    const isEnabled = Boolean(ao.enabled);
+
+    indicator.classList.remove('mode-dry-run', 'mode-real', 'mode-disabled');
+
+    if (isEnabled) {
+        indicator.classList.add('mode-real');
+        textEl.textContent = '🚨 自动下单模式';
+        indicator.title = '当前处于自动下单模式 (命中规则将直接向官网提交真实订单)，点击直达设置';
+    } else {
+        indicator.classList.add('mode-disabled');
+        textEl.textContent = '🔔 提醒模式';
+        indicator.title = '当前处于提醒模式 (命中规则仅发送通知提醒，不下单)，点击直达设置';
+    }
+}

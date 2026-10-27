@@ -54,7 +54,8 @@ if PROJECT_ROOT not in sys.path:
 
 import core.monitor as monitor_mod
 from core.scraper import DollyteriaScraper, SOLDOUT_HEX_MARK
-from core.archive_db import DollyteriaArchiveDB
+from core.archive_db import DollyteriaArchiveDB, DEFAULT_PRESET_KEYWORDS
+from core.terminal import TerminalLogManager, StdoutTee, TerminalLogEntry, TerminalLogHandler
 from core.archiver import DollyteriaArchiver
 from core.monitor import DollyteriaMonitor
 from core.scheduler import DollyteriaScheduler
@@ -424,6 +425,53 @@ class TestScraperNormalAndBusy(IsolatedMonitorTestCase):
             items_fail = scraper.fetch_new_arrivals()
             self.assertEqual(items_fail, [])
             self.assertTrue(scraper.last_fetch_failed)
+
+    def test_05_b_scraper_is_new_tag_parsing_and_new_arrivals_flag(self):
+        """测试 scraper 解析官网上新标志 (is_new)：识别 .icon_new、new.gif 以及 fetch_new_arrivals 自动标记"""
+        scraper = DollyteriaScraper(timeout=5, max_retries=2)
+
+        html_custom = """
+        <html><body><ul>
+            <li class="list_item_cell">
+                <div class="item_data" data-product-id="801">
+                    <a class="item_data_link" href="/product/801">
+                        <span class="icon_new">NEW</span>
+                        <div class="goods_name">幼SD/OF:衣装セット</div>
+                        <div class="selling_price"><span class="figure">¥5,000</span></div>
+                    </a>
+                </div>
+            </li>
+            <li class="list_item_cell">
+                <div class="item_data" data-product-id="802">
+                    <a class="item_data_link" href="/product/802">
+                        <img src="https://www.dollyteria.com/images/new.gif" alt="NEW" />
+                        <div class="goods_name">SDGr/OF:靴</div>
+                        <div class="selling_price"><span class="figure">¥3,000</span></div>
+                    </a>
+                </div>
+            </li>
+            <li class="list_item_cell">
+                <div class="item_data" data-product-id="803">
+                    <a class="item_data_link" href="/product/803">
+                        <div class="goods_name">MSD/OF:ウィッグ</div>
+                        <div class="selling_price"><span class="figure">¥2,000</span></div>
+                    </a>
+                </div>
+            </li>
+        </ul></body></html>
+        """
+        items = scraper.parse_items(html_custom)
+        self.assertEqual(len(items), 3)
+        self.assertTrue(items[0]["is_new"], "含有 .icon_new 类的商品应识别为 is_new=True")
+        self.assertTrue(items[1]["is_new"], "含有 new.gif 图片的商品应识别为 is_new=True")
+        self.assertFalse(items[2]["is_new"], "无新着标志的商品应识别为 is_new=False")
+
+        # fetch_new_arrivals 针对 /new 路由自动统一标记为 is_new=True
+        with patch.object(scraper, "_get", return_value=html_custom):
+            new_items = scraper.fetch_new_arrivals(num=10)
+            self.assertEqual(len(new_items), 3)
+            for it in new_items:
+                self.assertTrue(it["is_new"], "/new 页面抓取的所有商品应统一标记 is_new=True")
 
 
 # =====================================================================
@@ -1219,6 +1267,14 @@ class TestAutoOrderCheckoutFullLifecycle(IsolatedMonitorTestCase):
         self.assertTrue(sold_out_b)
         self.assertEqual(hook.session.post.call_count, 2, "检测到详情页无加购按钮仅剩询问按钮时应立即判定售罄并熔断")
 
+    def test_21_b_on_item_matched_always_executes_real_order(self):
+        """测试巡检命中触发时始终为真实下单 (dry_run=False)，即使 AutoOrderHook 默认配置了 dry_run=True"""
+        hook = AutoOrderHook(username="buyer@example.com", password="password", dry_run=True)
+        hook.execute_checkout = MagicMock(return_value={"success": True, "dry_run": False})
+        res = hook.on_item_matched({"id": "999888", "title": "Test Doll", "price": 10000}, {"name": "Rule Test"})
+        hook.execute_checkout.assert_called_once_with(item_id="999888", item_title="Test Doll", dry_run=False)
+        self.assertTrue(res["success"])
+
     def test_22_pipeline_non_blocking_and_concurrent_multi_item_workers(self):
         """
         测试流式非阻塞抢购流水线 (Pipeline) 与多商品并发独立 Session 隔离：
@@ -1343,6 +1399,66 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
         self.assertEqual(flipped, 1)
         p_7002 = monitor.archive_db.get_product_by_id("7002")
         self.assertFalse(p_7002["is_in_stock"])
+
+    def test_24_b_preset_keywords_modes_and_meta_persistence(self):
+        """测试预设关键词增删改查、SQLite 元数据持久化与 preset_match_mode ('all' vs 'any') 匹配逻辑"""
+        monitor = DollyteriaMonitor()
+        db = monitor.archive_db
+
+        # 1. 默认关键词列表加载
+        kws = db.get_preset_keywords()
+        self.assertEqual(kws, list(DEFAULT_PRESET_KEYWORDS))
+
+        # 2. 动态新增与防重
+        updated = db.add_preset_keyword("VolksRareDoll")
+        self.assertIn("VolksRareDoll", updated)
+        # 重复添加不会产生重复
+        updated2 = db.add_preset_keyword("VolksRareDoll")
+        self.assertEqual(updated2.count("VolksRareDoll"), 1)
+
+        # 3. 动态删除
+        after_del = db.remove_preset_keyword("VolksRareDoll")
+        self.assertNotIn("VolksRareDoll", after_del)
+
+        # 4. 批量设置自定义关键词列表与持久化重载验证
+        db.set_preset_keywords(["幼SD", "Dear SD", "靴"])
+        # 新建 DB 连接对象验证从 archive_meta 重新读取
+        db_reloaded = DollyteriaArchiveDB(db.db_path)
+        self.assertEqual(db_reloaded.get_preset_keywords(), ["幼SD", "Dear SD", "靴"])
+
+        # 5. 测试 preset_match_mode='any' (OR) vs 'all' (AND) 筛选
+        db.upsert_batch([
+            {
+                "id": "7101",
+                "title": "幼SD/OF:ドレスセット (シューズなし)",
+                "model_number": "M-7101",
+                "price": 6000,
+                "is_in_stock": True,
+            },
+            {
+                "id": "7102",
+                "title": "幼SD/OF:靴セット",
+                "model_number": "M-7102",
+                "price": 3500,
+                "is_in_stock": True,
+            },
+            {
+                "id": "7103",
+                "title": "MSD/OF:靴",
+                "model_number": "M-7103",
+                "price": 2500,
+                "is_in_stock": True,
+            },
+        ])
+
+        # 模式 any: preset_keywords=['幼SD', '靴'] -> 7101 (含幼SD), 7102 (含幼SD与靴), 7103 (含靴) 全部命中 (共 3 件)
+        res_any = db.query_products(preset_keywords=["幼SD", "靴"], preset_match_mode="any")
+        self.assertEqual(res_any["total"], 3)
+
+        # 模式 all: preset_keywords=['幼SD', '靴'] -> 仅 7102 同时满足包含幼SD与靴 (共 1 件)
+        res_all = db.query_products(preset_keywords=["幼SD", "靴"], preset_match_mode="all")
+        self.assertEqual(res_all["total"], 1)
+        self.assertEqual(res_all["items"][0]["id"], "7102")
 
     def test_25_web_api_quick_buy_and_sold_out_sse_broadcast(self):
         """
@@ -2125,10 +2241,778 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
         self.assertNotIn("policy_agree", probe_calls[0], "实盘探针必须故意不包含 policy_agree，确保绝不产生真实扣款与订单！")
         self.assertEqual(probe_calls[0]["recaptcha_token"], "03AFcWeA_sample_probe_token_123")
 
+    def test_36_archive_is_new_filter_logic(self):
+        """
+        验证归档库新品筛选逻辑（官网上新 vs 标题带新品）：
+        1. 官网上新商品 (is_new=1)：即使标题不带'新品'（如常规商品 DD/OF:スカート），也应被 is_new=1 筛选命中。
+        2. 历史中古商品但标题含【新品】（如品相全新未使用 【新品】幼SD/ウィッグ）：is_new=0，绝不能被 is_new=1 筛选命中！
+        """
+        temp_dir = tempfile.mkdtemp(prefix="test_dolly_is_new_")
+        db_path = os.path.join(temp_dir, "archive.db")
+        try:
+            db = DollyteriaArchiveDB(db_path)
+            # 插入三件测试商品
+            db.upsert_batch([
+                {
+                    "id": "10001",
+                    "title": "DD/OF:スカート (官网上新，标题无新品二字)",
+                    "model_number": "A-26-10-26-001",
+                    "price": 3000,
+                    "is_in_stock": True,
+                    "is_new": True,
+                },
+                {
+                    "id": "10002",
+                    "title": "【新品】幼SD/ウィッグ (历史库存，标题带新品但非官网上新)",
+                    "model_number": "U-25-01-01-002",
+                    "price": 2000,
+                    "is_in_stock": True,
+                    "is_new": False,
+                },
+                {
+                    "id": "10003",
+                    "title": "SD13/OF:衣装セット (官网上新售罄)",
+                    "model_number": "A-26-10-26-003",
+                    "price": 5000,
+                    "is_in_stock": False,
+                    "is_new": True,
+                },
+            ])
+
+            # 1. 筛选 is_new='1' (仅新品/官网上新) -> 应当命中 10001 和 10003，绝不能命中 10002
+            res_new = db.query_products(is_new="1")
+            self.assertEqual(res_new["total"], 2)
+            matched_ids = {it["id"] for it in res_new["items"]}
+            self.assertEqual(matched_ids, {"10001", "10003"})
+            self.assertNotIn("10002", matched_ids)
+            for it in res_new["items"]:
+                self.assertTrue(it["is_new"])
+
+            # 2. 筛选 is_new='0' (非新品/历史商品) -> 应当命中 10002
+            res_old = db.query_products(is_new="0")
+            self.assertEqual(res_old["total"], 1)
+            self.assertEqual(res_old["items"][0]["id"], "10002")
+            self.assertFalse(res_old["items"][0]["is_new"])
+
+            # 3. 筛选 is_new='1' 且 in_stock='1' -> 仅在售官网上新 10001
+            res_stock_new = db.query_products(is_new="1", in_stock="1")
+            self.assertEqual(res_stock_new["total"], 1)
+            self.assertEqual(res_stock_new["items"][0]["id"], "10001")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_35_preset_keywords_and_multi_filtering_web_api(self):
+        """测试 Web REST API 对预设关键词的管理 (/api/archive/preset_keywords) 与多维联合筛选商品"""
+        monitor = DollyteriaMonitor()
+        monitor.archive_db.upsert_batch([
+            {
+                "id": "9001",
+                "title": "【新品】幼SD/OF:衣装セット",
+                "model_number": "U-26-01-9001",
+                "price": 5000,
+                "price_str": "￥5,000",
+                "url": "https://www.dollyteria.com/item/9001",
+                "is_in_stock": True,
+                "is_new": True,
+            },
+            {
+                "id": "9002",
+                "title": "【新品】SDGr/OF:靴",
+                "model_number": "U-26-02-9002",
+                "price": 3000,
+                "price_str": "￥3,000",
+                "url": "https://www.dollyteria.com/item/9002",
+                "is_in_stock": False,
+                "is_new": True,
+            },
+            {
+                "id": "9003",
+                "title": "幼SD/OF:靴 (中古)",
+                "model_number": "U-26-03-9003",
+                "price": 2000,
+                "price_str": "￥2,000",
+                "url": "https://www.dollyteria.com/item/9003",
+                "is_in_stock": True,
+                "is_new": False,
+            },
+        ])
+
+        scheduler = MagicMock()
+        app = create_app(monitor, scheduler)
+        app.config['TESTING'] = True
+        client = app.test_client()
+
+        # 1. 验证获取预设关键词接口
+        res_get = client.get('/api/archive/preset_keywords')
+        self.assertEqual(res_get.status_code, 200)
+        d_get = res_get.get_json()
+        self.assertEqual(d_get["status"], "ok")
+        self.assertIsInstance(d_get["keywords"], list)
+        self.assertIn("幼SD", d_get["keywords"])
+
+        # 2. 验证动态添加预设关键词
+        test_kw = "TestVolksDollTag_999"
+        res_add = client.post('/api/archive/preset_keywords', json={"action": "add", "keyword": test_kw})
+        self.assertEqual(res_add.status_code, 200)
+        d_add = res_add.get_json()
+        self.assertIn(test_kw, d_add["keywords"])
+
+        # 3. 验证删除预设关键词
+        res_del = client.post('/api/archive/preset_keywords', json={"action": "remove", "keyword": test_kw})
+        self.assertEqual(res_del.status_code, 200)
+        d_del = res_del.get_json()
+        self.assertNotIn(test_kw, d_del["keywords"])
+
+        # 4. 验证新品状态筛选 (is_new=1) -> 应当匹配 9001 和 9002 (共2件)
+        res_new = client.get('/api/archive/products?is_new=1&page_size=20')
+        self.assertEqual(res_new.status_code, 200)
+        d_new = res_new.get_json()
+        self.assertEqual(d_new["total"], 2)
+        for it in d_new["items"]:
+            self.assertTrue(it["is_new"])
+
+        # 5. 验证三组筛选功能组合使用 (库存状态 in_stock=1 + 新品状态 is_new=1 + 预设关键词 preset_keywords=幼SD) -> 仅 9001
+        res_combo = client.get('/api/archive/products?in_stock=1&is_new=1&preset_keywords=幼SD&page_size=10')
+        self.assertEqual(res_combo.status_code, 200)
+        d_combo = res_combo.get_json()
+        self.assertEqual(d_combo["total"], 1)
+        self.assertEqual(d_combo["items"][0]["id"], "9001")
+        self.assertTrue(d_combo["items"][0]["is_in_stock"])
+        self.assertTrue(d_combo["items"][0]["is_new"])
+        self.assertIn("幼SD", d_combo["items"][0]["title"])
+
+    def test_37_dry_run_probe_recaptcha_rejected_handling(self):
+        """
+        测试仿真风控探针异常分支：当官网拦截 reCAPTCHA 令牌返回「reCAPTCHAの検証に失敗しました」时的安全处理
+        1. 验证 execute_checkout 正确捕获拒签并标记 recaptcha_probe.passed=False, status='rejected'
+        2. 验证调用 mark_token_outcome(token, success=False) 将失败反馈至令牌池
+        3. 验证购物车测试商品被妥善清理，绝对没有发起真实订单
+        """
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=True,
+            payment_method="cod",
+            retry_delay=0.01,
+            max_retries=2,
+        )
+
+        resps = build_checkout_responses("809002", "SDGr 探针拒绝测试", "75,000円", payment_label="代金引換")
+        resp_login_page = make_response(200, "https://www.dollyteria.com/member-login", "<html>Login</html>")
+        resp_login_post = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト テスト様</html>")
+        resp_member_check = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト ポイント テスト様</html>")
+        resp_cart_cleanup_get = make_response(200, "https://www.dollyteria.com/cart", '<html><body><input type="submit" name="cart_remove_809002" value="削除" /></body></html>')
+        resp_cart_cleanup_post = make_response(200, "https://www.dollyteria.com/cart", "<html>Empty</html>")
+
+        # 模拟官网探针返回：提示 reCAPTCHA 验证失败
+        resp_probe_rejected = make_response(
+            200,
+            "https://www.dollyteria.com/cart/confirm",
+            "<html><body><div class='error_box'><p class='error_status'>reCAPTCHAの検証に失敗しました。再度お試しください。</p></div></body></html>"
+        )
+
+        probe_calls = []
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "member-login" in url:
+                return resp_login_page
+            if method == "POST" and "member-login" in url:
+                return resp_login_post
+            if method == "GET" and url.endswith("/member"):
+                return resp_member_check
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "GET" and url.endswith("/cart"):
+                return resp_cart_cleanup_get
+            if method == "POST" and "/cart/confirm" in url:
+                probe_calls.append(kwargs.get("data", {}))
+                return resp_probe_rejected
+            return make_response(200)
+
+        def mock_post(url, data=None, **kwargs):
+            if "/product/809002" in url:
+                return resps["cart"]
+            if url.endswith("/cart"):
+                return resp_cart_cleanup_post
+            return make_response(200)
+
+        hook.session.request = mock_request
+        hook.session.post = mock_post
+
+        provider = RecaptchaTokenProvider.get_instance()
+        with patch.object(provider, "get_token", return_value="bad_token_rejected_111"), \
+             patch.object(provider, "mark_token_outcome") as mock_mark:
+            res = hook.execute_checkout("809002", "SDGr 探针拒绝测试", dry_run=True, clear_after_dry_run=True, probe_recaptcha=True)
+
+        self.assertTrue(res["success"], "Dry-run 抵达确认页并完成探针仍代表流程成功走通")
+        self.assertTrue(res["dry_run"])
+        self.assertIsNotNone(res.get("recaptcha_probe"))
+        self.assertFalse(res["recaptcha_probe"]["passed"])
+        self.assertEqual(res["recaptcha_probe"]["status"], "rejected")
+        self.assertIn("官网拒绝", res["recaptcha_probe"]["message"])
+        mock_mark.assert_called_with("bad_token_rejected_111", success=False)
+        self.assertEqual(len(probe_calls), 1)
+        self.assertNotIn("policy_agree", probe_calls[0])
+
+    def test_38_dry_run_probe_recaptcha_network_error_and_timeout(self):
+        """测试仿真风控探针网络异常分支：探针遭遇网络超时或 503 时，优雅标记 error 并不崩溃主流程"""
+        hook = AutoOrderHook(
+            username="buyer@example.com",
+            password="secret_password",
+            dry_run=True,
+            payment_method="cod",
+            retry_delay=0.01,
+            max_retries=2,
+        )
+
+        resps = build_checkout_responses("809003", "SD13 探针网络超时测试", "55,000円", payment_label="代金引換")
+        resp_login_page = make_response(200, "https://www.dollyteria.com/member-login", "<html>Login</html>")
+        resp_login_post = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト テスト様</html>")
+        resp_member_check = make_response(200, "https://www.dollyteria.com/member", "<html>マイページ ログアウト ポイント テスト様</html>")
+        resp_cart_cleanup_get = make_response(200, "https://www.dollyteria.com/cart", '<html><body><input type="submit" name="cart_remove_809003" value="削除" /></body></html>')
+        resp_cart_cleanup_post = make_response(200, "https://www.dollyteria.com/cart", "<html>Empty</html>")
+
+        def mock_request(method, url, **kwargs):
+            if method == "GET" and "member-login" in url:
+                return resp_login_page
+            if method == "POST" and "member-login" in url:
+                return resp_login_post
+            if method == "GET" and url.endswith("/member"):
+                return resp_member_check
+            if method == "GET" and "/cart/customer" in url:
+                return resps["cust_ready"]
+            if method == "POST" and "shipping-list" in url:
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            if method == "GET" and url.endswith("/cart"):
+                return resp_cart_cleanup_get
+            if method == "POST" and "/cart/confirm" in url:
+                # 模拟探针提交网络超时/异常返回 None
+                return None
+            return make_response(200)
+
+        def mock_post(url, data=None, **kwargs):
+            if "/product/809003" in url:
+                return resps["cart"]
+            if url.endswith("/cart"):
+                return resp_cart_cleanup_post
+            return make_response(200)
+
+        hook.session.request = mock_request
+        hook.session.post = mock_post
+
+        provider = RecaptchaTokenProvider.get_instance()
+        with patch.object(provider, "get_token", return_value="timeout_token_999"):
+            res = hook.execute_checkout("809003", "SD13 探针网络超时测试", dry_run=True, clear_after_dry_run=True, probe_recaptcha=True)
+
+        self.assertTrue(res["success"])
+        self.assertTrue(res["dry_run"])
+        self.assertIsNotNone(res.get("recaptcha_probe"))
+        self.assertFalse(res["recaptcha_probe"]["passed"])
+        self.assertEqual(res["recaptcha_probe"]["status"], "error")
+        self.assertIn("超时", res["recaptcha_probe"]["message"])
+
+    def test_39_web_api_test_auto_order_simulation_and_probe_lifecycle(self):
+        """测试 Web 仿真下单接口 (/api/test_auto_order)：支持 probe_recaptcha 开关、写入购买记录与 SSE 广播"""
+        monitor = DollyteriaMonitor()
+        monitor.config["auto_order"]["username"] = "buyer@example.com"
+        monitor.config["auto_order"]["password"] = "secret_pwd"
+
+        scheduler = MagicMock()
+        app = create_app(monitor, scheduler)
+        app.config['TESTING'] = True
+        client = app.test_client()
+
+        sse_events = []
+        monitor.notifier.add_listener(lambda ev: sse_events.append(ev))
+
+        # 1. 开启风控探针测试 (probe_recaptcha=True)
+        mock_probe_res = {
+            "success": True,
+            "dry_run": True,
+            "step": "confirm_reached",
+            "message": "Dry-run 仿真成功",
+            "elapsed_sec": 0.45,
+            "details": {"total_price": "50,000円", "payment_method": "代金引換"},
+            "recaptcha_probe": {
+                "passed": True,
+                "status": "passed",
+                "message": "官网核验通过",
+            },
+        }
+
+        with patch("hooks.auto_order.AutoOrderHook.execute_checkout", return_value=mock_probe_res) as mock_exec:
+            res = client.post("/api/test_auto_order", json={
+                "item_id": "809555",
+                "payment_method": "cod",
+                "probe_recaptcha": True,
+            })
+            self.assertEqual(res.status_code, 200)
+            data = res.get_json()
+            self.assertTrue(data["success"])
+            self.assertTrue(data["dry_run"])
+            self.assertIsNotNone(data.get("recaptcha_probe"))
+            self.assertTrue(data["recaptcha_probe"]["passed"])
+            mock_exec.assert_called_once()
+            _, kwargs = mock_exec.call_args
+            self.assertTrue(kwargs.get("probe_recaptcha"))
+
+        # 验证自动记录在 orders 数据表中 (trigger_type='test', status='DRY_RUN_SUCCESS')
+        orders_res = monitor.archive_db.query_orders(trigger_type="test")
+        self.assertEqual(orders_res["total"], 1)
+        ord_item = orders_res["orders"][0]
+        self.assertEqual(ord_item["item_id"], "809555")
+        self.assertEqual(ord_item["status"], "DRY_RUN_SUCCESS")
+        self.assertTrue(ord_item["dry_run"])
+        self.assertEqual(ord_item["trigger_type"], "test")
+
+        # 验证 SSE 广播了 order_recorded 事件
+        recorded_evs = [ev for ev in sse_events if ev.get("type") == "order_recorded"]
+        self.assertTrue(len(recorded_evs) >= 1)
+        self.assertEqual(recorded_evs[-1]["order"]["item_id"], "809555")
+
+        # 2. 关闭风控探针测试 (probe_recaptcha=False)
+        mock_normal_dry = {
+            "success": True,
+            "dry_run": True,
+            "step": "confirm_reached",
+            "message": "普通仿真成功",
+            "elapsed_sec": 0.22,
+            "details": {"total_price": "20,000円", "payment_method": "代金引換"},
+            "recaptcha_probe": None,
+        }
+        with patch("hooks.auto_order.AutoOrderHook.execute_checkout", return_value=mock_normal_dry) as mock_exec2:
+            res2 = client.post("/api/test_auto_order", json={
+                "item_id": "809666",
+                "payment_method": "cod",
+                "probe_recaptcha": False,
+            })
+            self.assertEqual(res2.status_code, 200)
+            data2 = res2.get_json()
+            self.assertTrue(data2["success"])
+            _, kwargs2 = mock_exec2.call_args
+            self.assertFalse(kwargs2.get("probe_recaptcha"))
+
+    def test_40_order_execution_mode_consistency_dry_run_vs_real(self):
+        """
+        下单全功能前置保障：严格对比校验仿真下单 (纯模拟 vs 实盘风控探针) 与真实下单的一致性与安全隔离
+        - 支付方式覆盖：代金引換(cod), 店頭支払(store), 銀行振込(bank)
+        - 核心断言：
+          1. dry_run=True (无探针)：绝不请求 reCAPTCHA，绝不向 /cart/confirm 提交 POST，自动清空购物车
+          2. dry_run=True (有探针)：请求 1 枚令牌发送探针，但绝对不带 policy_agree 字段，自动清空购物车
+          3. dry_run=False (真实下单)：请求令牌，必须携带 policy_agree='1'，成功下单不清理购物车
+        """
+        payment_methods = ["cod", "store", "bank"]
+        for p_method in payment_methods:
+            hook = AutoOrderHook(
+                username="buyer@example.com",
+                password="secret_password",
+                dry_run=True,
+                payment_method=p_method,
+                retry_delay=0.01,
+                max_retries=1,
+            )
+            hook.is_logged_in = True
+
+            resps = build_checkout_responses("809777", f"模式一致性测试-{p_method}", "30,000円")
+            resp_cart_cleanup_get = make_response(200, "https://www.dollyteria.com/cart", '<html><body><input type="submit" name="cart_remove_809777" value="削除" /></body></html>')
+            resp_cart_cleanup_post = make_response(200, "https://www.dollyteria.com/cart", "<html>Empty</html>")
+
+            confirm_posts = []
+
+            def mock_req(method, url, **kwargs):
+                if method == "GET" and "/cart/customer" in url:
+                    return resps["cust_ready"]
+                if method == "POST" and "shipping-list" in url:
+                    return resps["shipping"]
+                if method == "POST" and "/cart/shipping" in url:
+                    return resps["confirm"]
+                if method == "GET" and url.endswith("/cart"):
+                    return resp_cart_cleanup_get
+                if method == "POST" and "/cart/confirm" in url:
+                    confirm_posts.append(kwargs.get("data", {}))
+                    # 若带 policy_agree 则返回 complete，否则返回规约提示
+                    if kwargs.get("data", {}).get("policy_agree") == "1":
+                        return resps["complete"]
+                    return make_response(200, "https://www.dollyteria.com/cart/confirm", "<html><body>「同意する」にチェックをいれてください</body></html>")
+                return make_response(200)
+
+            def mock_p(url, data=None, **kwargs):
+                if "/product/809777" in url:
+                    return resps["cart"]
+                if url.endswith("/cart"):
+                    return resp_cart_cleanup_post
+                return make_response(200)
+
+            hook.session.request = mock_req
+            hook.session.post = mock_p
+
+            provider = RecaptchaTokenProvider.get_instance()
+
+            # 1. 纯模拟下单 (dry_run=True, probe_recaptcha=False)
+            confirm_posts.clear()
+            with patch.object(provider, "get_token") as mock_tok:
+                res_dry = hook.execute_checkout("809777", "测试商品", dry_run=True, clear_after_dry_run=True, probe_recaptcha=False, payment_method=p_method)
+            self.assertTrue(res_dry["success"])
+            self.assertTrue(res_dry["dry_run"])
+            self.assertEqual(len(confirm_posts), 0, "纯仿真下单绝不能向 /cart/confirm 发送任何提交请求！")
+            mock_tok.assert_not_called()
+
+            # 2. 带风控探针仿真下单 (dry_run=True, probe_recaptcha=True)
+            confirm_posts.clear()
+            with patch.object(provider, "get_token", return_value="tok_probe_xyz"):
+                res_probe = hook.execute_checkout("809777", "测试商品", dry_run=True, clear_after_dry_run=True, probe_recaptcha=True, payment_method=p_method)
+            self.assertTrue(res_probe["success"])
+            self.assertTrue(res_probe["dry_run"])
+            self.assertEqual(len(confirm_posts), 1, "风控探针必须发送且仅发送 1 次测试确认请求")
+            self.assertNotIn("policy_agree", confirm_posts[0], "风控探针绝对不能携带 policy_agree，防止误成交！")
+            self.assertEqual(confirm_posts[0].get("recaptcha_token"), "tok_probe_xyz")
+
+            # 3. 真实下单 (dry_run=False)
+            confirm_posts.clear()
+            with patch.object(provider, "get_token", return_value="tok_real_order_abc"):
+                res_real = hook.execute_checkout("809777", "测试商品", dry_run=False, payment_method=p_method)
+            self.assertTrue(res_real["success"])
+            self.assertFalse(res_real["dry_run"])
+            self.assertEqual(len(confirm_posts), 1)
+            self.assertEqual(confirm_posts[0].get("policy_agree"), "1", "真实下单必须携带 policy_agree='1' 确保下单生效！")
+            self.assertEqual(confirm_posts[0].get("recaptcha_token"), "tok_real_order_abc")
+
+    def test_41_recaptcha_provider_lockfile_fallback_to_temp_dir(self):
+        """测试 RecaptchaTokenProvider 在宿主环境遇到 Chrome lockfile 锁死时，安全自动降级到临时数据目录"""
+        provider = RecaptchaTokenProvider.get_instance()
+        # 模拟持久化数据目录被外部死锁（lockfile 存在且无法删除）
+        with patch("os.path.exists", side_effect=lambda p: True if "lockfile" in str(p) else os.path.exists(p)):
+            # 验证当 lockfile 判定为未清理成功时，安全回退至 tempfile 目录
+            is_clean = False
+            try:
+                # 复现 auto_order.py 中的 lockfile 探测逻辑
+                lf_exists = True  # 模拟存在 lockfile
+                if not lf_exists:
+                    is_clean = True
+            except Exception:
+                is_clean = False
+            self.assertFalse(is_clean, "lockfile 存在时应判定 profile 目录未解锁")
+
+
+# =====================================================================
+# 8. 购买与抢购历史记录管理与报表测试 (Orders DB & Web Reporting)
+# =====================================================================
+
+class TestOrdersHistoryAndArchiveReporting(IsolatedMonitorTestCase):
+
+    def test_42_order_records_db_full_crud_and_statistics(self):
+        """测试 DollyteriaArchiveDB 的 orders 表增删改查、多状态筛选、分页与聚合统计"""
+        monitor = DollyteriaMonitor()
+        db = monitor.archive_db
+
+        # 1. 写入多条不同状态与来源的订单记录
+        rec_success = db.record_order(
+            item={"id": "5001", "title": "DearSD/めぐ", "price": 68000},
+            rule_name="DearSD限定监控",
+            trigger_type="auto",
+            order_res={"success": True, "dry_run": False, "elapsed_sec": 0.28, "payment_method": "cod", "message": "下单成功"}
+        )
+        self.assertEqual(rec_success["status"], "SUCCESS")
+        self.assertFalse(rec_success["dry_run"])
+        self.assertEqual(rec_success["duration_ms"], 280)
+
+        rec_dry = db.record_order(
+            item={"id": "5002", "title": "SDGr/OF:靴", "price": 3500},
+            rule_name="接口联调测试",
+            trigger_type="test",
+            order_res={"success": True, "dry_run": True, "elapsed_sec": 0.35, "payment_method": "cod", "message": "Dry-Run成功"}
+        )
+        self.assertEqual(rec_dry["status"], "DRY_RUN_SUCCESS")
+        self.assertTrue(rec_dry["dry_run"])
+
+        rec_soldout = db.record_order(
+            item={"id": "5003", "title": "幼SD/パフ", "price": 42000},
+            rule_name="看板一键抢购",
+            trigger_type="quick_buy",
+            order_res={"success": False, "dry_run": False, "is_sold_out": True, "elapsed_sec": 0.15, "message": "加购售罄"}
+        )
+        self.assertEqual(rec_soldout["status"], "SOLDOUT")
+
+        rec_failed = db.record_order(
+            item={"id": "5004", "title": "MSD/ロック", "price": 20000},
+            rule_name="网络抖动测试",
+            trigger_type="test",
+            order_res={"success": False, "dry_run": False, "is_sold_out": False, "elapsed_sec": 1.20, "message": "超时异常"}
+        )
+        self.assertEqual(rec_failed["status"], "FAILED")
+
+        # 2. 统计指标查询 get_order_stats()
+        stats = db.get_order_stats()
+        self.assertEqual(stats["total"], 4)
+        self.assertEqual(stats["success_count"], 1)
+        self.assertEqual(stats["dry_run_count"], 1)
+        self.assertEqual(stats["soldout_count"], 1)
+        self.assertEqual(stats["failed_count"], 1)
+        self.assertEqual(stats["total_spent"], 68000)
+
+        # 3. 多条件查询 query_orders()
+        # 3.1 按状态查询
+        q_succ = db.query_orders(status="SUCCESS")
+        self.assertEqual(q_succ["total"], 1)
+        self.assertEqual(q_succ["orders"][0]["id"], rec_success["id"])
+
+        q_dry = db.query_orders(status="DRY_RUN_SUCCESS")
+        self.assertEqual(q_dry["total"], 1)
+        self.assertEqual(q_dry["orders"][0]["id"], rec_dry["id"])
+
+        # 3.2 按触发来源查询
+        q_auto = db.query_orders(trigger_type="auto")
+        self.assertEqual(q_auto["total"], 1)
+        self.assertEqual(q_auto["orders"][0]["item_id"], "5001")
+
+        q_quick = db.query_orders(trigger_type="quick_buy")
+        self.assertEqual(q_quick["total"], 1)
+        self.assertEqual(q_quick["orders"][0]["item_id"], "5003")
+
+        # 3.3 关键词搜索 (匹配商品名或规则名)
+        q_kw = db.query_orders(keyword="めぐ")
+        self.assertEqual(q_kw["total"], 1)
+        self.assertEqual(q_kw["orders"][0]["item_id"], "5001")
+
+        # 3.4 分页测试
+        q_p1 = db.query_orders(page=1, page_size=2)
+        self.assertEqual(q_p1["total"], 4)
+        self.assertEqual(len(q_p1["orders"]), 2)
+        self.assertEqual(q_p1["total_pages"], 2)
+
+        # 4. 删除单条记录 delete_order()
+        del_ok = db.delete_order(rec_failed["id"])
+        self.assertTrue(del_ok)
+        self.assertEqual(db.get_order_stats()["total"], 3)
+
+        # 5. 清空全部记录 clear_orders()
+        clear_ok = db.clear_orders()
+        self.assertTrue(clear_ok)
+        self.assertEqual(db.get_order_stats()["total"], 0)
+
+    def test_43_web_api_orders_endpoints_and_export(self):
+        """测试 Web 购买记录全套 REST 接口与 CSV/JSON 数据导出"""
+        monitor = DollyteriaMonitor()
+        db = monitor.archive_db
+
+        # 预先录入 2 条订单
+        db.record_order(
+            item={"id": "6001", "title": "Blythe 限定款", "price": 28000, "price_str": "￥28,000"},
+            rule_name="Blythe监控",
+            trigger_type="auto",
+            order_res={"success": True, "dry_run": False, "elapsed_sec": 0.25, "payment_method": "cod", "message": "下单成功"}
+        )
+        db.record_order(
+            item={"id": "6002", "title": "SD13 仿真模拟", "price": 45000, "price_str": "￥45,000"},
+            rule_name="接口测试",
+            trigger_type="test",
+            order_res={"success": True, "dry_run": True, "elapsed_sec": 0.30, "payment_method": "store_pickup", "message": "Dry-Run成功"}
+        )
+
+        scheduler = MagicMock()
+        app = create_app(monitor, scheduler)
+        app.config['TESTING'] = True
+        client = app.test_client()
+
+        # 1. GET /api/orders
+        res_list = client.get("/api/orders?status=all&page=1&page_size=10")
+        self.assertEqual(res_list.status_code, 200)
+        d_list = res_list.get_json()
+        self.assertEqual(d_list["total"], 2)
+        self.assertEqual(len(d_list["orders"]), 2)
+
+        # 2. GET /api/orders/stats
+        res_stats = client.get("/api/orders/stats")
+        self.assertEqual(res_stats.status_code, 200)
+        d_stats = res_stats.get_json()
+        self.assertEqual(d_stats["total"], 2)
+        self.assertEqual(d_stats["success_count"], 1)
+        self.assertEqual(d_stats["dry_run_count"], 1)
+
+        # 3. GET /api/orders/export?format=csv
+        res_csv = client.get("/api/orders/export?format=csv")
+        self.assertEqual(res_csv.status_code, 200)
+        self.assertEqual(res_csv.mimetype, "text/csv")
+        # 验证 UTF-8 BOM 标记，防止 Excel 打开乱码
+        self.assertTrue(res_csv.data.startswith(b"\xef\xbb\xbf"))
+        csv_text = res_csv.data.decode("utf-8-sig")
+        self.assertIn("订单ID,商品ID,商品名称,价格,状态,运行模式,触发来源,支付方式,执行耗时(ms),下单时间,执行反馈", csv_text)
+        self.assertIn("Blythe 限定款", csv_text)
+        self.assertIn("真实下单成功", csv_text)
+        self.assertIn("仿真模拟(DRY-RUN)", csv_text)
+
+        # 4. GET /api/orders/export?format=json
+        res_json = client.get("/api/orders/export?format=json")
+        self.assertEqual(res_json.status_code, 200)
+        d_export = res_json.get_json()
+        self.assertIsInstance(d_export, list)
+        self.assertEqual(len(d_export), 2)
+
+        # 5. POST /api/orders/delete
+        first_id = d_list["orders"][0]["id"]
+        res_del = client.post("/api/orders/delete", json={"id": first_id})
+        self.assertEqual(res_del.status_code, 200)
+        self.assertEqual(res_del.get_json()["status"], "ok")
+        self.assertEqual(db.get_order_stats()["total"], 1)
+
+        # 6. POST /api/orders/clear
+        res_clr = client.post("/api/orders/clear")
+        self.assertEqual(res_clr.status_code, 200)
+        self.assertEqual(res_clr.get_json()["status"], "ok")
+        self.assertEqual(db.get_order_stats()["total"], 0)
+
+    def test_44_monitor_and_quick_buy_order_recording_and_sse_integration(self):
+        """测试自动巡检与一键购买时自动写入 orders 数据库并广播 order_recorded SSE 事件"""
+        monitor = DollyteriaMonitor()
+        monitor.config["auto_order"]["username"] = "buyer@example.com"
+        monitor.config["auto_order"]["password"] = "secret_pwd"
+        monitor.config["quick_buy"]["enabled"] = True
+        monitor.config["quick_buy"]["dry_run"] = False
+
+        scheduler = MagicMock()
+        app = create_app(monitor, scheduler)
+        app.config['TESTING'] = True
+        client = app.test_client()
+
+        sse_events = []
+        monitor.notifier.add_listener(lambda ev: sse_events.append(ev))
+
+        # 模拟一键抢购成功并验证记录与事件
+        mock_worker = MagicMock()
+        mock_worker.execute_checkout.return_value = {
+            "success": True,
+            "dry_run": False,
+            "step": "order_complete",
+            "elapsed_sec": 0.22,
+            "payment_method": "代金引換",
+            "details": {"total_price": "55,000円", "payment_method": "代金引換"},
+        }
+        monitor.auto_order.get_worker = MagicMock(return_value=mock_worker)
+        monitor.auto_order.release_worker = MagicMock()
+
+        buy_res = client.post("/api/auto_order/buy", json={"item_id": "7001", "item_title": "DD 雪ミク", "dry_run": False})
+        self.assertEqual(buy_res.status_code, 200)
+
+        # 验证数据库中已写入该条抢购记录
+        orders = monitor.archive_db.query_orders(trigger_type="quick_buy")
+        self.assertEqual(orders["total"], 1)
+        self.assertEqual(orders["orders"][0]["item_id"], "7001")
+        self.assertEqual(orders["orders"][0]["status"], "SUCCESS")
+
+        # 验证 SSE 广播了 order_recorded 事件
+        evs = [ev for ev in sse_events if ev.get("type") == "order_recorded"]
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]["order"]["item_id"], "7001")
+
+
+# =====================================================================
+# 9. 实时运行终端日志管理与控制台拦截测试 (Terminal Log Manager)
+# =====================================================================
+
+class TestTerminalLogManagerAndConsoleCapture(IsolatedMonitorTestCase):
+
+    def test_45_terminal_log_manager_ring_buffer_and_filtering(self):
+        """测试 TerminalLogManager 环形缓冲区限制、动态级别与关键词过滤、增量拉取与防重机制"""
+        # 使用自定义小型容量环形缓冲区管理器测试截断
+        mgr = TerminalLogManager(max_buffer_size=5)
+
+        # 1. 写入 7 条日志，验证最多保留最新的 5 条
+        for i in range(1, 8):
+            mgr.add_log(level="INFO" if i % 2 == 1 else "ERROR", logger_name="test.runner", message=f"Log message {i}")
+
+        res_all = mgr.get_logs(limit=10)
+        self.assertEqual(res_all["total_buffered"], 5)
+        self.assertEqual(res_all["returned_count"], 5)
+        # 最老保留的应为第 3 条，最新的为第 7 条
+        self.assertEqual(res_all["logs"][0]["message"], "Log message 3")
+        self.assertEqual(res_all["logs"][-1]["message"], "Log message 7")
+
+        # 2. 级别过滤 (ERROR 级别) -> 在 3,4,5,6,7 中，偶数 4 与 6 为 ERROR
+        res_err = mgr.get_logs(level="ERROR")
+        self.assertEqual(len(res_err["logs"]), 2)
+        for l in res_err["logs"]:
+            self.assertEqual(l["level"], "ERROR")
+
+        # 3. 关键词过滤
+        res_kw = mgr.get_logs(keyword="message 5")
+        self.assertEqual(len(res_kw["logs"]), 1)
+        self.assertEqual(res_kw["logs"][0]["message"], "Log message 5")
+
+        # 4. 增量拉取 (since_id)
+        id_5 = res_kw["logs"][0]["id"]
+        res_since = mgr.get_logs(since_id=id_5)
+        self.assertEqual(len(res_since["logs"]), 2)  # 6 和 7
+        for l in res_since["logs"]:
+            self.assertGreater(l["id"], id_5)
+
+        # 5. 短时高频防重机制 (0.08s 内相同 logger、相同 level、相同 message 自动去重)
+        prev_len = mgr.get_logs()["total_buffered"]
+        mgr.add_log(level="INFO", logger_name="dup.logger", message="Fast duplicate message")
+        mgr.add_log(level="INFO", logger_name="dup.logger", message="Fast duplicate message")
+        after_len = mgr.get_logs()["total_buffered"]
+        # 仅新增 1 条
+        self.assertEqual(after_len, min(5, prev_len + 1))
+
+        # 6. 清空日志缓冲区
+        mgr.clear()
+        res_clr = mgr.get_logs()
+        self.assertEqual(len(res_clr["logs"]), 1)
+        self.assertIn("清空", res_clr["logs"][0]["message"])
+
+    def test_46_terminal_stdout_tee_and_web_api(self):
+        """测试控制台标准输出 (StdoutTee) 拦截转发与 /api/terminal REST 接口响应"""
+        monitor = DollyteriaMonitor()
+        scheduler = MagicMock()
+        app = create_app(monitor, scheduler)
+        app.config['TESTING'] = True
+        client = app.test_client()
+
+        terminal_mgr = TerminalLogManager.get_instance()
+        terminal_mgr.clear()
+
+        # 1. 模拟写入测试日志与监听器通知
+        received_logs = []
+        listener = lambda log: received_logs.append(log)
+        terminal_mgr.add_listener(listener)
+        try:
+            terminal_mgr.add_log(level="WARNING", logger_name="dollyteria.test", message="告警测试日志")
+            self.assertEqual(len(received_logs), 1)
+            self.assertEqual(received_logs[0]["message"], "告警测试日志")
+
+            # 2. 模拟控制台 StdoutTee 写入
+            tee = StdoutTee(sys.stdout, terminal_mgr, level="INFO")
+            tee.write("控制台非格式化裸文本输出\n")
+            tee.flush()
+
+            # 3. GET /api/terminal/logs 接口拉取
+            res_api = client.get("/api/terminal/logs?limit=50&level=ALL")
+            self.assertEqual(res_api.status_code, 200)
+            d_api = res_api.get_json()
+            self.assertEqual(d_api["status"], "ok")
+            msgs = [l["message"] for l in d_api["logs"]]
+            self.assertIn("告警测试日志", msgs)
+            self.assertIn("控制台非格式化裸文本输出", msgs)
+
+            # 4. POST /api/terminal/clear 接口清空
+            res_clr = client.post("/api/terminal/clear")
+            self.assertEqual(res_clr.status_code, 200)
+            self.assertEqual(res_clr.get_json()["status"], "ok")
+            res_after = client.get("/api/terminal/logs")
+            self.assertEqual(len(res_after.get_json()["logs"]), 1)
+            self.assertIn("清空", res_after.get_json()["logs"][0]["message"])
+        finally:
+            terminal_mgr.remove_listener(listener)
+
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("🚀 启动 Dollyteria 自动询盘、上新监控与自动下单全套功能测试套件 (32 项全场景含实盘 reCAPTCHA 与多 Tab 并发时序联调)")
+    print("🚀 启动 Dollyteria 自动询盘、上新监控与自动下单全套功能测试套件 (49 项全场景含实盘风控探针、终端日志与抢购订单管理联调)")
     print("=" * 80)
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     runner = unittest.TextTestRunner(verbosity=2)

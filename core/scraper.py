@@ -139,6 +139,9 @@ class DollyteriaScraper:
 
                 is_in_stock = not (is_sold_out_img or is_sold_out_text)
 
+                # 官网上新 (新着) 标志判断: 检查是否含有官方 new.gif 标志或 .icon_new 标签
+                is_new_icon = bool(cell.select_one(".icon_new, img[src*='new.gif']"))
+
                 items.append({
                     "id": str(pid),
                     "title": name,
@@ -148,6 +151,7 @@ class DollyteriaScraper:
                     "url": href,
                     "img_url": img_url,
                     "is_in_stock": is_in_stock,
+                    "is_new": is_new_icon,
                     "found_at": int(time.time()),
                 })
             except Exception as e:
@@ -170,7 +174,10 @@ class DollyteriaScraper:
             params["available"] = "1"
 
         html = self._get(url, params=params)
-        return self.parse_items(html)
+        items = self.parse_items(html)
+        for it in items:
+            it["is_new"] = True
+        return items
 
     def search_products(self, keyword: str, num: int = 100, page: int = 1, in_stock_only: bool = True) -> List[Dict]:
         """
@@ -216,6 +223,7 @@ class DollyteriaScraper:
         title_el = soup.select_one("h1.goods_name") or soup.find("h1")
         title = title_el.get_text(strip=True) if title_el else ""
 
+        is_new_icon = bool(soup.select_one(".icon_new, img[src*='new.gif']"))
         is_in_stock = has_cart_btn and has_cart_form
 
         return {
@@ -225,4 +233,5 @@ class DollyteriaScraper:
             "price": price_num,
             "price_str": price_str,
             "is_in_stock": is_in_stock,
+            "is_new": is_new_icon,
         }

@@ -24,9 +24,12 @@
             </div>
 
             <div class="header-status">
-                <div id="status-indicator" class="status-pill status-idle">
+                <div id="status-indicator" class="status-pill status-idle" title="当前监控调度器状态">
                     <span class="pulsing-dot"></span>
                     <span id="status-text">监控就绪</span>
+                </div>
+                <div id="order-mode-indicator" class="status-pill order-mode-pill mode-disabled" title="当前下单执行模式：点击可快捷跳转到自动下单设置">
+                    <span id="order-mode-text">🔔 提醒模式</span>
                 </div>
             </div>
 
@@ -106,24 +109,31 @@
                 <button class="tab-btn active" data-tab="tab-watches">
                     <span>📌 监控规则</span>
                 </button>
+                <button class="tab-btn" data-tab="tab-feed">
+                    <span>✨ 上新发现</span>
+                    <span id="feed-badge" class="badge-count" style="display:none;">0</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-archive">
+                    <span>📦 全数据收录</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-orders">
+                    <span>🛍️ 购买记录</span>
+                    <span id="orders-badge" class="badge-count" style="display:none;">0</span>
+                </button>
                 <button class="tab-btn" data-tab="tab-schedule">
                     <span>⏰ 定时触发设置</span>
                 </button>
-                <button class="tab-btn" data-tab="tab-notifiers">
-                    <span>🔔 通知渠道扩展</span>
-                </button>
                 <button class="tab-btn" data-tab="tab-auto-order">
-                    <span>🛒 自动下单接口</span>
+                    <span>🛒 自动下单设置</span>
                 </button>
-                <button class="tab-btn" data-tab="tab-feed">
-                    <span>✨ 上新发现实时流</span>
-                    <span id="feed-badge" class="badge-count" style="display:none;">0</span>
+                <button class="tab-btn" data-tab="tab-terminal">
+                    <span>💻 实时运行终端</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-notifiers">
+                    <span>🔔 通知设置</span>
                 </button>
                 <button class="tab-btn" data-tab="tab-security">
-                    <span>🔐 访问安全与密码</span>
-                </button>
-                <button class="tab-btn" data-tab="tab-archive">
-                    <span>📦 数据收录与档案</span>
+                    <span>🔐 安全设置</span>
                 </button>
             </div>
 
@@ -131,12 +141,19 @@
             <div id="tab-watches" class="tab-pane active">
                 <div class="pane-header">
                     <div>
-                        <h2 class="pane-title">商品监控规则列表</h2>
+                        <h2 class="pane-title">📌 商品监控规则列表</h2>
                         <p class="pane-desc">设定要监控的商品关键词、排除词、价格区间，系统将持续追踪匹配的上新商品</p>
                     </div>
-                    <button id="btn-add-watch" class="btn btn-accent">
-                        <span>＋ 添加新规则</span>
-                    </button>
+                    <div class="header-actions">
+                        <div class="header-search-wrap">
+                            <input type="text" id="watch-filter-keyword" class="form-control form-control-sm" placeholder="🔍 快速搜索规则/关键词...">
+                        </div>
+                        <button id="btn-batch-enable-watches" class="btn btn-sm btn-secondary" title="一键开启所有规则">▶️ 全部启用</button>
+                        <button id="btn-batch-disable-watches" class="btn btn-sm btn-ghost" title="一键暂停所有规则">⏸️ 全部暂停</button>
+                        <button id="btn-add-watch" class="btn btn-accent">
+                            <span>＋ 添加新规则</span>
+                        </button>
+                    </div>
                 </div>
 
                 <div id="watches-container" class="watches-grid">
@@ -144,7 +161,333 @@
                 </div>
             </div>
 
-            <!-- Tab 2: 定时与调度设置 -->
+            <!-- Tab 2: 上新发现 -->
+            <div id="tab-feed" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">✨ 上新发现实时商品流</h2>
+                        <p class="pane-desc">实时展示监控命中的有货新品与补货商品，支持一键在库筛选与闪电买断</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-check-now-feed" class="btn btn-primary btn-sm">
+                            <span>🔍 立即检测一次</span>
+                        </button>
+                        <button id="btn-clear-feed" class="btn btn-sm btn-ghost">清空显示列表</button>
+                    </div>
+                </div>
+
+                <!-- 筛选与控制栏 -->
+                <div class="feed-filter-bar glass">
+                    <div class="filter-group">
+                        <span class="filter-label">库存状态:</span>
+                        <div class="btn-group-segmented" id="feed-stock-filter-group">
+                            <button class="btn-segment active" data-filter="all">全部商品</button>
+                            <button class="btn-segment" data-filter="in_stock">仅在库</button>
+                            <button class="btn-segment" data-filter="sold_out">仅已售罄</button>
+                        </div>
+                    </div>
+                    <div class="filter-search-box">
+                        <input type="text" id="feed-search-input" class="form-control form-control-sm" placeholder="🔍 快速搜索已发现商品名称/ID...">
+                    </div>
+                </div>
+
+                <div id="feed-container" class="feed-grid">
+                    <div class="empty-state">
+                        <div class="empty-icon">🎀</div>
+                        <div class="empty-title">暂未发现新商品</div>
+                        <div class="empty-desc">当监控触发且发现符合您关键字的有货商品时，将第一时间在此处卡片化展示并发出警报！</div>
+                    </div>
+                </div>
+            </div>
+
+<!-- Tab 3: 全数据收录 -->
+            <div id="tab-archive" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">📦 全数据收录与全站档案</h2>
+                        <p class="pane-desc">支持全自动温和抓取全站所有在售与售罄商品（全站约 4 万件），建立个人行情档案并提供毫秒级搜索</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-sync-new-stream" class="btn btn-secondary" title="一键将官网最新上新流 (/new 前 500 件新品) 全部完整录入档案库">
+                            <span>⚡ 同步最新上新至档案</span>
+                        </button>
+                        <button id="btn-sync-stock-now" class="btn btn-primary" title="仅抓取当前官网在售列表 (~8MB 流量)，将已被买走/下架的商品精准自动标记为已售罄">
+                            <span>🔄 立即盘点在库状态</span>
+                        </button>
+                        <button id="btn-sync-baseline-from-archive" class="btn btn-accent" title="将数据库中所有在售商品设为监控基准">
+                            <span>🎯 同步在售商品为监控基准</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 采集控制卡片 -->
+                <div class="settings-card glass archive-control-card">
+                    <div class="archive-stats-grid">
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">📚</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num" id="arch-stat-total">0</div>
+                                <div class="arch-stat-label">已收录总商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">🟢</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num text-success" id="arch-stat-in-stock">0</div>
+                                <div class="arch-stat-label">当前在售商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">⚪</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num text-muted" id="arch-stat-sold-out">0</div>
+                                <div class="arch-stat-label">历史已售罄商品</div>
+                            </div>
+                        </div>
+                        <div class="arch-stat-box">
+                            <div class="arch-stat-icon">⏱️</div>
+                            <div class="arch-stat-info">
+                                <div class="arch-stat-num" id="arch-stat-progress">0%</div>
+                                <div class="arch-stat-label" id="arch-stat-progress-sub">就绪待命</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 进度条容器 -->
+                    <div class="crawler-progress-wrap" id="crawler-progress-wrap">
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="crawler-progress-fill" style="width: 0%;"></div>
+                        </div>
+                        <div class="progress-bar-labels">
+                            <span id="crawler-progress-text">准备就绪 (全站约 40,500 件商品，单页 100 件平缓抓取)</span>
+                            <span id="crawler-speed-text">单页延时: 1.2s</span>
+                        </div>
+                    </div>
+
+                    <!-- 采集操作按钮与设置行 -->
+                    <div class="crawler-actions-row">
+                        <div class="crawler-btn-group">
+                            <button id="btn-crawler-start" class="btn btn-primary">
+                                <span>▶️ 开始全站收录</span>
+                            </button>
+                            <button id="btn-crawler-pause" class="btn btn-warning" style="display:none;">
+                                <span>⏸️ 暂停收录</span>
+                            </button>
+                            <button id="btn-crawler-resume" class="btn btn-success" style="display:none;">
+                                <span>▶️ 继续收录</span>
+                            </button>
+                            <button id="btn-crawler-stop" class="btn btn-danger" style="display:none;">
+                                <span>⏹️ 停止</span>
+                            </button>
+                        </div>
+                        <div class="crawler-config-inline">
+                            <label class="inline-label">单页抓取延时:</label>
+                            <select id="crawler-delay-select" class="form-select inline-select">
+                                <option value="1.0">1.0 秒 (稍快)</option>
+                                <option value="1.2" selected>1.2 秒 (推荐)</option>
+                                <option value="1.8">1.8 秒 (更安全)</option>
+                                <option value="2.5">2.5 秒 (极稳)</option>
+                            </select>
+                            <label class="inline-label" style="margin-left: 12px;">指定起始页:</label>
+                            <input type="number" id="crawler-start-page" class="form-control inline-input" min="1" placeholder="断点页(留空从头/续爬)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 档案商品搜索与过滤区 -->
+                <div class="archive-search-container glass">
+                    <div class="archive-search-bar">
+                        <div class="search-input-wrap">
+                            <span class="search-icon">🔍</span>
+                            <input type="text" id="archive-search-kw" class="form-control search-input" placeholder="输入关键词匹配 (例如: 幼SD、ティアラ、Blythe、或商品编号 S-26...)...">
+                            <button id="btn-archive-clear-search" class="btn-clear-search" title="清除关键词" style="display:none;">&times;</button>
+                        </div>
+                        <button id="btn-archive-search" class="btn btn-primary search-action-btn">
+                            <span>搜索档案</span>
+                        </button>
+                    </div>
+
+                    <div class="archive-filter-row">
+                        <div class="filter-group">
+                            <span class="filter-label">库存状态:</span>
+                            <div class="filter-chips" id="filter-stock-chips">
+                                <button class="filter-chip active" data-stock="all">全部商品</button>
+                                <button class="filter-chip" data-stock="1">🟢 仅在售</button>
+                                <button class="filter-chip" data-stock="0">⚪ 仅售罄</button>
+                            </div>
+                        </div>
+
+                        <div class="filter-group">
+                            <span class="filter-label">新品状态:</span>
+                            <div class="filter-chips" id="filter-new-chips">
+                                <button class="filter-chip active" data-new="all">全部商品</button>
+                                <button class="filter-chip" data-new="1" title="仅筛选官网最新上新流 (/new) 中的新上架商品">✨ 仅新品</button>
+                            </div>
+                        </div>
+
+                        <div class="filter-group right-align">
+                            <span class="filter-label">排序方式:</span>
+                            <select id="archive-sort-select" class="form-select sort-select">
+                                <option value="id_desc" selected>官网最新上新 (商品编号 ↓)</option>
+                                <option value="id_asc">官网最早历史 (商品编号 ↑)</option>
+                                <option value="crawl_time_desc">最近本地抓取时间 ↓</option>
+                                <option value="price_asc">价格从低到高 ↑</option>
+                                <option value="price_desc">价格从高到低 ↓</option>
+                            </select>
+                            <span id="archive-match-count" class="match-count-badge">共 0 件匹配</span>
+                        </div>
+                    </div>
+
+                    <!-- 预设筛选关键词行 -->
+                    <div class="archive-preset-row">
+                        <div class="preset-header">
+                            <span class="filter-label">预设关键词:</span>
+                            <div class="preset-match-mode-wrap">
+                                <span class="preset-mode-tip">逻辑:</span>
+                                <div class="preset-mode-switch" id="preset-mode-switch" title="点击切换多选关键词的组合逻辑">
+                                    <button class="btn-mode active" data-mode="all" title="同时包含所有选中的关键词 (AND)">AND 全部</button>
+                                    <button class="btn-mode" data-mode="any" title="包含任一选中的关键词即可 (OR)">OR 任一</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="preset-chips-container" id="preset-keywords-container">
+                            <!-- 动态渲染预设关键词标签 -->
+                        </div>
+                        <div class="preset-add-wrap">
+                            <input type="text" id="input-new-preset-kw" class="preset-kw-input" placeholder="+ 添加预设词 (回车保存)..." maxlength="30">
+                            <button id="btn-add-preset-kw" class="btn-add-kw" title="添加新的预设关键词">添加</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 商品展示网格 -->
+                <div id="archive-products-grid" class="archive-products-grid">
+                    <!-- 动态加载商品卡片 -->
+                </div>
+
+                <!-- 分页条 -->
+                <div id="archive-pagination" class="archive-pagination" style="display:none;">
+                    <button id="btn-arch-prev" class="btn btn-ghost pagination-btn">◀ 上一页</button>
+                    <div class="pagination-info">
+                        第 <span id="arch-page-current">1</span> / <span id="arch-page-total">1</span> 页
+                    </div>
+                    <button id="btn-arch-next" class="btn btn-ghost pagination-btn">下一页 ▶</button>
+                    <div class="pagination-jump">
+                        <span>跳转</span>
+                        <input type="number" id="input-arch-jump" class="form-control jump-input" min="1">
+                        <button id="btn-arch-jump" class="btn btn-ghost jump-btn">GO</button>
+                    </div>
+                </div>
+
+                <!-- 空状态展示 -->
+                <div id="archive-empty" class="feed-empty-state glass" style="display:none;">
+                    <div class="empty-icon">📦</div>
+                    <div class="empty-title">暂未收录商品或无匹配结果</div>
+                    <div class="empty-desc">您可以点击上方【开始全站收录】启动后台温和抓取，或调整搜索词与筛选条件重试。</div>
+                </div>
+            </div>
+
+            <!-- Tab 4: 购买记录 -->
+            <div id="tab-orders" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">🛍️ 购买与抢购历史记录</h2>
+                        <p class="pane-desc">记录自动监控秒级下单、看板一键抢购与接口测试的详细流水，支持耗时追溯与回执查阅</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-refresh-orders" class="btn btn-ghost btn-sm" title="刷新购买流水">
+                            <span>🔄 刷新</span>
+                        </button>
+                        <button id="btn-export-orders" class="btn btn-secondary btn-sm" title="导出购买记录为 CSV 表格">
+                            <span>📥 导出 CSV</span>
+                        </button>
+                        <button id="btn-clear-orders" class="btn btn-danger-soft btn-sm" title="清空历史购买记录">
+                            <span>🗑️ 清空记录</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 统计看板 -->
+                <div class="orders-stats-grid">
+                    <div class="order-stat-card glass">
+                        <div class="stat-icon">📦</div>
+                        <div class="stat-info">
+                            <div class="stat-num" id="stat-orders-total">0</div>
+                            <div class="stat-sub">累计抢购流水</div>
+                        </div>
+                    </div>
+                    <div class="order-stat-card glass stat-success">
+                        <div class="stat-icon">🎉</div>
+                        <div class="stat-info">
+                            <div class="stat-num text-success" id="stat-orders-success">0</div>
+                            <div class="stat-sub">实盘下单成功</div>
+                        </div>
+                    </div>
+                    <div class="order-stat-card glass stat-info">
+                        <div class="stat-icon">🧪</div>
+                        <div class="stat-info">
+                            <div class="stat-num text-primary" id="stat-orders-dry-run">0</div>
+                            <div class="stat-sub">仿真模拟成功</div>
+                        </div>
+                    </div>
+                    <div class="order-stat-card glass stat-soldout">
+                        <div class="stat-icon">🛑</div>
+                        <div class="stat-info">
+                            <div class="stat-num text-muted" id="stat-orders-soldout">0</div>
+                            <div class="stat-sub">官方售罄熔断</div>
+                        </div>
+                    </div>
+                    <div class="order-stat-card glass stat-spent">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-info">
+                            <div class="stat-num text-accent" id="stat-orders-spent">￥0</div>
+                            <div class="stat-sub">实盘成交总额</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 筛选工具栏 -->
+                <div class="orders-filter-bar glass">
+                    <div class="filter-controls-left">
+                        <div class="form-group-inline">
+                            <label class="inline-label">订单状态:</label>
+                            <select id="filter-order-status" class="form-control form-control-sm">
+                                <option value="all">全部状态</option>
+                                <option value="SUCCESS">🟢 实盘下单成功</option>
+                                <option value="DRY_RUN_SUCCESS">🔵 仿真模拟成功</option>
+                                <option value="SOLDOUT">🛑 官方已售罄</option>
+                                <option value="FAILED">🔴 下单提交失败</option>
+                            </select>
+                        </div>
+                        <div class="form-group-inline">
+                            <label class="inline-label">触发来源:</label>
+                            <select id="filter-order-type" class="form-control form-control-sm">
+                                <option value="all">全部来源</option>
+                                <option value="auto">📌 监控规则自动触发</option>
+                                <option value="quick_buy">⚡ 看板一键抢购</option>
+                                <option value="test">🧪 接口联调测试</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="filter-controls-right">
+                        <input type="text" id="filter-order-keyword" class="form-control form-control-sm" placeholder="🔍 搜索商品ID、名称或触发规则...">
+                    </div>
+                </div>
+
+                <!-- 订单列表容器 -->
+                <div id="orders-container" class="orders-container">
+                    <div class="empty-state" id="orders-empty-state">
+                        <div class="empty-icon">🛍️</div>
+                        <div class="empty-title">暂无购买记录</div>
+                        <div class="empty-desc">当监控规则自动触发加购下单、或在【全数据收录】中点击一键抢购时，详细流水与执行回执将记录于此处。</div>
+                    </div>
+                </div>
+
+                <!-- 分页栏 -->
+                <div id="orders-pagination" class="pagination-bar" style="display:none;"></div>
+            </div>
+
+<!-- Tab 5: 定时触发设置 -->
             <div id="tab-schedule" class="tab-pane">
                 <div class="pane-header">
                     <div>
@@ -274,10 +617,311 @@
                             <span class="form-tip">推荐 05:00:00 (夜间订单沉淀后且访问量极低时段)，格式 HH:MM:SS</span>
                         </div>
                     </div>
+                    <!-- 在库全量盘点状态条 -->
+                    <div class="archive-sync-status-bar" id="archive-sync-status-bar">
+                        <div class="sync-status-left">
+                            <span class="sync-status-badge" id="sched-sync-status-badge">⏰ 每日 05:00 自动盘点</span>
+                            <span class="sync-status-text" id="arch-sync-last-time">上次盘点: 暂无盘点记录 (每日 05:00 自动执行)</span>
+                        </div>
+                        <div class="sync-status-right">
+                            <span class="sync-status-detail" id="arch-sync-last-detail">仅抓取官网在售清单差集比对，单次仅约 8MB 流量</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <!-- Tab 3: 通知渠道配置 -->
+<!-- Tab 6: 自动下单设置 -->
+            <div id="tab-auto-order" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">自动加购与下单扩展接口 (Auto-Order Hook)</h2>
+                        <p class="pane-desc">模块化设计的自动下单对接中心，支持代金引换 (COD) 秒级直达下单确认页</p>
+                    </div>
+                </div>
+
+                <div class="settings-card glass">
+                    <div class="info-alert">
+                        <div class="alert-icon">ℹ️</div>
+                        <div class="alert-content">
+                            <strong>关于自动下单与代金引换安全机制：</strong>
+                            <p>系统已接入 Dollyteria (おちゃのこネット) 专属加购与结算流水线。自动在结算页匹配勾选 <strong>代金引換 (COD)</strong>、<strong>銀行振込</strong> 或 <strong>店頭支払</strong>。开启<strong>启动真实自动下单</strong>后，巡检命中匹配商品将直接向官网提交真实订单并扣款；关闭时仅提醒不下单。若需模拟测试结算链路，可使用下方【仿真测试】或商品档案中的【一键下单】。</p>
+                        </div>
+                    </div>
+
+                    <!-- 实时运行状态警示卡片 -->
+                    <div id="ao-mode-banner" class="ao-mode-banner idle">
+                        <div id="ao-mode-icon" class="banner-icon">🔔</div>
+                        <div class="banner-body">
+                            <div id="ao-mode-title" class="banner-title">当前运行状态：提醒模式 (不下单)</div>
+                            <div id="ao-mode-desc" class="banner-desc">真实自动下单已关闭。当监控命中匹配的新商品时，仅触发声音、桌面弹窗、Discord 与邮件提醒，绝不自动加购下单。</div>
+                        </div>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <div class="form-row">
+                        <div class="form-group col-6">
+                            <label class="form-label">Dollyteria 官网登录邮箱</label>
+                            <input type="text" id="ao-username" class="form-control" placeholder="用于登录 dollyteria.com 的注册邮箱">
+                        </div>
+                        <div class="form-group col-6">
+                            <label class="form-label">登录密码</label>
+                            <input type="password" id="ao-password" class="form-control" placeholder="密码 (保存在本地 config.json)">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group col-12">
+                            <label class="form-label">下单指定支付方式 (结算时将全自动匹配勾选)</label>
+                            <div class="payment-options-grid">
+                                <label class="payment-option-card">
+                                    <input type="radio" name="ao-payment-method" id="ao-pay-cod" value="cod" checked>
+                                    <div class="option-content">
+                                        <div class="option-header">
+                                            <span class="option-icon">📦</span>
+                                            <div>
+                                                <div class="option-title">代金引換 (佐川急便 e-コレクト)</div>
+                                                <div class="option-sub">到货支付 • 自动锁定 pay_procedure=3</div>
+                                            </div>
+                                        </div>
+                                        <div class="option-desc">送货上门时代收现金或刷卡，免去繁琐在线支付验证，极速加购锁单。需缴纳代金引换手续费（通常为330円起）。</div>
+                                    </div>
+                                </label>
+
+                                <label class="payment-option-card">
+                                    <input type="radio" name="ao-payment-method" id="ao-pay-bank" value="bank_transfer">
+                                    <div class="option-content">
+                                        <div class="option-header">
+                                            <span class="option-icon">🏦</span>
+                                            <div>
+                                                <div class="option-title">銀行振込 (银行汇款 / 前払い)</div>
+                                                <div class="option-sub">账户转账 • 自动锁定 pay_procedure=1</div>
+                                            </div>
+                                        </div>
+                                        <div class="option-desc">日本国内银行账户汇款（前付款）。下单秒速锁定库存，等待店家确认邮件起 4 日内转账，免收 330円 代引手续费。</div>
+                                    </div>
+                                </label>
+
+                                <label class="payment-option-card">
+                                    <input type="radio" name="ao-payment-method" id="ao-pay-store" value="store_pickup">
+                                    <div class="option-content">
+                                        <div class="option-header">
+                                            <span class="option-icon">🏬</span>
+                                            <div>
+                                                <div class="option-title">店頭支払 (到店自提与支付)</div>
+                                                <div class="option-sub">门店提货 • 自动锁定 pay_procedure=8</div>
+                                            </div>
+                                        </div>
+                                        <div class="option-desc">前往各分店柜台出示订单提货付款，0 手续费（无需代引手续费），适合到店自提或就近门店取货。</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group col-12">
+                            <div class="switch-row">
+                                <label class="switch">
+                                    <input type="checkbox" id="ao-enabled">
+                                    <span class="slider"></span>
+                                </label>
+                                <span class="form-label-inline" id="ao-enabled-label" style="font-weight: 700;">启动真实自动下单</span>
+                            </div>
+                            <span class="form-tip">开启时为真实下单：命中监控规则将直接向官网提交真实订单购买并扣款；关闭时不下单：仅执行消息提醒</span>
+                        </div>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 一键下单 (Quick Buy) 设置卡片 -->
+                    <div class="archive-quickbuy-card">
+                        <div class="quickbuy-card-header">
+                            <div>
+                                <div class="quickbuy-title">
+                                    <span>⚡ 商品一键下单设置 (Quick Buy)</span>
+                                    <span id="quick-buy-mode-tag" class="status-pill status-idle">⚪ 一键下单未启用</span>
+                                </div>
+                                <div class="quickbuy-subtitle">与后台监控自动抢购完全分离独立，仅对商品卡片中的「⚡ 一键购买」生效</div>
+                            </div>
+                        </div>
+                        <div class="form-row" style="margin-bottom: 0;">
+                            <div class="form-group col-6" style="margin-bottom: 0;">
+                                <div class="switch-row">
+                                    <label class="switch">
+                                        <input type="checkbox" id="quick-buy-enabled">
+                                        <span class="slider"></span>
+                                    </label>
+                                    <span class="form-label-inline">启动一键下单</span>
+                                </div>
+                                <span class="form-tip">开启时，点击商品卡片上的【⚡ 一键购买】将自动完成加购下单；关闭时禁止卡片触发购买</span>
+                            </div>
+                            <div class="form-group col-6" style="margin-bottom: 0;">
+                                <div class="switch-row">
+                                    <label class="switch">
+                                        <input type="checkbox" id="quick-buy-dry-run" checked>
+                                        <span class="slider"></span>
+                                    </label>
+                                    <span class="form-label-inline">启用一键下单仿真（Dry-Run）</span>
+                                </div>
+                                <span class="form-tip">开启时模拟加购并抵达最终确认页提取账单，不产生真实订单；关闭时将提交真实订单！</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 高级性能与重试参数 -->
+                    <div class="form-section-title" style="margin-top: 10px; margin-bottom: 12px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+                        <span>⚡ 高级并发与 503 重试调优</span>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group col-6">
+                            <label class="form-label">抢购并发最大线程数 (Workers)</label>
+                            <input type="number" id="ao-max-workers" class="form-control" value="6" min="1" max="16">
+                            <span class="form-tip">支持不同商品并行抢购；2核服务器建议 4 ~ 8 线程</span>
+                        </div>
+                        <div class="form-group col-6">
+                            <label class="form-label">定点前预热备用会话数 (Standby Sessions)</label>
+                            <input type="number" id="ao-standby-workers" class="form-control" value="2" min="1" max="8">
+                            <span class="form-tip">定点前提前登录待命，并在后台 Chrome 同步预热相同数量的独立 reCAPTCHA v3 标签页，实现多线程 0 秒并发签发；建议 2 ~ 4 个</span>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group col-6">
+                            <label class="form-label">503 / 官网繁忙重试间隔 (秒)</label>
+                            <input type="number" id="ao-retry-delay" class="form-control" value="0.15" step="0.05" min="0.05" max="2.0">
+                            <span class="form-tip">遭遇官网排队或 503 时的微重试间隔，建议 0.1 ~ 0.2 秒</span>
+                        </div>
+                        <div class="form-group col-6">
+                            <label class="form-label">503 / 官网繁忙最大重试次数</label>
+                            <input type="number" id="ao-max-retries" class="form-control" value="35" min="5" max="100">
+                            <span class="form-tip">中途若遇官方售罄将立即终止；建议 30 ~ 50 次 (约 5~8 秒)</span>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button id="btn-save-auto-order" class="btn btn-primary">保存下单配置</button>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 实时仿真测试区 -->
+                    <div class="dry-run-test-panel">
+                        <div class="panel-header">
+                            <span class="panel-icon">🧪</span>
+                            <div>
+                                <div class="panel-title">下单前最终确认页实时仿真测试 (Dry-Run)</div>
+                                <div class="panel-desc">实时走通「官网登录 ➔ 秒级加购 ➔ 客户步骤 ➔ 自动勾选指定支付 ➔ 抵达最终确认页 ➔ <b>向官网发送零风险实盘探针检验令牌风控核销</b> ➔ 安全拦截不扣款 ➔ 自动清空购物车」</div>
+                            </div>
+                        </div>
+                        <div class="form-row" style="margin-top: 14px;">
+                            <div class="form-group col-4">
+                                <label class="form-label">测试目标商品 (ID 或链接)</label>
+                                <input type="text" id="ao-test-item-id" class="form-control" placeholder="可留空，自动选用店内最新在售商品">
+                            </div>
+                            <div class="form-group col-3">
+                                <label class="form-label">本次测试支付方式</label>
+                                <select id="ao-test-pay-select" class="form-control">
+                                    <option value="cod">📦 代金引換 (pay_procedure=3)</option>
+                                    <option value="bank_transfer">🏦 銀行振込 (pay_procedure=1)</option>
+                                    <option value="store_pickup">🏬 店頭支払 (pay_procedure=8)</option>
+                                </select>
+                            </div>
+                            <div class="form-group col-5" style="display: flex; align-items: flex-end; gap: 8px;">
+                                <button id="btn-test-dry-run-order" class="btn btn-secondary" style="flex: 1; min-width: 0; white-space: nowrap;" title="走通登录、加购、地址及支付选择全链路并在确认页发送零风险实盘探针验证官网风控">🧪 仿真下单 (含实盘风控探针)</button>
+                                <button id="btn-test-recaptcha-token" class="btn btn-accent" style="flex: 1; min-width: 0; white-space: nowrap;" title="无需加购与下单，直接在 0.3 秒内演练后台 Chrome 预热池与 Google reCAPTCHA 令牌签发通道">⚡ 令牌极速测试 (纯通道)</button>
+                            </div>
+                        </div>
+                        <div id="ao-test-result" class="ao-test-result-box" style="display: none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 7: 实时运行终端 -->
+            <div id="tab-terminal" class="tab-pane">
+                <div class="pane-header">
+                    <div>
+                        <h2 class="pane-title">💻 实时运行终端</h2>
+                        <p class="pane-desc">实时显示终端的 log，最多可查看 1000 行（可切换 100 / 300 / 1000 行），通过上下滚动查看全部流水</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-term-copy" class="btn btn-secondary btn-sm" title="复制所有已显示日志到剪贴板">
+                            <span>📋 复制全部</span>
+                        </button>
+                        <button id="btn-term-clear" class="btn btn-danger-soft btn-sm" title="清屏">
+                            <span>🧹 清屏</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 终端主显示卡片面板 -->
+                <div class="settings-card glass terminal-container-panel">
+                    <!-- 终端控制工具条 -->
+                    <div class="terminal-toolbar">
+                        <div class="term-tool-group">
+                            <span class="tool-label">显示上限:</span>
+                            <div class="btn-group-segmented" id="term-limit-group">
+                                <button class="btn-segment active" data-limit="100">100 行</button>
+                                <button class="btn-segment" data-limit="300">300 行</button>
+                                <button class="btn-segment" data-limit="1000">1000 行</button>
+                            </div>
+                        </div>
+
+                        <div class="term-tool-group">
+                            <span class="tool-label">日志级别:</span>
+                            <select id="term-level-select" class="form-control form-control-sm term-select">
+                                <option value="ALL">全部级别 (ALL)</option>
+                                <option value="INFO">🟢 正常信息 (INFO)</option>
+                                <option value="WARNING">🟡 警告提示 (WARN)</option>
+                                <option value="ERROR">🔴 错误异常 (ERROR)</option>
+                            </select>
+                        </div>
+
+                        <div class="term-tool-group term-search-group">
+                            <input type="text" id="term-search-input" class="form-control form-control-sm term-search" placeholder="🔍 实时过滤 (例如: 503, 抢购, /new, reCAPTCHA)...">
+                        </div>
+
+                        <div class="term-tool-group term-autoscroll-group">
+                            <label class="term-checkbox-label">
+                                <input type="checkbox" id="term-autoscroll-toggle" checked>
+                                <span id="term-autoscroll-text">⏬ 自动滚屏: 开启</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- 终端黑底显示区域 (支持上下自由滚动) -->
+                    <div class="terminal-viewport-wrapper">
+                        <div id="terminal-screen" class="terminal-screen" tabindex="0">
+                            <div class="term-welcome-line">
+                                <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100 / 300 / 1000 行切换，通过鼠标上下滚动查看。
+                            </div>
+                        </div>
+                        <!-- 向上滚动时暂停滚动的提示浮条 -->
+                        <div id="term-scroll-pill" class="term-scroll-pill" style="display:none;" title="点击跳至最底端并恢复自动滚动">
+                            <span>⬇️ 已暂停滚屏 (点击跳至最新日志)</span>
+                        </div>
+                    </div>
+
+                    <!-- 终端底部状态栏 -->
+                    <div class="terminal-footer">
+                        <div class="term-foot-left">
+                            <span>当前显示: <strong id="term-rendered-count">0</strong> 行</span>
+                            <span class="sep">|</span>
+                            <span>当前上限: <strong id="term-max-limit-label">100</strong> 行 (可切换 100 / 300 / 1000 行)</span>
+                            <span class="sep">|</span>
+                            <span id="term-buffer-badge">缓冲 0 行</span>
+                        </div>
+                        <div class="term-foot-right">
+                            <span>快捷键: <kbd>Ctrl+L</kbd> 清屏 | 支持鼠标滚轮自由上下滚动查看历史</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+<!-- Tab 3: 通知渠道配置 -->
             <div id="tab-notifiers" class="tab-pane">
                 <div class="pane-header">
                     <div>
@@ -403,213 +1047,11 @@
                 </div>
             </div>
 
-            <!-- Tab 4: 自动下单接口 -->
-            <div id="tab-auto-order" class="tab-pane">
-                <div class="pane-header">
-                    <div>
-                        <h2 class="pane-title">自动加购与下单扩展接口 (Auto-Order Hook)</h2>
-                        <p class="pane-desc">模块化设计的自动下单对接中心，支持代金引换 (COD) 秒级直达下单确认页</p>
-                    </div>
-                </div>
-
-                <div class="settings-card glass">
-                    <div class="info-alert">
-                        <div class="alert-icon">ℹ️</div>
-                        <div class="alert-content">
-                            <strong>关于自动下单与代金引换安全机制：</strong>
-                            <p>系统已接入 Dollyteria (おちゃのこネット) 专属加购与结算流水线。自动在结算页匹配勾选 <strong>代金引換 (COD)</strong>、<strong>銀行振込</strong> 或 <strong>店頭支払</strong>。开启 <strong>Dry-Run (安全仿真)</strong> 模式时，会走通真实结算链路并推进至<strong>下单前最终确认页 (/cart/confirm)</strong>，并在提交最终订单购买按钮前严格安全拦截，绝不发生实际扣款或订单！</p>
-                        </div>
-                    </div>
-
-                    <!-- 实时运行状态警示卡片 -->
-                    <div id="ao-mode-banner" class="ao-mode-banner idle">
-                        <div id="ao-mode-icon" class="banner-icon">🔔</div>
-                        <div class="banner-body">
-                            <div id="ao-mode-title" class="banner-title">当前运行状态：仅提醒通知模式</div>
-                            <div id="ao-mode-desc" class="banner-desc">自动下单执行已关闭。当监控命中匹配的新商品时，仅触发声音、桌面弹窗、Discord 与邮件提醒，绝不自动加购下单。</div>
-                        </div>
-                    </div>
-
-                    <div class="form-divider"></div>
-
-                    <div class="form-row">
-                        <div class="form-group col-6">
-                            <label class="form-label">Dollyteria 官网登录邮箱</label>
-                            <input type="text" id="ao-username" class="form-control" placeholder="用于登录 dollyteria.com 的注册邮箱">
-                        </div>
-                        <div class="form-group col-6">
-                            <label class="form-label">登录密码</label>
-                            <input type="password" id="ao-password" class="form-control" placeholder="密码 (保存在本地 config.json)">
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group col-12">
-                            <label class="form-label">下单指定支付方式 (结算时将全自动匹配勾选)</label>
-                            <div class="payment-options-grid">
-                                <label class="payment-option-card">
-                                    <input type="radio" name="ao-payment-method" id="ao-pay-cod" value="cod" checked>
-                                    <div class="option-content">
-                                        <div class="option-header">
-                                            <span class="option-icon">📦</span>
-                                            <div>
-                                                <div class="option-title">代金引換 (佐川急便 e-コレクト)</div>
-                                                <div class="option-sub">到货支付 • 自动锁定 pay_procedure=3</div>
-                                            </div>
-                                        </div>
-                                        <div class="option-desc">送货上门时代收现金或刷卡，免去繁琐在线支付验证，极速加购锁单。需缴纳代金引换手续费（通常为330円起）。</div>
-                                    </div>
-                                </label>
-
-                                <label class="payment-option-card">
-                                    <input type="radio" name="ao-payment-method" id="ao-pay-bank" value="bank_transfer">
-                                    <div class="option-content">
-                                        <div class="option-header">
-                                            <span class="option-icon">🏦</span>
-                                            <div>
-                                                <div class="option-title">銀行振込 (银行汇款 / 前払い)</div>
-                                                <div class="option-sub">账户转账 • 自动锁定 pay_procedure=1</div>
-                                            </div>
-                                        </div>
-                                        <div class="option-desc">日本国内银行账户汇款（前付款）。下单秒速锁定库存，等待店家确认邮件起 4 日内转账，免收 330円 代引手续费。</div>
-                                    </div>
-                                </label>
-
-                                <label class="payment-option-card">
-                                    <input type="radio" name="ao-payment-method" id="ao-pay-store" value="store_pickup">
-                                    <div class="option-content">
-                                        <div class="option-header">
-                                            <span class="option-icon">🏬</span>
-                                            <div>
-                                                <div class="option-title">店頭支払 (到店自提与支付)</div>
-                                                <div class="option-sub">门店提货 • 自动锁定 pay_procedure=8</div>
-                                            </div>
-                                        </div>
-                                        <div class="option-desc">前往各分店柜台出示订单提货付款，0 手续费（无需代引手续费），适合到店自提或就近门店取货。</div>
-                                    </div>
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group col-6">
-                            <div class="switch-row">
-                                <label class="switch">
-                                    <input type="checkbox" id="ao-dry-run" checked>
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="form-label-inline" id="ao-dry-run-label">启用安全仿真测试 (Dry-Run 模式)</span>
-                            </div>
-                            <span class="form-tip">关闭此开关即开启真实下单：将直接提交官方正式订单并扣款购买；开启时到达确认页自动安全拦截绝不扣款</span>
-                        </div>
-                        <div class="form-group col-6">
-                            <div class="switch-row">
-                                <label class="switch">
-                                    <input type="checkbox" id="ao-enabled">
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="form-label-inline">启用自动下单执行</span>
-                            </div>
-                            <span class="form-tip">开启时命中监控规则将自动执行抢购加购；关闭时仅执行提醒</span>
-                        </div>
-                    </div>
-
-                    <div class="form-divider"></div>
-
-                    <!-- 高级性能与重试参数 -->
-                    <div class="form-section-title" style="margin-top: 10px; margin-bottom: 12px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
-                        <span>⚡ 高级并发与 503 重试调优</span>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group col-6">
-                            <label class="form-label">抢购并发最大线程数 (Workers)</label>
-                            <input type="number" id="ao-max-workers" class="form-control" value="6" min="1" max="16">
-                            <span class="form-tip">支持不同商品并行抢购；2核服务器建议 4 ~ 8 线程</span>
-                        </div>
-                        <div class="form-group col-6">
-                            <label class="form-label">定点前预热备用会话数 (Standby Sessions)</label>
-                            <input type="number" id="ao-standby-workers" class="form-control" value="2" min="1" max="8">
-                            <span class="form-tip">定点前提前登录待命，并在后台 Chrome 同步预热相同数量的独立 reCAPTCHA v3 标签页，实现多线程 0 秒并发签发；建议 2 ~ 4 个</span>
-                        </div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group col-6">
-                            <label class="form-label">503 / 官网繁忙重试间隔 (秒)</label>
-                            <input type="number" id="ao-retry-delay" class="form-control" value="0.15" step="0.05" min="0.05" max="2.0">
-                            <span class="form-tip">遭遇官网排队或 503 时的微重试间隔，建议 0.1 ~ 0.2 秒</span>
-                        </div>
-                        <div class="form-group col-6">
-                            <label class="form-label">503 / 官网繁忙最大重试次数</label>
-                            <input type="number" id="ao-max-retries" class="form-control" value="35" min="5" max="100">
-                            <span class="form-tip">中途若遇官方售罄将立即终止；建议 30 ~ 50 次 (约 5~8 秒)</span>
-                        </div>
-                    </div>
-
-                    <div class="form-actions">
-                        <button id="btn-save-auto-order" class="btn btn-primary">保存下单配置</button>
-                    </div>
-
-                    <div class="form-divider"></div>
-
-                    <!-- 实时仿真测试区 -->
-                    <div class="dry-run-test-panel">
-                        <div class="panel-header">
-                            <span class="panel-icon">🧪</span>
-                            <div>
-                                <div class="panel-title">下单前最终确认页实时仿真测试 (Dry-Run)</div>
-                                <div class="panel-desc">实时走通「官网登录 ➔ 秒级加购 ➔ 客户步骤 ➔ 自动勾选指定支付 ➔ 抵达最终确认页 ➔ <b>向官网发送零风险实盘探针检验令牌风控核销</b> ➔ 安全拦截不扣款 ➔ 自动清空购物车」</div>
-                            </div>
-                        </div>
-                        <div class="form-row" style="margin-top: 14px;">
-                            <div class="form-group col-4">
-                                <label class="form-label">测试目标商品 (ID 或链接)</label>
-                                <input type="text" id="ao-test-item-id" class="form-control" placeholder="可留空，自动选用店内最新在售商品">
-                            </div>
-                            <div class="form-group col-3">
-                                <label class="form-label">本次测试支付方式</label>
-                                <select id="ao-test-pay-select" class="form-control">
-                                    <option value="cod">📦 代金引換 (pay_procedure=3)</option>
-                                    <option value="bank_transfer">🏦 銀行振込 (pay_procedure=1)</option>
-                                    <option value="store_pickup">🏬 店頭支払 (pay_procedure=8)</option>
-                                </select>
-                            </div>
-                            <div class="form-group col-5" style="display: flex; align-items: flex-end; gap: 8px;">
-                                <button id="btn-test-dry-run-order" class="btn btn-secondary" style="flex: 1; min-width: 0; white-space: nowrap;" title="走通登录、加购、地址及支付选择全链路并在确认页发送零风险实盘探针验证官网风控">🧪 仿真下单 (含实盘风控探针)</button>
-                                <button id="btn-test-recaptcha-token" class="btn btn-accent" style="flex: 1; min-width: 0; white-space: nowrap;" title="无需加购与下单，直接在 0.3 秒内演练后台 Chrome 预热池与 Google reCAPTCHA 令牌签发通道">⚡ 令牌极速测试 (纯通道)</button>
-                            </div>
-                        </div>
-                        <div id="ao-test-result" class="ao-test-result-box" style="display: none;"></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Tab 5: 实时上新流 -->
-            <div id="tab-feed" class="tab-pane">
-                <div class="pane-header">
-                    <div>
-                        <h2 class="pane-title">最新命中商品动态</h2>
-                        <p class="pane-desc">实时展示监控命中的有货商品，可直接点击一键跳转至官网详情页加购</p>
-                    </div>
-                    <button id="btn-clear-feed" class="btn btn-sm btn-ghost">清空显示列表</button>
-                </div>
-
-                <div id="feed-container" class="feed-grid">
-                    <div class="empty-state">
-                        <div class="empty-icon">🎀</div>
-                        <div class="empty-title">暂未发现新商品</div>
-                        <div class="empty-desc">当监控触发且发现符合您关键字的有货商品时，将第一时间在此处卡片化展示并发出警报！</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Tab 6: 访问安全与密码 -->
+<!-- Tab 9: 安全设置 -->
             <div id="tab-security" class="tab-pane">
                 <div class="pane-header">
                     <div>
-                        <h2 class="pane-title">Web 看板访问安全与密码</h2>
+                        <h2 class="pane-title">看板安全设置与访问密码</h2>
                         <p class="pane-desc">设置访问密码以保护监控规则、通知配置与抢购凭据，防止公网未授权访问</p>
                     </div>
                     <button id="btn-quick-lock" class="btn btn-ghost">
@@ -626,18 +1068,16 @@
                         </div>
                     </div>
 
-                    <div class="form-row" style="margin-top: 20px;">
-                        <div class="form-group col-8">
-                            <label class="form-label">修改 / 设置访问密码 (留空并保存即可取消密码保护)</label>
-                            <div class="auth-input-group">
+                    <div class="form-group" style="margin-top: 20px;">
+                        <label class="form-label">修改 / 设置访问密码 (留空并保存即可取消密码保护)</label>
+                        <div class="pwd-input-action-row">
+                            <div class="auth-input-group pwd-input-wrap">
                                 <input type="password" id="input-new-web-password" class="form-control" placeholder="输入新的访问密码...">
                                 <button type="button" id="btn-toggle-new-pwd" class="btn-pwd-eye" title="点击显示明文">🙈</button>
                             </div>
-                            <span class="form-tip">💡 设置密码后，任意设备（包括手机）首次访问时均需输入此密码解锁，浏览器会自动记住 30 天免密。</span>
+                            <button id="btn-save-web-password" class="btn btn-primary btn-save-pwd">保存密码设置</button>
                         </div>
-                        <div class="form-group col-4" style="display: flex; align-items: flex-end;">
-                            <button id="btn-save-web-password" class="btn btn-primary w-100">保存密码设置</button>
-                        </div>
+                        <span class="form-tip">💡 设置密码后，任意设备（包括手机）首次访问时均需输入此密码解锁，浏览器会自动记住 30 天免密。</span>
                     </div>
 
                     <div class="form-divider"></div>
@@ -652,214 +1092,8 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Tab 7: 数据收录与全站档案 -->
-            <div id="tab-archive" class="tab-pane">
-                <div class="pane-header">
-                    <div>
-                        <h2 class="pane-title">📦 Dollyteria 全站商品档案与收录</h2>
-                        <p class="pane-desc">支持全自动温和抓取全站所有在售与售罄商品（全站约 4 万件），建立个人行情档案并提供毫秒级搜索</p>
-                    </div>
-                    <div class="header-actions">
-                        <button id="btn-sync-new-stream" class="btn btn-secondary" title="一键将官网最新上新流 (/new 前 500 件新品) 全部完整录入档案库">
-                            <span>⚡ 同步最新上新至档案</span>
-                        </button>
-                        <button id="btn-sync-stock-now" class="btn btn-primary" title="仅抓取当前官网在售列表 (~8MB 流量)，将已被买走/下架的商品精准自动标记为已售罄">
-                            <span>🔄 立即盘点在库状态</span>
-                        </button>
-                        <button id="btn-sync-baseline-from-archive" class="btn btn-accent" title="将数据库中所有在售商品设为监控基准">
-                            <span>🎯 同步在售商品为监控基准</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- 采集控制卡片 -->
-                <div class="settings-card glass archive-control-card">
-                    <div class="archive-stats-grid">
-                        <div class="arch-stat-box">
-                            <div class="arch-stat-icon">📚</div>
-                            <div class="arch-stat-info">
-                                <div class="arch-stat-num" id="arch-stat-total">0</div>
-                                <div class="arch-stat-label">已收录总商品</div>
-                            </div>
-                        </div>
-                        <div class="arch-stat-box">
-                            <div class="arch-stat-icon">🟢</div>
-                            <div class="arch-stat-info">
-                                <div class="arch-stat-num text-success" id="arch-stat-in-stock">0</div>
-                                <div class="arch-stat-label">当前在售商品</div>
-                            </div>
-                        </div>
-                        <div class="arch-stat-box">
-                            <div class="arch-stat-icon">⚪</div>
-                            <div class="arch-stat-info">
-                                <div class="arch-stat-num text-muted" id="arch-stat-sold-out">0</div>
-                                <div class="arch-stat-label">历史已售罄商品</div>
-                            </div>
-                        </div>
-                        <div class="arch-stat-box">
-                            <div class="arch-stat-icon">⏱️</div>
-                            <div class="arch-stat-info">
-                                <div class="arch-stat-num" id="arch-stat-progress">0%</div>
-                                <div class="arch-stat-label" id="arch-stat-progress-sub">就绪待命</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 在库全量盘点状态条 -->
-                    <div class="archive-sync-status-bar" id="archive-sync-status-bar">
-                        <div class="sync-status-left">
-                            <span class="sync-status-badge">⏰ 每日 05:00 自动盘点</span>
-                            <span class="sync-status-text" id="arch-sync-last-time">上次盘点: 暂无盘点记录</span>
-                        </div>
-                        <div class="sync-status-right">
-                            <span class="sync-status-detail" id="arch-sync-last-detail">仅抓取官网在售清单差集比对，单次仅约 8MB 流量</span>
-                        </div>
-                    </div>
-
-                    <!-- 进度条容器 -->
-                    <div class="crawler-progress-wrap" id="crawler-progress-wrap">
-                        <div class="progress-bar-bg">
-                            <div class="progress-bar-fill" id="crawler-progress-fill" style="width: 0%;"></div>
-                        </div>
-                        <div class="progress-bar-labels">
-                            <span id="crawler-progress-text">准备就绪 (全站约 40,500 件商品，单页 100 件平缓抓取)</span>
-                            <span id="crawler-speed-text">单页延时: 1.2s</span>
-                        </div>
-                    </div>
-
-                    <!-- 采集操作按钮与设置行 -->
-                    <div class="crawler-actions-row">
-                        <div class="crawler-btn-group">
-                            <button id="btn-crawler-start" class="btn btn-primary">
-                                <span>▶️ 开始全站收录</span>
-                            </button>
-                            <button id="btn-crawler-pause" class="btn btn-warning" style="display:none;">
-                                <span>⏸️ 暂停收录</span>
-                            </button>
-                            <button id="btn-crawler-resume" class="btn btn-success" style="display:none;">
-                                <span>▶️ 继续收录</span>
-                            </button>
-                            <button id="btn-crawler-stop" class="btn btn-danger" style="display:none;">
-                                <span>⏹️ 停止</span>
-                            </button>
-                        </div>
-                        <div class="crawler-config-inline">
-                            <label class="inline-label">单页抓取延时:</label>
-                            <select id="crawler-delay-select" class="form-select inline-select">
-                                <option value="1.0">1.0 秒 (稍快)</option>
-                                <option value="1.2" selected>1.2 秒 (推荐)</option>
-                                <option value="1.8">1.8 秒 (更安全)</option>
-                                <option value="2.5">2.5 秒 (极稳)</option>
-                            </select>
-                            <label class="inline-label" style="margin-left: 12px;">指定起始页:</label>
-                            <input type="number" id="crawler-start-page" class="form-control inline-input" min="1" placeholder="断点页(留空从头/续爬)">
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 一键下单与安全仿真模式设置卡片 -->
-                <div class="settings-card glass archive-quickbuy-card">
-                    <div class="quickbuy-card-header">
-                        <div class="quickbuy-title-group">
-                            <span class="quickbuy-icon">⚡</span>
-                            <div>
-                                <div class="quickbuy-title">
-                                    <span>商品档案一键下单设置 (Quick Buy)</span>
-                                </div>
-                                <div class="quickbuy-subtitle">与【自动下单接口】的后台监控抢购完全分离独立，仅对下方档案卡片中的「⚡ 一键购买」生效</div>
-                            </div>
-                        </div>
-                        <span id="quick-buy-mode-tag" class="status-pill status-idle">⚪ 一键下单未启用</span>
-                    </div>
-                    <div class="form-row" style="margin-bottom: 0;">
-                        <div class="form-group col-6" style="margin-bottom: 0;">
-                            <div class="switch-row">
-                                <label class="switch">
-                                    <input type="checkbox" id="quick-buy-enabled">
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="form-label-inline">启用一键下单开关</span>
-                            </div>
-                            <span class="form-tip">开启时，点击商品卡片上的【⚡ 一键购买】将自动完成加购下单；关闭时禁止卡片触发购买</span>
-                        </div>
-                        <div class="form-group col-6" style="margin-bottom: 0;">
-                            <div class="switch-row">
-                                <label class="switch">
-                                    <input type="checkbox" id="quick-buy-dry-run" checked>
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="form-label-inline">启用安全仿真测试 (Dry-Run 模式)</span>
-                            </div>
-                            <span class="form-tip">开启时模拟加购并抵达最终确认页提取账单，不产生真实订单；关闭时将提交真实订单！</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 档案商品搜索与过滤区 -->
-                <div class="archive-search-container glass">
-                    <div class="archive-search-bar">
-                        <div class="search-input-wrap">
-                            <span class="search-icon">🔍</span>
-                            <input type="text" id="archive-search-kw" class="form-control search-input" placeholder="输入关键词匹配 (例如: 幼SD、ティアラ、Blythe、或商品编号 S-26...)...">
-                            <button id="btn-archive-clear-search" class="btn-clear-search" title="清除关键词" style="display:none;">&times;</button>
-                        </div>
-                        <button id="btn-archive-search" class="btn btn-primary search-action-btn">
-                            <span>搜索档案</span>
-                        </button>
-                    </div>
-
-                    <div class="archive-filter-row">
-                        <div class="filter-group">
-                            <span class="filter-label">库存状态:</span>
-                            <div class="filter-chips" id="filter-stock-chips">
-                                <button class="filter-chip active" data-stock="all">全部商品</button>
-                                <button class="filter-chip" data-stock="1">🟢 仅在售</button>
-                                <button class="filter-chip" data-stock="0">⚪ 仅售罄</button>
-                            </div>
-                        </div>
-
-                        <div class="filter-group right-align">
-                            <span class="filter-label">排序方式:</span>
-                            <select id="archive-sort-select" class="form-select sort-select">
-                                <option value="id_desc" selected>官网最新上新 (商品编号 ↓)</option>
-                                <option value="id_asc">官网最早历史 (商品编号 ↑)</option>
-                                <option value="crawl_time_desc">最近本地抓取时间 ↓</option>
-                                <option value="price_asc">价格从低到高 ↑</option>
-                                <option value="price_desc">价格从高到低 ↓</option>
-                            </select>
-                            <span id="archive-match-count" class="match-count-badge">共 0 件匹配</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 商品展示网格 -->
-                <div id="archive-products-grid" class="archive-products-grid">
-                    <!-- 动态加载商品卡片 -->
-                </div>
-
-                <!-- 分页条 -->
-                <div id="archive-pagination" class="archive-pagination" style="display:none;">
-                    <button id="btn-arch-prev" class="btn btn-ghost pagination-btn">◀ 上一页</button>
-                    <div class="pagination-info">
-                        第 <span id="arch-page-current">1</span> / <span id="arch-page-total">1</span> 页
-                    </div>
-                    <button id="btn-arch-next" class="btn btn-ghost pagination-btn">下一页 ▶</button>
-                    <div class="pagination-jump">
-                        <span>跳转</span>
-                        <input type="number" id="input-arch-jump" class="form-control jump-input" min="1">
-                        <button id="btn-arch-jump" class="btn btn-ghost jump-btn">GO</button>
-                    </div>
-                </div>
-
-                <!-- 空状态展示 -->
-                <div id="archive-empty" class="feed-empty-state glass" style="display:none;">
-                    <div class="empty-icon">📦</div>
-                    <div class="empty-title">暂未收录商品或无匹配结果</div>
-                    <div class="empty-desc">您可以点击上方【开始全站收录】启动后台温和抓取，或调整搜索词与筛选条件重试。</div>
-                </div>
-            </div>
         </main>
+
 
         <!-- 添加/编辑规则弹窗 Modal -->
         <div id="rule-modal" class="modal-backdrop" style="display:none;">
@@ -966,6 +1200,23 @@
         </div>
 
         <!-- 全局吐司提示通知 -->
+        
+        <!-- 购买记录详情回执 Modal -->
+        <div id="order-detail-modal" class="modal-backdrop" style="display:none;">
+            <div class="modal-card glass order-detail-modal-card">
+                <div class="modal-header">
+                    <h3 class="modal-title">🛍️ 购买流水详细回执</h3>
+                    <button id="order-detail-close" class="modal-close-btn">&times;</button>
+                </div>
+                <div class="modal-body" id="order-detail-body">
+                    <!-- JS 动态渲染 -->
+                </div>
+                <div class="modal-footer" style="margin-top:16px; display:flex; justify-content:flex-end;">
+                    <button id="order-detail-btn-ok" class="btn btn-primary">关闭</button>
+                </div>
+            </div>
+        </div>
+
         <div id="toast-container" class="toast-container"></div>
 
         <!-- 锁屏卡片 (未授权时遮罩全屏) -->

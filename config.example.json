@@ -48,7 +48,7 @@
   },
   "auto_order": {
     "enabled": false,
-    "dry_run": true,
+    "dry_run": false,
     "payment_method": "cod",
     "username": "your_dollyteria_email@gmail.com",
     "password": "your_dollyteria_password"

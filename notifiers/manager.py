@@ -50,6 +50,10 @@ class NotifierManager:
         self.recent_events: List[Dict] = []
         self._listeners: List[Callable[[Dict], None]] = []
 
+    @property
+    def listeners(self) -> List[Callable[[Dict], None]]:
+        return self._listeners
+
     def add_listener(self, callback: Callable[[Dict], None]):
         """注册实时监听器 (用于 Web SSE 推送)"""
         self._listeners.append(callback)

@@ -52,156 +52,156 @@
   },
   "watches": [
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015639467",
-      "name": "幼SD のの",
       "keywords": [
         "幼SD",
         "のの"
       ],
-      "exclude_keywords": [],
-      "min_price": 20000,
-      "max_price": 40000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 40000,
+      "min_price": 20000,
+      "name": "幼SD のの",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [
+        "U-25-12-24"
+      ],
       "id": "w_1793015672211",
-      "name": "SD女の子/シャルロッテ",
       "keywords": [
         "SD女の子",
         "シャルロッテ"
       ],
-      "exclude_keywords": [
-        "U-25-12-24"
-      ],
-      "min_price": 125000,
-      "max_price": 220000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 220000,
+      "min_price": 125000,
+      "name": "SD女の子/シャルロッテ",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015707951",
-      "name": "SDGIRL/アナイス",
       "keywords": [
         "SDGIRL",
         "アナイス"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 100000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 100000,
+      "min_price": 0,
+      "name": "SDGIRL/アナイス",
+      "search_mode": "new_stream"
     },
     {
-      "id": "w_1793015748001",
-      "name": "こまめ",
-      "keywords": [
-        "こまめ"
-      ],
+      "auto_order": false,
+      "enabled": true,
       "exclude_keywords": [
         "書籍"
       ],
-      "min_price": 0,
-      "max_price": 0,
-      "search_mode": "new_stream",
+      "id": "w_1793015748001",
+      "keywords": [
+        "こまめ"
+      ],
       "match_mode": "all",
-      "auto_order": false,
-      "enabled": true
+      "max_price": 0,
+      "min_price": 0,
+      "name": "こまめ",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015771404",
-      "name": "幼SDまい",
       "keywords": [
         "幼SD",
         "まい"
       ],
-      "exclude_keywords": [],
-      "min_price": 10000,
-      "max_price": 89000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 89000,
+      "min_price": 10000,
+      "name": "幼SDまい",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015791890",
-      "name": "Elizabeth",
       "keywords": [
         "SD13",
         "Elizabeth"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 100000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 100000,
+      "min_price": 0,
+      "name": "Elizabeth",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015810592",
-      "name": "ねこひげ工房",
       "keywords": [
         "ねこひげ工房",
         "18mm"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 5000,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 5000,
+      "min_price": 0,
+      "name": "ねこひげ工房",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": true,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015827235",
-      "name": "ねこひげ工房",
       "keywords": [
         "ねこひげ工房",
         "16mm"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 3500,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 3500,
+      "min_price": 0,
+      "name": "ねこひげ工房",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": false,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015842252",
-      "name": "DearSDティアラ",
       "keywords": [
         "DearSD",
         "ティアラ"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 0,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": false,
-      "enabled": true
+      "max_price": 0,
+      "min_price": 0,
+      "name": "DearSDティアラ",
+      "search_mode": "new_stream"
     },
     {
+      "auto_order": false,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1793015859571",
-      "name": "DearSD汎用",
       "keywords": [
         "DearSD"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 0,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": false,
-      "enabled": true
+      "max_price": 0,
+      "min_price": 0,
+      "name": "DearSD汎用",
+      "search_mode": "new_stream"
     }
   ],
   "web_password": ""

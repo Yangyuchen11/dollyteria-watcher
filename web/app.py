@@ -14,6 +14,7 @@ import requests
 
 from core.monitor import DollyteriaMonitor
 from core.scheduler import DollyteriaScheduler
+from core.terminal import TerminalLogManager
 
 logger = logging.getLogger("dollyteria.web")
 
@@ -26,6 +27,11 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     app.config["JSON_AS_ASCII"] = False
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+    # 初始化实时运行终端日志拦截管理器
+    terminal_mgr = TerminalLogManager.get_instance()
+    terminal_mgr.install()
+    terminal_mgr.seed_status(monitor, scheduler)
 
     # 访问密码鉴权助手
     def get_configured_password() -> str:
@@ -101,8 +107,15 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
                 q.put_nowait(event_data)
             except Exception:
                 pass
+        for listener in list(getattr(monitor.notifier, 'listeners', getattr(monitor.notifier, '_listeners', []))):
+            if listener != on_new_event:
+                try:
+                    listener(event_data)
+                except Exception:
+                    pass
 
     monitor.notifier.add_listener(on_new_event)
+    terminal_mgr.add_listener(lambda entry: on_new_event({"type": "terminal_log", "log": entry}))
 
     @app.route("/")
     def index():
@@ -255,6 +268,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     def api_archive_products():
         kw = request.args.get("keyword", "").strip()
         in_stock = request.args.get("in_stock", "all").strip()
+        is_new = request.args.get("is_new", "all").strip()
         sort_by = request.args.get("sort_by", "updated_desc").strip()
         try:
             page = int(request.args.get("page", 1))
@@ -264,14 +278,63 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             page_size = int(request.args.get("page_size", 30))
         except ValueError:
             page_size = 30
+
+        preset_kw_raw = request.args.get("preset_keywords", "")
+        preset_kw_list = []
+        if preset_kw_raw:
+            if preset_kw_raw.startswith("["):
+                try:
+                    import json
+                    preset_kw_list = json.loads(preset_kw_raw)
+                except Exception:
+                    preset_kw_list = [k.strip() for k in preset_kw_raw.split(",") if k.strip()]
+            else:
+                preset_kw_list = [k.strip() for k in preset_kw_raw.split(",") if k.strip()]
+        else:
+            preset_kw_list = request.args.getlist("preset_keywords") or []
+
+        preset_match_mode = request.args.get("preset_match_mode", "all").strip()
+
         res = monitor.archive_db.query_products(
             keyword=kw,
             in_stock=in_stock,
+            is_new=is_new,
+            preset_keywords=preset_kw_list,
+            preset_match_mode=preset_match_mode,
             sort_by=sort_by,
             page=page,
             page_size=page_size,
         )
         return jsonify(res)
+
+    @app.route("/api/archive/preset_keywords", methods=["GET", "POST"])
+    def api_archive_preset_keywords():
+        if request.method == "POST":
+            data = request.json or {}
+            action = data.get("action", "")
+            if action == "add":
+                kw = str(data.get("keyword", "")).strip()
+                if not kw:
+                    return jsonify({"status": "error", "message": "关键词不能为空"}), 400
+                keywords = monitor.archive_db.add_preset_keyword(kw)
+                return jsonify({"status": "ok", "message": f"成功添加预设关键词: {kw}", "keywords": keywords})
+            elif action == "remove":
+                kw = str(data.get("keyword", "")).strip()
+                keywords = monitor.archive_db.remove_preset_keyword(kw)
+                return jsonify({"status": "ok", "message": f"已移除预设关键词: {kw}", "keywords": keywords})
+            elif "keywords" in data and isinstance(data["keywords"], list):
+                keywords = monitor.archive_db.set_preset_keywords(data["keywords"])
+                return jsonify({"status": "ok", "message": "预设关键词已更新", "keywords": keywords})
+            elif "keyword" in data:
+                kw = str(data["keyword"]).strip()
+                if not kw:
+                    return jsonify({"status": "error", "message": "关键词不能为空"}), 400
+                keywords = monitor.archive_db.add_preset_keyword(kw)
+                return jsonify({"status": "ok", "message": f"成功添加预设关键词: {kw}", "keywords": keywords})
+            return jsonify({"status": "error", "message": "无效的请求格式"}), 400
+
+        keywords = monitor.archive_db.get_preset_keywords()
+        return jsonify({"status": "ok", "keywords": keywords})
 
     @app.route("/api/archive/apply_baseline", methods=["POST"])
     def api_archive_apply_baseline():
@@ -400,6 +463,16 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             payment_method=payment_method,
             probe_recaptcha=probe_recaptcha,
         )
+        try:
+            order_rec = monitor.archive_db.record_order(
+                item={"id": item_id, "title": f"接口联调测试靶标 #{item_id}"},
+                rule_name="接口联调测试",
+                trigger_type="test",
+                order_res=res,
+            )
+            on_new_event({"type": "order_recorded", "order": order_rec})
+        except Exception as e:
+            logger.error(f"接口测试记录订单异常: {e}")
         return jsonify(res)
 
     @app.route("/api/test_recaptcha", methods=["POST"])
@@ -425,7 +498,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         if not qb_cfg.get("enabled", False):
             return jsonify({
                 "success": False,
-                "message": "一键下单功能已关闭，请先在【📦 全站档案】开启一键下单开关"
+                "message": "一键下单功能已关闭，请先在【🛒 自动下单】设置中启动一键下单"
             }), 400
 
         ao_cfg = monitor.config.get("auto_order", {})
@@ -493,7 +566,123 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             except Exception as e:
                 logger.error(f"一键购买分发成功通知异常: {e}")
 
+        # 写入购买记录数据库
+        try:
+            order_rec = monitor.archive_db.record_order(
+                item={
+                    "id": item_id,
+                    "title": item_title or f"商品 #{item_id}",
+                    "url": f"https://www.dollyteria.com/product/{item_id}",
+                },
+                rule_name="看板一键抢购",
+                trigger_type="quick_buy",
+                order_res=res,
+            )
+            on_new_event({"type": "order_recorded", "order": order_rec})
+        except Exception as e:
+            logger.error(f"一键抢购写入购买记录异常: {e}")
+
         return jsonify(res)
+
+    # ==================== 实时运行终端 API ====================
+    @app.route("/api/terminal/logs")
+    def api_terminal_logs():
+        limit = request.args.get("limit", 100)
+        level = request.args.get("level", None)
+        kw = request.args.get("keyword", None)
+        since_id = request.args.get("since_id", None)
+        if since_id is not None and str(since_id).isdigit():
+            since_id = int(since_id)
+        else:
+            since_id = None
+        return jsonify(terminal_mgr.get_logs(limit=limit, level=level, keyword=kw, since_id=since_id))
+
+    @app.route("/api/terminal/clear", methods=["POST"])
+    def api_terminal_clear():
+        terminal_mgr.clear()
+        return jsonify({"status": "ok", "message": "终端日志输出已清空"})
+
+    # ==================== 购买与抢购记录 API ====================
+    @app.route("/api/orders")
+    def api_orders():
+        status = request.args.get("status", "all")
+        trigger_type = request.args.get("trigger_type", "all")
+        kw = request.args.get("keyword", "")
+        try:
+            page = int(request.args.get("page", 1))
+        except ValueError:
+            page = 1
+        try:
+            page_size = int(request.args.get("page_size", 20))
+        except ValueError:
+            page_size = 20
+        return jsonify(monitor.archive_db.query_orders(
+            status=status,
+            trigger_type=trigger_type,
+            keyword=kw,
+            page=page,
+            page_size=page_size
+        ))
+
+    @app.route("/api/orders/stats")
+    def api_orders_stats():
+        return jsonify(monitor.archive_db.get_order_stats())
+
+    @app.route("/api/orders/delete", methods=["POST"])
+    def api_orders_delete():
+        data = request.json or {}
+        order_id = str(data.get("id", "")).strip()
+        if not order_id:
+            return jsonify({"status": "error", "message": "未指定记录 ID"}), 400
+        ok = monitor.archive_db.delete_order(order_id)
+        return jsonify({"status": "ok" if ok else "error", "message": "已删除该条抢购记录"})
+
+    @app.route("/api/orders/clear", methods=["POST"])
+    def api_orders_clear():
+        ok = monitor.archive_db.clear_orders()
+        return jsonify({"status": "ok" if ok else "error", "message": "已成功清空全部购买记录"})
+
+    @app.route("/api/orders/export")
+    def api_orders_export():
+        import io
+        import csv
+        fmt = request.args.get("format", "csv").lower()
+        res = monitor.archive_db.query_orders(page=1, page_size=1000)
+        orders = res.get("orders", [])
+        if fmt == "json":
+            return jsonify(orders)
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["订单ID", "商品ID", "商品名称", "价格", "状态", "运行模式", "触发来源", "支付方式", "执行耗时(ms)", "下单时间", "执行反馈"])
+        status_map = {
+            "SUCCESS": "真实下单成功",
+            "DRY_RUN_SUCCESS": "仿真模拟成功",
+            "SOLDOUT": "商品已售罄",
+            "FAILED": "下单失败"
+        }
+        for o in orders:
+            mode_str = "仿真模拟(DRY-RUN)" if o.get("dry_run") else "实盘购买"
+            status_str = status_map.get(o.get("status"), o.get("status"))
+            writer.writerow([
+                o.get("id"),
+                o.get("item_id"),
+                o.get("title"),
+                o.get("price_str"),
+                status_str,
+                mode_str,
+                o.get("rule_name") or o.get("trigger_type"),
+                o.get("payment_method"),
+                o.get("duration_ms"),
+                o.get("time_str"),
+                o.get("message"),
+            ])
+        csv_bytes = output.getvalue().encode("utf-8-sig")
+        return Response(
+            csv_bytes,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=dollyteria_orders.csv"}
+        )
 
     @app.route("/api/events")
     def api_events():

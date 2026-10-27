@@ -21,6 +21,7 @@ import socket
 import struct
 import base64
 import shutil
+import atexit
 import tempfile
 import subprocess
 import logging
@@ -199,6 +200,7 @@ class RecaptchaTokenProvider:
         self._keepalive_started: bool = False
         self.browser_user_agent: str = DEFAULT_USER_AGENT
         self._ua_probed: bool = False
+        atexit.register(self._cleanup_proc_unlocked)
 
     @property
     def pool_size(self) -> int:
@@ -601,10 +603,19 @@ class RecaptchaTokenProvider:
                 self._port = self._allocate_free_port()
                 # 持久化浏览器数据目录：沉淀 Google 账户会话缓存、TLS Session Tickets 与 Cookie 指纹，规避白板临时目录遭 Google v3 惩罚
                 profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+                # 清理因前序 Python 进程异常退出可能遗留的孤儿 Chrome 进程与锁文件
+                if os.name == "nt":
+                    try:
+                        cmd = f'Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\' or Name = \'msedge.exe\'" | Where-Object {{ $_.CommandLine -like "*{os.path.basename(profile_base)}*" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}'
+                        subprocess.run(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+                    except Exception:
+                        pass
+
+                is_profile_clean = False
                 try:
                     os.makedirs(profile_base, exist_ok=True)
-                    # 清理可能因异常退出遗留的 Singleton 锁，防止 Chromium 在 Linux 容器内被死锁阻塞
-                    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                    # 清理各类 Singleton 锁与 Windows 的 lockfile 锁
+                    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]:
                         lk_path = os.path.join(profile_base, lock_name)
                         if os.path.exists(lk_path) or os.path.islink(lk_path):
                             try:
@@ -614,9 +625,21 @@ class RecaptchaTokenProvider:
                                     shutil.rmtree(lk_path, ignore_errors=True)
                             except Exception:
                                 pass
+                    # 检查目录是否真正解锁 (若仍被其他进程锁住，立即安全回退至隔离临时目录，保证 CDP 端口 100% 成功启动)
+                    test_file = os.path.join(profile_base, f".chk_{int(time.time()*1000)}.tmp")
+                    with open(test_file, "w") as f:
+                        f.write("1")
+                    os.remove(test_file)
+                    lf = os.path.join(profile_base, "lockfile")
+                    if not os.path.exists(lf):
+                        is_profile_clean = True
+                except Exception:
+                    is_profile_clean = False
+
+                if is_profile_clean:
                     self._user_data_dir = profile_base
                     self._is_temp_profile = False
-                except Exception:
+                else:
                     self._user_data_dir = tempfile.mkdtemp(prefix="dolly_recaptcha_")
                     self._is_temp_profile = True
                 self._sitekey = sitekey
@@ -672,9 +695,9 @@ class RecaptchaTokenProvider:
                     self._cleanup_proc_unlocked()
                     return False
 
-                # 等待 CDP 调试端口就绪
+                # 等待 CDP 调试端口就绪 (最多等待 5.25s)
                 initial_pages = []
-                for _ in range(25):
+                for _ in range(35):
                     time.sleep(0.15)
                     initial_pages = self._list_page_targets()
                     if initial_pages:
@@ -2187,10 +2210,10 @@ class AutoOrderHook:
                     RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
 
     def on_item_matched(self, item: Dict, rule: Dict) -> Optional[Dict]:
-        """监控引擎命中商品时的自动加购与下单入口"""
+        """监控引擎命中商品时的自动加购与下单入口 (巡检触发始终为真实下单)"""
         pid = item.get("id")
         title = item.get("title", "")
         price = item.get("price", 0)
 
         logger.info(f"🚀 [Auto-Order 触发] 规则 [{rule.get('name')}] 命中商品 [{pid}] {title} (￥{price})")
-        return self.execute_checkout(item_id=pid, item_title=title, dry_run=self.dry_run)
+        return self.execute_checkout(item_id=pid, item_title=title, dry_run=False)

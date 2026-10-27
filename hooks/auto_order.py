@@ -1260,10 +1260,10 @@ class AutoOrderHook:
     def _sync_browser_fingerprint_headers(self):
         """动态同步当前运行中 Chromium 浏览器内核的原生 User-Agent 与 Sec-Ch-Ua 请求头，确保 100% 吻合"""
         provider = RecaptchaTokenProvider.get_instance()
-        b_ua = provider.browser_user_agent
-        if b_ua:
+        b_ua = getattr(provider, "browser_user_agent", "")
+        if b_ua and isinstance(b_ua, str):
             self.session.headers["User-Agent"] = b_ua
-        ua = self.session.headers.get("User-Agent", "")
+        ua = str(self.session.headers.get("User-Agent", ""))
         m = re.search(r"Chrome/(\d+)", ua)
         ver = m.group(1) if m else "124"
         plat = "Windows" if os.name == "nt" else "Linux"
@@ -1297,7 +1297,7 @@ class AutoOrderHook:
                 break
         return None
 
-    def preload_standby_workers(self, count: Optional[int] = None):
+    def preload_standby_workers(self, count: Optional[int] = None, force_refresh: bool = False):
         """预先登录并储备备用 Worker 会话 + 预热相同数量的 reCAPTCHA v3 独立标签页池 (在后台独立线程执行，不阻塞主线程)"""
         if self._is_standby_worker:
             return
@@ -1316,10 +1316,19 @@ class AutoOrderHook:
         def _prewarm():
             added_workers = 0
             trimmed_workers = 0
-            with self._pool_lock:
-                while len(self._standby_workers) > target_count:
-                    self._standby_workers.pop()
-                    trimmed_workers += 1
+            if force_refresh:
+                try:
+                    self.login()
+                except Exception:
+                    pass
+                with self._pool_lock:
+                    trimmed_workers += len(self._standby_workers)
+                    self._standby_workers.clear()
+            else:
+                with self._pool_lock:
+                    while len(self._standby_workers) > target_count:
+                        self._standby_workers.pop()
+                        trimmed_workers += 1
             for _ in range(target_count):
                 with self._pool_lock:
                     if len(self._standby_workers) >= target_count:
@@ -1345,7 +1354,9 @@ class AutoOrderHook:
             if ready_count > 0 and (added_workers > 0 or trimmed_workers > 0):
                 logger.info(f"✨ [Auto-Order] 已就绪 {ready_count} 个独立并发抢购备用会话！")
 
-        threading.Thread(target=_prewarm, name="WorkerPreloadThread", daemon=True).start()
+        t = threading.Thread(target=_prewarm, name="WorkerPreloadThread", daemon=True)
+        t.start()
+        return t
 
     def get_worker(self) -> 'AutoOrderHook':
         """

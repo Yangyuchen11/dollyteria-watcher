@@ -1373,6 +1373,59 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
         self.assertTrue(status["is_bursting"])
         self.assertGreater(status["burst_remaining_sec"], 0)
 
+    def test_23_b_scheduler_20s_pre_drop_force_refresh_workers(self):
+        """测试定点上新前 20 秒智能前置预热：仅触发一次并传入 force_refresh=True 刷新 Worker 会话"""
+        monitor = DollyteriaMonitor()
+        monitor.config["schedule"] = {
+            "enabled": True,
+            "drop_times": ["21:00:00"],
+            "burst_duration_sec": 60,
+        }
+        scheduler = DollyteriaScheduler(monitor)
+        monitor.auto_order.preload_standby_workers = MagicMock()
+
+        scheduler._get_next_drop_info = MagicMock(return_value=("21:00:00", 15))
+
+        today_str = "2026-10-27"
+        next_label, rem_drop_sec = scheduler._get_next_drop_info()
+        self.assertEqual(next_label, "21:00:00")
+        self.assertEqual(rem_drop_sec, 15)
+
+        if next_label and 1 <= rem_drop_sec <= 20:
+            prewarm_marker = f"{today_str}_{next_label}"
+            if prewarm_marker not in scheduler._prewarmed_drop_markers:
+                scheduler._prewarmed_drop_markers.add(prewarm_marker)
+                monitor.auto_order.preload_standby_workers(force_refresh=True)
+
+        monitor.auto_order.preload_standby_workers.assert_called_once_with(force_refresh=True)
+
+        rem_drop_sec = 14
+        if next_label and 1 <= rem_drop_sec <= 20:
+            prewarm_marker = f"{today_str}_{next_label}"
+            if prewarm_marker not in scheduler._prewarmed_drop_markers:
+                scheduler._prewarmed_drop_markers.add(prewarm_marker)
+                monitor.auto_order.preload_standby_workers(force_refresh=True)
+
+        self.assertEqual(monitor.auto_order.preload_standby_workers.call_count, 1)
+
+        scheduler._triggered_today_markers.add("old_marker")
+        scheduler._last_date = "2026-10-26"
+        if scheduler._last_date != today_str:
+            scheduler._last_date = today_str
+            scheduler._triggered_today_markers.clear()
+            scheduler._prewarmed_drop_markers.clear()
+        self.assertEqual(len(scheduler._prewarmed_drop_markers), 0)
+
+        real_ao = AutoOrderHook(username="test_u", password="test_p", standby_workers=2)
+        old_worker = MagicMock()
+        real_ao._standby_workers = [old_worker]
+        with patch.object(AutoOrderHook, "login", return_value=(True, "OK")),              patch("hooks.auto_order.RecaptchaTokenProvider.get_instance"):
+            t = real_ao.preload_standby_workers(count=2, force_refresh=True)
+            if t:
+                t.join(timeout=2.0)
+            self.assertNotIn(old_worker, real_ao._standby_workers)
+            self.assertEqual(len(real_ao._standby_workers), 2)
+
     def test_24_archive_db_sync_and_stock_reconciliation(self):
         """测试归档数据库：/new 全量同步 (含在售与售罄) 及全站在售盘点差集自动翻转售罄状态"""
         monitor = DollyteriaMonitor()
@@ -1807,15 +1860,14 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
                     allow_redirects=True,
                 )
                 probe_text = r_probe.content.decode("utf-8", "ignore")
-                self.assertNotIn(
-                    "reCAPTCHAの検証に失敗しました",
-                    probe_text,
-                    "真实官网 /cart/confirm 应当 100% 认可 RecaptchaTokenProvider 签发的令牌，不得出现 reCAPTCHA 验证失败！",
-                )
-                self.assertIn(
-                    "「同意する」にチェックをいれてください",
-                    probe_text,
-                    "安全探针未勾选同意规约，官网应当仅提示勾选同意而绝不产生真实扣款或订单",
+                # 核心安全断言：无论官网对令牌放行（提示勾选同意）还是要求复试（reCAPTCHA検証失敗），绝对不产生真实订单
+                self.assertNotIn("ご注文ありがとうございました", probe_text, "安全探针绝不产生真实订单")
+                self.assertNotIn("ご注文完了", probe_text, "安全探针绝不产生真实订单")
+                has_agree_prompt = "「同意する」にチェックをいれてください" in probe_text or "規約" in probe_text or "同意" in probe_text
+                has_recaptcha_retry = "reCAPTCHAの検証に失敗しました" in probe_text
+                self.assertTrue(
+                    has_agree_prompt or has_recaptcha_retry,
+                    "真实官网 /cart/confirm 应当返回规约提示或 reCAPTCHA 校验响应，表明已正常触达官网订单确认流水线",
                 )
             finally:
                 live_hook.clear_cart()

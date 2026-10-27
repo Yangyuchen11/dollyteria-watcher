@@ -28,6 +28,7 @@ class DollyteriaScheduler:
 
         # 记录已触发的定点，避免同一分钟内多次触发
         self._triggered_today_markers = set()
+        self._prewarmed_drop_markers = set()
 
     def start(self):
         """启动后台调度线程"""
@@ -129,11 +130,15 @@ class DollyteriaScheduler:
                 drop_times = sched_cfg.get("drop_times", [])
                 today_str = now.strftime("%Y-%m-%d")
 
-                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前登录预热备用 Worker 会话
-                _, rem_drop_sec = self._get_next_drop_info()
-                if 1 <= rem_drop_sec <= 20:
-                    if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
-                        self.monitor.auto_order.preload_standby_workers()
+                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前强制刷新并预热全新备用会话与风控通道
+                next_label, rem_drop_sec = self._get_next_drop_info()
+                if next_label and 1 <= rem_drop_sec <= 20:
+                    prewarm_marker = f"{today_str}_{next_label}"
+                    if prewarm_marker not in self._prewarmed_drop_markers:
+                        self._prewarmed_drop_markers.add(prewarm_marker)
+                        logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，提前强制刷新并预热全新备用 Worker 会话与风控通道...")
+                        if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
+                            self.monitor.auto_order.preload_standby_workers(force_refresh=True)
 
                 for dt_str in drop_times:
                     parts = [int(p) for p in dt_str.strip().split(":") if p.strip().isdigit()]
@@ -167,6 +172,7 @@ class DollyteriaScheduler:
                 if not hasattr(self, "_last_date") or self._last_date != today_str:
                     self._last_date = today_str
                     self._triggered_today_markers.clear()
+                    self._prewarmed_drop_markers.clear()
 
                 # 4. 每日清晨在库全量盘点与售罄更新 (默认 05:00:00，仅约 8MB 流量)
                 daily_sync_cfg = sched_cfg.get("daily_stock_sync", {})

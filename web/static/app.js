@@ -1497,7 +1497,7 @@ function bindEvents() {
             const payName = payMethod === 'store_pickup' ? '店頭支払' : (payMethod === 'bank_transfer' ? '銀行振込' : '代金引換');
 
             elements.btnTestDryRunOrder.disabled = true;
-            elements.btnTestDryRunOrder.textContent = '⏳ 正在执行风控探针测试';
+            elements.btnTestDryRunOrder.textContent = '⏳ 正在执行测试';
             showToast(`正在执行【${payName}】全流程仿真测试 (含官网 reCAPTCHA 实盘核验探针)...`, 'info');
 
             if (elements.aoTestResult) {

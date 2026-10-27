@@ -80,6 +80,10 @@ const elements = {
     aoTestPaySelect: document.getElementById('ao-test-pay-select'),
     btnTestDryRunOrder: document.getElementById('btn-test-dry-run-order'),
     btnTestRecaptchaToken: document.getElementById('btn-test-recaptcha-token'),
+    aoTestProbeToggle: document.getElementById('ao-test-probe-toggle'),
+    btnOpenGuiBrowser: document.getElementById('btn-open-gui-browser'),
+    btnAutoWarmBrowser: document.getElementById('btn-auto-warm-browser'),
+    browserProfileStatusBadge: document.getElementById('browser-profile-status-badge'),
     aoTestResult: document.getElementById('ao-test-result'),
     aoModeBanner: document.getElementById('ao-mode-banner'),
     aoModeIcon: document.getElementById('ao-mode-icon'),
@@ -1510,7 +1514,13 @@ function bindEvents() {
                 const res = await fetch('/api/test_auto_order', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, item_id: itemId, payment_method: payMethod, probe_recaptcha: true })
+                    body: JSON.stringify({
+                        username,
+                        password,
+                        item_id: itemId,
+                        payment_method: payMethod,
+                        probe_recaptcha: elements.aoTestProbeToggle ? elements.aoTestProbeToggle.checked : false
+                    })
                 });
 
                 if (!res.ok) {
@@ -1611,7 +1621,118 @@ function bindEvents() {
                 }
             } finally {
                 elements.btnTestDryRunOrder.disabled = false;
-                elements.btnTestDryRunOrder.textContent = '🧪 仿真下单 (含实盘风控探针)';
+                elements.btnTestDryRunOrder.textContent = '🧪 仿真测试';
+            }
+        });
+    }
+
+    // 浏览器信誉与养号工具箱: 打开桌面 Chrome 窗口 (登录 Google / 养号)
+    if (elements.btnOpenGuiBrowser) {
+        elements.btnOpenGuiBrowser.addEventListener('click', async () => {
+            elements.btnOpenGuiBrowser.disabled = true;
+            const origText = elements.btnOpenGuiBrowser.textContent;
+            elements.btnOpenGuiBrowser.textContent = '⏳ 正在启动桌面窗口...';
+            showToast('正在释放后台锁并启动桌面 Chrome 浏览器窗口...', 'info');
+            try {
+                const res = await fetch('/api/browser/open_gui', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: 'https://accounts.google.com/' })
+                });
+                if (!res.ok) {
+                    const text = await res.text();
+                    let errMsg = `服务器响应异常 (${res.status})`;
+                    try {
+                        const errJson = JSON.parse(text);
+                        if (errJson && errJson.message) errMsg = errJson.message;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+                const data = await res.json();
+                if (data.success) {
+                    showToast('🎉 Chrome 窗口已弹出！请在其中登录 Google 账号或浏览网页，完成后正常关闭该窗口即可。', 'success');
+                    if (elements.browserProfileStatusBadge) {
+                        elements.browserProfileStatusBadge.textContent = '桌面窗口运行中';
+                        elements.browserProfileStatusBadge.style.background = 'rgba(56, 189, 248, 0.2)';
+                        elements.browserProfileStatusBadge.style.color = '#38bdf8';
+                    }
+                } else {
+                    showToast(`启动桌面浏览器失败: ${data.message}`, 'error');
+                }
+            } catch (err) {
+                showToast(`启动异常: ${err.message}`, 'error');
+            } finally {
+                elements.btnOpenGuiBrowser.disabled = false;
+                elements.btnOpenGuiBrowser.textContent = origText;
+            }
+        });
+    }
+
+    // 浏览器信誉与养号工具箱: 一键自动养号预热
+    if (elements.btnAutoWarmBrowser) {
+        elements.btnAutoWarmBrowser.addEventListener('click', async () => {
+            elements.btnAutoWarmBrowser.disabled = true;
+            const origText = elements.btnAutoWarmBrowser.textContent;
+            elements.btnAutoWarmBrowser.textContent = '⏳ 正在自动预热养号中...';
+            showToast('正在自动访问 Google 搜索主页与 Dollyteria 官网，沉淀真实浏览缓存...', 'info');
+
+            if (elements.aoTestResult) {
+                elements.aoTestResult.style.display = 'block';
+                elements.aoTestResult.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);">
+                        <span class="status-pulse" style="width:10px;height:10px;background:#38bdf8;border-radius:50%;display:inline-block;"></span>
+                        正在自动为 Chromium 内核注入 Google 检索会话、Dollyteria 核心样式表与商品图片缓存...
+                    </div>
+                `;
+            }
+
+            try {
+                const res = await fetch('/api/browser/auto_warm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!res.ok) {
+                    const text = await res.text();
+                    let errMsg = `服务器响应异常 (${res.status})`;
+                    try {
+                        const errJson = JSON.parse(text);
+                        if (errJson && errJson.message) errMsg = errJson.message;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+                const data = await res.json();
+                if (data.success) {
+                    showToast('🎉 浏览器环境自动养号完成！已成功沉淀真实浏览痕迹', 'success');
+                    const stepsHtml = (data.steps || []).map(s => `<li>✓ ${escapeHtml(s)}</li>`).join('');
+                    if (elements.aoTestResult) {
+                        elements.aoTestResult.innerHTML = `
+                            <div class="ao-res-header">
+                                <span class="ao-res-status success">✅ 浏览器环境自动养号与缓存预热成功</span>
+                            </div>
+                            <div style="font-size: 13px; color: var(--text-primary); margin: 8px 0;">
+                                ${escapeHtml(data.message)}
+                            </div>
+                            <ul style="font-size: 12px; color: var(--text-secondary); line-height: 1.8; margin: 0; padding-left: 18px;">
+                                ${stepsHtml}
+                            </ul>
+                        `;
+                    }
+                    if (elements.browserProfileStatusBadge) {
+                        elements.browserProfileStatusBadge.textContent = '已沉淀真实缓存';
+                        elements.browserProfileStatusBadge.style.background = 'rgba(52, 211, 153, 0.15)';
+                        elements.browserProfileStatusBadge.style.color = '#34d399';
+                    }
+                } else {
+                    showToast(`自动养号失败: ${data.message}`, 'error');
+                    if (elements.aoTestResult) {
+                        elements.aoTestResult.innerHTML = `<div style="color:#f87171;">养号失败: ${escapeHtml(data.message)}</div>`;
+                    }
+                }
+            } catch (err) {
+                showToast(`养号请求异常: ${err.message}`, 'error');
+            } finally {
+                elements.btnAutoWarmBrowser.disabled = false;
+                elements.btnAutoWarmBrowser.textContent = origText;
             }
         });
     }

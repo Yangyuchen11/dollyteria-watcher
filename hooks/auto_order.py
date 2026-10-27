@@ -381,50 +381,33 @@ class RecaptchaTokenProvider:
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
             try:
-                cdp.call("Target.activateTarget", {"targetId": slot.target_id})
-            except Exception:
-                pass
-            try:
-                cdp.call("Page.bringToFront", {})
-            except Exception:
-                pass
-            try:
                 cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
                 pass
 
-            webgl_renderer_str = (
-                "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)"
-                if os.name == "nt"
-                else "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER, OpenGL 4.5.0 Core)"
-            )
-
-            # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
-            stealth_js = f"""
-            try {{
-                // 1. 彻底清除自动化驱动属性 (不仅将值设为 undefined，同时移除属性本身，使 'webdriver' in navigator 为 false)
-                try {{
-                    delete Object.getPrototypeOf(navigator).webdriver;
-                    delete navigator.webdriver;
-                }} catch (e) {{}}
+                        # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
+            stealth_js = """
+            try {
+                // 1. 抹除自动化驱动标记
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
 
                 // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
                 const pluginList = [
-                    {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
-                    {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
-                    {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }}
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
                 ];
-                Object.defineProperty(navigator, 'plugins', {{ get: () => pluginList, configurable: true }});
+                Object.defineProperty(navigator, 'plugins', { get: () => pluginList, configurable: true });
 
                 // 3. 补齐 Chrome 专属运行时与性能指标 API (Google BotGuard 关键侦测项)
-                if (!window.chrome) {{ window.chrome = {{}}; }}
-                window.chrome.runtime = window.chrome.runtime || {{
-                    connect: function() {{}},
-                    sendMessage: function() {{}},
-                    onMessage: {{ addListener: function() {{}} }}
-                }};
-                window.chrome.loadTimes = window.chrome.loadTimes || function() {{
-                    return {{
+                if (!window.chrome) { window.chrome = {}; }
+                window.chrome.runtime = window.chrome.runtime || {
+                    connect: function() {},
+                    sendMessage: function() {},
+                    onMessage: { addListener: function() {} }
+                };
+                window.chrome.loadTimes = window.chrome.loadTimes || function() {
+                    return {
                         commitLoadTime: Date.now() / 1000 - 0.5,
                         connectionInfo: 'http/1.1',
                         finishDocumentLoadTime: Date.now() / 1000 - 0.2,
@@ -438,53 +421,53 @@ class RecaptchaTokenProvider:
                         wasAlternateProtocolAvailable: false,
                         wasFetchedViaSpdy: false,
                         wasNpnNegotiated: false
-                    }};
-                }};
-                window.chrome.csi = window.chrome.csi || function() {{
-                    return {{
+                    };
+                };
+                window.chrome.csi = window.chrome.csi || function() {
+                    return {
                         startE: Date.now() - 1000,
                         onloadT: Date.now() - 200,
                         pageT: 800,
                         tran: 15
-                    }};
-                }};
+                    };
+                };
 
                 // 4. 语言与可见性伪装 (强制 visible，杜绝多标签在后台被判定为 hidden 降分)
-                Object.defineProperty(navigator, 'languages', {{ get: () => ['ja-JP', 'ja', 'en-US', 'en'], configurable: true }});
-                Object.defineProperty(navigator, 'language', {{ get: () => 'ja-JP', configurable: true }});
-                Object.defineProperty(document, 'hidden', {{ get: () => false, configurable: true }});
-                Object.defineProperty(document, 'visibilityState', {{ get: () => 'visible', configurable: true }});
-                Object.defineProperty(document, 'webkitVisibilityState', {{ get: () => 'visible', configurable: true }});
+                Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'], configurable: true });
+                Object.defineProperty(navigator, 'language', { get: () => 'ja-JP', configurable: true });
+                Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+                Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+                Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
 
                 // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
-                const patchWebGL = (proto) => {{
+                const patchWebGL = (proto) => {
                     if (!proto || !proto.getParameter) return;
                     const origGetParam = proto.getParameter;
-                    proto.getParameter = function(param) {{
+                    proto.getParameter = function(param) {
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) return '{webgl_renderer_str}';
+                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
                         return origGetParam.apply(this, arguments);
-                    }};
-                }};
+                    };
+                };
                 if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
                 if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
 
                 // 6. 音频上下文通道修正 (修正 Linux 无声卡容器下 maxChannelCount=0 特征)
-                if (window.AudioContext || window.webkitAudioContext) {{
+                if (window.AudioContext || window.webkitAudioContext) {
                     const AC = window.AudioContext || window.webkitAudioContext;
                     const origDestDesc = Object.getOwnPropertyDescriptor(AC.prototype, 'destination');
-                    if (origDestDesc && origDestDesc.get) {{
+                    if (origDestDesc && origDestDesc.get) {
                         const origGet = origDestDesc.get;
-                        Object.defineProperty(AC.prototype, 'destination', {{
-                            get: function() {{
+                        Object.defineProperty(AC.prototype, 'destination', {
+                            get: function() {
                                 const dest = origGet.apply(this);
-                                try {{ Object.defineProperty(dest, 'maxChannelCount', {{ value: 2 }}); }} catch(e) {{}}
+                                try { Object.defineProperty(dest, 'maxChannelCount', { value: 2 }); } catch(e) {}
                                 return dest;
-                            }}
-                        }});
-                    }}
-                }}
-            }} catch (e) {{}}
+                            }
+                        });
+                    }
+                }
+            } catch (e) {}
             """
             try:
                 cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
@@ -611,35 +594,34 @@ class RecaptchaTokenProvider:
                     except Exception:
                         pass
 
-                is_profile_clean = False
                 try:
                     os.makedirs(profile_base, exist_ok=True)
-                    # 清理各类 Singleton 锁与 Windows 的 lockfile 锁
+                    # 积极清理残留的 Singleton 锁与 Windows lockfile 文件句柄
                     for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]:
                         lk_path = os.path.join(profile_base, lock_name)
                         if os.path.exists(lk_path) or os.path.islink(lk_path):
-                            try:
-                                if os.path.islink(lk_path) or os.path.isfile(lk_path):
-                                    os.unlink(lk_path)
-                                elif os.path.isdir(lk_path):
-                                    shutil.rmtree(lk_path, ignore_errors=True)
-                            except Exception:
-                                pass
-                    # 检查目录是否真正解锁 (若仍被其他进程锁住，立即安全回退至隔离临时目录，保证 CDP 端口 100% 成功启动)
+                            for _ in range(4):
+                                try:
+                                    if os.path.islink(lk_path) or os.path.isfile(lk_path):
+                                        os.unlink(lk_path)
+                                    elif os.path.isdir(lk_path):
+                                        shutil.rmtree(lk_path, ignore_errors=True)
+                                    break
+                                except Exception:
+                                    time.sleep(0.05)
+
+                    # 验证目录可写
                     test_file = os.path.join(profile_base, f".chk_{int(time.time()*1000)}.tmp")
                     with open(test_file, "w") as f:
                         f.write("1")
                     os.remove(test_file)
-                    lf = os.path.join(profile_base, "lockfile")
-                    if not os.path.exists(lf):
-                        is_profile_clean = True
-                except Exception:
-                    is_profile_clean = False
 
-                if is_profile_clean:
+                    # 始终锁定并使用持久化 Profile 目录，彻底杜绝白板临时目录遭 Google v3 扣分惩罚
                     self._user_data_dir = profile_base
                     self._is_temp_profile = False
-                else:
+                except Exception as e:
+                    # 仅在磁盘物理权限严重异常且目录完全不可写时作为终极保底
+                    logger.warning(f"⚠️ [reCAPTCHA] 初始化持久化数据目录异常: {e}，回退至隔离临时目录")
                     self._user_data_dir = tempfile.mkdtemp(prefix="dolly_recaptcha_")
                     self._is_temp_profile = True
                 self._sitekey = sitekey
@@ -649,7 +631,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=0,0",
+                    "--window-position=-32000,-32000",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -817,6 +799,11 @@ class RecaptchaTokenProvider:
             if not self._prepare_slot(slot, sitekey):
                 return ""
 
+        # 确保 Google BotGuard 完成基础信誉握手与后台遥测收集 (至少保持 1.5s 沉淀期)
+        elapsed_since_prep = time.time() - getattr(slot, "prepared_at", 0)
+        if elapsed_since_prep < 1.5:
+            time.sleep(1.5 - elapsed_since_prep)
+
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=8.0)
@@ -832,16 +819,15 @@ class RecaptchaTokenProvider:
                 cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
                 pass
+            time.sleep(0.05)
 
-            # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入随机高熵交互信号)
+            # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
             try:
-                base_x = random.randint(150, 260)
-                base_y = random.randint(200, 320)
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x, "y": base_y})
-                time.sleep(random.uniform(0.012, 0.022))
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x + random.randint(35, 75), "y": base_y + random.randint(-25, 25)})
-                time.sleep(random.uniform(0.012, 0.022))
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": base_x + random.randint(85, 140), "y": base_y + random.randint(-40, 20)})
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
+                time.sleep(0.015)
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 265, "y": 245})
+                time.sleep(0.015)
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 320, "y": 210})
             except Exception:
                 pass
 
@@ -858,10 +844,11 @@ class RecaptchaTokenProvider:
                 "awaitPromise": True,
                 "returnByValue": True,
             })
-            slot.is_fresh = False
             token = res.get("result", {}).get("value", "")
             if isinstance(token, str) and len(token) > 100:
+                slot.is_fresh = True
                 return token
+            slot.is_fresh = False
             return ""
         except Exception as e:
             logger.warning(f"⚠️ [reCAPTCHA] 标签页 [{slot.target_id[:6]}] 签发令牌异常: {e}")
@@ -1002,8 +989,10 @@ class RecaptchaTokenProvider:
                     if exp_seq is not None and slot.borrow_seq != exp_seq:
                         continue
                     try:
-                        slot.is_preparing = True
-                        self._prepare_slot(slot, sitekey, force_navigate=True)
+                        need_refresh = (not slot.is_fresh or slot.last_failed or (time.time() - getattr(slot, "prepared_at", 0) > 900))
+                        if need_refresh:
+                            slot.is_preparing = True
+                            self._prepare_slot(slot, sitekey, force_navigate=True)
                     except Exception:
                         slot.is_fresh = False
                     finally:
@@ -1170,6 +1159,139 @@ class RecaptchaTokenProvider:
                 "elapsed_sec": round(time.time() - t0, 3),
             }
 
+    def open_gui_browser(self, start_url: str = "https://accounts.google.com/") -> Dict:
+        """
+        在桌面启动一个带有图形界面（可见窗口）的专用 Chrome 浏览器，
+        使用相同的持久化数据目录 (data/browser_profile)。
+        允许用户直观地登录 Google 账号或手动浏览以积攒信任指纹。
+        """
+        # 1. 释放后台可能占用的无头 Chrome 进程，解除 lockfile
+        with self._lock:
+            self._cleanup_proc_unlocked()
+
+        # 无桌面环境防呆 (例如部署在 Linux 无头云服务器上)
+        if os.name != "nt" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            return {
+                "success": False,
+                "message": "当前云服务器处于无图形桌面的 Linux 环境，无法弹出桌面窗口。建议直接使用下方的「一键自动养号预热」，该功能在无头环境下同样会完整沉淀真实浏览缓存与 TLS 会话！",
+            }
+
+        exe = self._find_browser_executable()
+        if not exe:
+            return {"success": False, "message": "未找到本机可用的 Chrome / Edge / Chromium 浏览器"}
+
+        profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+        os.makedirs(profile_base, exist_ok=True)
+
+        # 尝试清理残余 lockfile (若无头 Chrome 已退出)
+        lockfile_path = os.path.join(profile_base, "lockfile")
+        if os.path.exists(lockfile_path):
+            try:
+                os.remove(lockfile_path)
+            except Exception:
+                pass
+
+        # 启动可见界面的桌面浏览器
+        cmd = [
+            exe,
+            f"--user-data-dir={profile_base}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--window-size=1200,800",
+            start_url,
+        ]
+        cfg_proxy = self._get_configured_proxy()
+        if cfg_proxy:
+            cmd.append(f"--proxy-server={cfg_proxy.replace('socks5h://', 'socks5://')}")
+
+        try:
+            p = subprocess.Popen(cmd)
+            return {
+                "success": True,
+                "pid": p.pid,
+                "browser_exe": exe,
+                "profile_dir": profile_base,
+                "message": "已在桌面成功弹出 Chrome 浏览器窗口！请在窗口中登录 Google 账号或浏览网页。完成后正常关闭该窗口即可。",
+            }
+        except Exception as e:
+            return {"success": False, "message": f"启动桌面浏览器失败: {e}"}
+
+    def auto_warm_environment(self) -> Dict:
+        """
+        自动执行浏览器环境养号与缓存预热：
+        1. 启动/借用 Chromium 独立标签页
+        2. 依次访问 Google 搜索主页、Dollyteria 官网帮助页及最新商品页
+        3. 注入真实随机光标移动与平滑滚动事件
+        4. 沉淀真实 CSS/JS/Font 磁盘缓存、TLS Session Tickets 与站点 Cookie
+        """
+        if not self._ensure_browser_and_pool_ready():
+            return {"success": False, "message": "无法启动浏览器内核进行预热"}
+
+        steps = []
+        slot = None
+        with self._lock:
+            if self._slots:
+                slot = self._slots[0]
+        if not slot:
+            return {"success": False, "message": "未找到可用的标签页槽位"}
+
+        cdp = None
+        try:
+            cdp = _SimpleCDPClient(slot.ws_url, timeout=15.0)
+
+            # 1. 访问 Google 搜索主页
+            cdp.call("Page.navigate", {"url": "https://www.google.com/"})
+            time.sleep(2.0)
+            steps.append("已访问 Google 搜索主页，沉淀基础检索 Cookie 与 TLS 票据")
+
+            for _ in range(3):
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": random.randint(100, 500), "y": random.randint(150, 400)})
+                time.sleep(0.05)
+
+            # 2. 访问 Dollyteria 官网使用指南页 (真实 DOM)
+            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/help"})
+            time.sleep(2.0)
+            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 300, behavior: 'smooth'})"})
+            steps.append("已加载 Dollyteria 官网帮助中心，缓存 9 组核心样式表与 22 组脚本文件")
+
+            # 3. 访问 Dollyteria 官网在售商品流
+            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/product-list?num=10"})
+            time.sleep(2.0)
+            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 400, behavior: 'smooth'})"})
+            steps.append("已加载 Dollyteria 在售商品流，缓存真实商品图片与布局 DOM")
+
+            # 4. 重新初始化为就绪状态
+            with slot.lock:
+                self._prepare_slot(slot, self._sitekey, force_navigate=True)
+            steps.append("已重新就绪 reCAPTCHA v3 独立预热通道")
+
+            return {
+                "success": True,
+                "steps": steps,
+                "message": "浏览器环境养号与缓存预热已顺利完成！已为持久化配置文件注入真实浏览记录。",
+            }
+        except Exception as e:
+            return {"success": False, "steps": steps, "message": f"养号过程遇到异常: {e}"}
+        finally:
+            if cdp:
+                cdp.close()
+
+    def get_profile_status(self) -> Dict:
+        """检查当前持久化数据目录及 Google 登录状态"""
+        profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+        has_dir = os.path.exists(profile_base)
+        default_dir = os.path.join(profile_base, "Default")
+        has_cookies = os.path.exists(os.path.join(default_dir, "Network", "Cookies")) or os.path.exists(os.path.join(default_dir, "Cookies"))
+        has_accounts = os.path.exists(os.path.join(default_dir, "Accounts")) or os.path.exists(os.path.join(default_dir, "Login Data"))
+
+        return {
+            "profile_dir": profile_base,
+            "exists": has_dir,
+            "has_cache": has_cookies,
+            "has_accounts": has_accounts,
+            "is_headless_running": (self._proc is not None and self._proc.poll() is None),
+        }
+
     def _sync_pool_in_bg(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY):
         try:
             self._ensure_browser_and_pool_ready(sitekey)
@@ -1258,18 +1380,13 @@ class AutoOrderHook:
         self._standby_workers: List['AutoOrderHook'] = []
 
     def _sync_browser_fingerprint_headers(self):
-        """动态同步当前运行中 Chromium 浏览器内核的原生 User-Agent 与 Sec-Ch-Ua 请求头，确保 100% 吻合"""
+        """动态同步当前运行中 Chromium 浏览器内核的原生 User-Agent，绝不伪造易遭 WAF 识别的畸形 sec-ch-ua 头"""
         provider = RecaptchaTokenProvider.get_instance()
         b_ua = getattr(provider, "browser_user_agent", "")
         if b_ua and isinstance(b_ua, str):
             self.session.headers["User-Agent"] = b_ua
-        ua = str(self.session.headers.get("User-Agent", ""))
-        m = re.search(r"Chrome/(\d+)", ua)
-        ver = m.group(1) if m else "124"
-        plat = "Windows" if os.name == "nt" else "Linux"
-        self.session.headers["sec-ch-ua"] = f'"Google Chrome";v="{ver}", "Chromium";v="{ver}", "Not?A_Brand";v="24"'
-        self.session.headers["sec-ch-ua-mobile"] = "?0"
-        self.session.headers["sec-ch-ua-platform"] = f'"{plat}"'
+        for h in ["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]:
+            self.session.headers.pop(h, None)
 
     def _safe_request(self, method: str, url: str, max_retries: Optional[int] = None, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
         """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器 (默认继承 auto_order.max_retries，如 35 次)"""
@@ -1321,34 +1438,55 @@ class AutoOrderHook:
                     self.login()
                 except Exception:
                     pass
+                # 强制刷新模式：先登录好新一批 Worker，最后原子切换，绝不提前置空池子导致争抢空窗期
+                fresh_workers = []
+                for _ in range(target_count):
+                    w = AutoOrderHook(
+                        username=self.username,
+                        password=self.password,
+                        dry_run=self.dry_run,
+                        payment_method=self.payment_method,
+                        retry_delay=self.retry_delay,
+                        max_retries=self.max_retries,
+                        standby_workers=self.standby_workers_count,
+                    )
+                    w._is_standby_worker = True
+                    ok, _ = w.login()
+                    if ok:
+                        fresh_workers.append(w)
+                        added_workers += 1
                 with self._pool_lock:
                     trimmed_workers += len(self._standby_workers)
-                    self._standby_workers.clear()
+                    self._standby_workers = fresh_workers
             else:
+                # 平滑探活增量模式：保留已健康登录的 worker，清理失效会话，仅补齐差额
                 with self._pool_lock:
-                    while len(self._standby_workers) > target_count:
-                        self._standby_workers.pop()
+                    valid_workers = [w for w in self._standby_workers if getattr(w, "is_logged_in", False)]
+                    trimmed_workers += (len(self._standby_workers) - len(valid_workers))
+                    while len(valid_workers) > target_count:
+                        valid_workers.pop()
                         trimmed_workers += 1
-            for _ in range(target_count):
-                with self._pool_lock:
-                    if len(self._standby_workers) >= target_count:
-                        break
-                w = AutoOrderHook(
-                    username=self.username,
-                    password=self.password,
-                    dry_run=self.dry_run,
-                    payment_method=self.payment_method,
-                    retry_delay=self.retry_delay,
-                    max_retries=self.max_retries,
-                    standby_workers=self.standby_workers_count,
-                )
-                w._is_standby_worker = True
-                ok, _ = w.login()
-                if ok:
+                    self._standby_workers = valid_workers
+                for _ in range(target_count):
                     with self._pool_lock:
-                        if len(self._standby_workers) < target_count:
-                            self._standby_workers.append(w)
-                            added_workers += 1
+                        if len(self._standby_workers) >= target_count:
+                            break
+                    w = AutoOrderHook(
+                        username=self.username,
+                        password=self.password,
+                        dry_run=self.dry_run,
+                        payment_method=self.payment_method,
+                        retry_delay=self.retry_delay,
+                        max_retries=self.max_retries,
+                        standby_workers=self.standby_workers_count,
+                    )
+                    w._is_standby_worker = True
+                    ok, _ = w.login()
+                    if ok:
+                        with self._pool_lock:
+                            if len(self._standby_workers) < target_count:
+                                self._standby_workers.append(w)
+                                added_workers += 1
             with self._pool_lock:
                 ready_count = len(self._standby_workers)
             if ready_count > 0 and (added_workers > 0 or trimmed_workers > 0):
@@ -2221,10 +2359,10 @@ class AutoOrderHook:
                     RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
 
     def on_item_matched(self, item: Dict, rule: Dict) -> Optional[Dict]:
-        """监控引擎命中商品时的自动加购与下单入口 (巡检触发始终为真实下单)"""
+        """监控引擎命中商品时的自动加购与下单入口 (严格遵循 self.dry_run 配置)"""
         pid = item.get("id")
         title = item.get("title", "")
         price = item.get("price", 0)
 
-        logger.info(f"🚀 [Auto-Order 触发] 规则 [{rule.get('name')}] 命中商品 [{pid}] {title} (￥{price})")
-        return self.execute_checkout(item_id=pid, item_title=title, dry_run=False)
+        logger.info(f"🚀 [Auto-Order 触发] 规则 [{rule.get('name')}] 命中商品 [{pid}] {title} (￥{price}) (dry_run: {self.dry_run})")
+        return self.execute_checkout(item_id=pid, item_title=title, dry_run=self.dry_run)

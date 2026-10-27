@@ -485,6 +485,26 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = provider.test_token_generation(sitekey=sitekey, action=action)
         return jsonify(res)
 
+    @app.route("/api/browser/open_gui", methods=["POST"])
+    def api_browser_open_gui():
+        from hooks.auto_order import RecaptchaTokenProvider
+        data = request.json or {}
+        url = (data.get("url") or "https://accounts.google.com/").strip()
+        res = RecaptchaTokenProvider.get_instance().open_gui_browser(start_url=url)
+        return jsonify(res)
+
+    @app.route("/api/browser/auto_warm", methods=["POST"])
+    def api_browser_auto_warm():
+        from hooks.auto_order import RecaptchaTokenProvider
+        res = RecaptchaTokenProvider.get_instance().auto_warm_environment()
+        return jsonify(res)
+
+    @app.route("/api/browser/status", methods=["GET"])
+    def api_browser_status():
+        from hooks.auto_order import RecaptchaTokenProvider
+        res = RecaptchaTokenProvider.get_instance().get_profile_status()
+        return jsonify(res)
+
     @app.route("/api/auto_order/buy", methods=["POST"])
     def api_auto_order_buy():
         data = request.json or {}

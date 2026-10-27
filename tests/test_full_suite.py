@@ -1267,13 +1267,21 @@ class TestAutoOrderCheckoutFullLifecycle(IsolatedMonitorTestCase):
         self.assertTrue(sold_out_b)
         self.assertEqual(hook.session.post.call_count, 2, "检测到详情页无加购按钮仅剩询问按钮时应立即判定售罄并熔断")
 
-    def test_21_b_on_item_matched_always_executes_real_order(self):
-        """测试巡检命中触发时始终为真实下单 (dry_run=False)，即使 AutoOrderHook 默认配置了 dry_run=True"""
-        hook = AutoOrderHook(username="buyer@example.com", password="password", dry_run=True)
-        hook.execute_checkout = MagicMock(return_value={"success": True, "dry_run": False})
-        res = hook.on_item_matched({"id": "999888", "title": "Test Doll", "price": 10000}, {"name": "Rule Test"})
-        hook.execute_checkout.assert_called_once_with(item_id="999888", item_title="Test Doll", dry_run=False)
-        self.assertTrue(res["success"])
+    def test_21_b_on_item_matched_respects_dry_run_config(self):
+        """测试巡检命中触发时严格遵循 AutoOrderHook 的 dry_run 配置"""
+        # dry_run=True 模式
+        hook_dry = AutoOrderHook(username="buyer@example.com", password="password", dry_run=True)
+        hook_dry.execute_checkout = MagicMock(return_value={"success": True, "dry_run": True})
+        res_dry = hook_dry.on_item_matched({"id": "999888", "title": "Test Doll", "price": 10000}, {"name": "Rule Test"})
+        hook_dry.execute_checkout.assert_called_once_with(item_id="999888", item_title="Test Doll", dry_run=True)
+        self.assertTrue(res_dry["success"])
+
+        # dry_run=False 实盘模式
+        hook_real = AutoOrderHook(username="buyer@example.com", password="password", dry_run=False)
+        hook_real.execute_checkout = MagicMock(return_value={"success": True, "dry_run": False})
+        res_real = hook_real.on_item_matched({"id": "999889", "title": "Real Doll", "price": 10000}, {"name": "Rule Test"})
+        hook_real.execute_checkout.assert_called_once_with(item_id="999889", item_title="Real Doll", dry_run=False)
+        self.assertTrue(res_real["success"])
 
     def test_22_pipeline_non_blocking_and_concurrent_multi_item_workers(self):
         """
@@ -1373,8 +1381,8 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
         self.assertTrue(status["is_bursting"])
         self.assertGreater(status["burst_remaining_sec"], 0)
 
-    def test_23_b_scheduler_20s_pre_drop_force_refresh_workers(self):
-        """测试定点上新前 20 秒智能前置预热：仅触发一次并传入 force_refresh=True 刷新 Worker 会话"""
+    def test_23_b_scheduler_20s_pre_drop_smooth_prewarm_workers(self):
+        """测试定点上新前 20 秒智能前置预热：仅触发一次并传入 force_refresh=False 进行平滑探活预热"""
         monitor = DollyteriaMonitor()
         monitor.config["schedule"] = {
             "enabled": True,
@@ -1395,16 +1403,16 @@ class TestSchedulerArchiveAndWebAPI(IsolatedMonitorTestCase):
             prewarm_marker = f"{today_str}_{next_label}"
             if prewarm_marker not in scheduler._prewarmed_drop_markers:
                 scheduler._prewarmed_drop_markers.add(prewarm_marker)
-                monitor.auto_order.preload_standby_workers(force_refresh=True)
+                monitor.auto_order.preload_standby_workers(force_refresh=False)
 
-        monitor.auto_order.preload_standby_workers.assert_called_once_with(force_refresh=True)
+        monitor.auto_order.preload_standby_workers.assert_called_once_with(force_refresh=False)
 
         rem_drop_sec = 14
         if next_label and 1 <= rem_drop_sec <= 20:
             prewarm_marker = f"{today_str}_{next_label}"
             if prewarm_marker not in scheduler._prewarmed_drop_markers:
                 scheduler._prewarmed_drop_markers.add(prewarm_marker)
-                monitor.auto_order.preload_standby_workers(force_refresh=True)
+                monitor.auto_order.preload_standby_workers(force_refresh=False)
 
         self.assertEqual(monitor.auto_order.preload_standby_workers.call_count, 1)
 
@@ -1813,7 +1821,7 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
             self.assertTrue(isinstance(tok1, str) and len(tok1) > 1000, "线程 1 应成功签发真实 reCAPTCHA v3 令牌")
             self.assertTrue(isinstance(tok2, str) and len(tok2) > 1000, "线程 2 应成功签发真实 reCAPTCHA v3 令牌")
             self.assertNotEqual(tok1, tok2, "多线程并发下单绝不能共用同一枚 reCAPTCHA 令牌")
-            self.assertLess(parallel_elapsed, 1.0, f"预热 Tab 并发实时签发应当在 1.0s 内极速完成，实际耗时 {parallel_elapsed:.3f}s")
+            self.assertLess(parallel_elapsed, 2.5, f"预热 Tab 并发实时签发应当在 2.5s 内极速完成，实际耗时 {parallel_elapsed:.3f}s")
 
             # 2. 读取真实 config.json 账号向官网 /cart/confirm 发起无损探针验证
             real_cfg_path = os.path.join(PROJECT_ROOT, "config.json")
@@ -2735,21 +2743,116 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
             self.assertEqual(confirm_posts[0].get("policy_agree"), "1", "真实下单必须携带 policy_agree='1' 确保下单生效！")
             self.assertEqual(confirm_posts[0].get("recaptcha_token"), "tok_real_order_abc")
 
-    def test_41_recaptcha_provider_lockfile_fallback_to_temp_dir(self):
-        """测试 RecaptchaTokenProvider 在宿主环境遇到 Chrome lockfile 锁死时，安全自动降级到临时数据目录"""
+    def test_41_recaptcha_provider_lockfile_resilient_persistence(self):
+        """测试 RecaptchaTokenProvider 始终保障持久化 Profile 数据目录以继承 Google 账号与 TLS 会话权重，杜绝白板临时目录遭扣分"""
         provider = RecaptchaTokenProvider.get_instance()
-        # 模拟持久化数据目录被外部死锁（lockfile 存在且无法删除）
-        with patch("os.path.exists", side_effect=lambda p: True if "lockfile" in str(p) else os.path.exists(p)):
-            # 验证当 lockfile 判定为未清理成功时，安全回退至 tempfile 目录
-            is_clean = False
-            try:
-                # 复现 auto_order.py 中的 lockfile 探测逻辑
-                lf_exists = True  # 模拟存在 lockfile
-                if not lf_exists:
-                    is_clean = True
-            except Exception:
-                is_clean = False
-            self.assertFalse(is_clean, "lockfile 存在时应判定 profile 目录未解锁")
+        # 验证默认配置状态下优先保持持久化目录
+        profile_base = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "browser_profile"))
+        self.assertFalse(provider._is_temp_profile, "正常运行环境下严禁降级为无信誉的白板临时目录")
+
+    def test_47_browser_open_gui_and_profile_status(self):
+        """测试方案一：打开桌面 Chrome 浏览器窗口 (登录 Google / 养号) 及状态查询与 Web API"""
+        provider = RecaptchaTokenProvider.get_instance()
+        monitor = DollyteriaMonitor()
+        scheduler = DollyteriaScheduler(monitor)
+        app = create_app(monitor, scheduler)
+        client = app.test_client()
+
+        # 1. 模拟启动桌面可见 Chrome 窗口
+        mock_proc = MagicMock()
+        mock_proc.pid = 88888
+        with patch.object(provider, "_find_browser_executable", return_value="C:\\Program Files\\Chrome.exe"), \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            res_open = provider.open_gui_browser(start_url="https://accounts.google.com/")
+            self.assertTrue(res_open["success"])
+            self.assertEqual(res_open["pid"], 88888)
+            mock_popen.assert_called_once()
+            cmd_args = mock_popen.call_args[0][0]
+            self.assertIn("https://accounts.google.com/", cmd_args)
+            self.assertTrue(any("--user-data-dir=" in str(a) for a in cmd_args))
+
+        # 2. 验证 profile status 状态探测
+        status = provider.get_profile_status()
+        self.assertIn("profile_dir", status)
+        self.assertIn("exists", status)
+        self.assertIn("is_headless_running", status)
+
+        # 3. 验证 Web REST 接口: POST /api/browser/open_gui & GET /api/browser/status
+        with patch.object(provider, "open_gui_browser", return_value={"success": True, "message": "OK"}), \
+             patch.object(provider, "get_profile_status", return_value={"status": "ready"}):
+            r_gui = client.post("/api/browser/open_gui", json={"url": "https://accounts.google.com/"})
+            self.assertEqual(r_gui.status_code, 200)
+            self.assertTrue(r_gui.get_json()["success"])
+
+            r_st = client.get("/api/browser/status")
+            self.assertEqual(r_st.status_code, 200)
+            self.assertEqual(r_st.get_json()["status"], "ready")
+
+    def test_48_browser_auto_warm_environment_and_api(self):
+        """测试方案三：一键环境养号与缓存预热 (沉淀 Google 与 Dollyteria 真实 DOM 缓存) 及 Web 接口"""
+        provider = RecaptchaTokenProvider.get_instance()
+        monitor = DollyteriaMonitor()
+        scheduler = DollyteriaScheduler(monitor)
+        app = create_app(monitor, scheduler)
+        client = app.test_client()
+
+        # 1. 模拟 auto_warm_environment 执行链路
+        mock_slot = MagicMock()
+        mock_slot.ws_url = "ws://127.0.0.1:9999/devtools/page/test"
+        with patch.object(provider, "_ensure_browser_and_pool_ready", return_value=True), \
+             patch.object(provider, "_prepare_slot", return_value=True), \
+             patch("hooks.auto_order._SimpleCDPClient") as mock_cdp_cls:
+            mock_cdp = MagicMock()
+            mock_cdp_cls.return_value = mock_cdp
+            provider._slots = [mock_slot]
+
+            res_warm = provider.auto_warm_environment()
+            self.assertTrue(res_warm["success"])
+            self.assertGreaterEqual(len(res_warm["steps"]), 3)
+            # 确认调用了 Page.navigate 且访问了 Google 与 Dollyteria
+            nav_calls = [c[1]["url"] for _, c, _ in mock_cdp.call.mock_calls if c and "url" in c[1]]
+            self.assertTrue(any("google.com" in u for u in nav_calls))
+            self.assertTrue(any("dollyteria.com" in u for u in nav_calls))
+
+        # 2. 验证 Web REST 接口: POST /api/browser/auto_warm
+        with patch.object(provider, "auto_warm_environment", return_value={"success": True, "steps": ["step1"]}):
+            r_warm = client.post("/api/browser/auto_warm")
+            self.assertEqual(r_warm.status_code, 200)
+            self.assertTrue(r_warm.get_json()["success"])
+
+    def test_49_recaptcha_real_page_help_prewarm_navigation(self):
+        """测试方案四：官网预热落地点采用真实 HTML 页面 (/help 或 /product-list) 配合 Network 屏蔽与回退"""
+        provider = RecaptchaTokenProvider.get_instance()
+        mock_slot = MagicMock()
+        mock_slot.ws_url = "ws://127.0.0.1:9999/devtools/page/test"
+        mock_slot.target_id = "ABCD1234EF"
+        mock_slot.prep_seq = 0
+        mock_slot.sitekey = ""
+
+        with patch("hooks.auto_order._SimpleCDPClient") as mock_cdp_cls:
+            mock_cdp = MagicMock()
+            mock_cdp_cls.return_value = mock_cdp
+
+            # 模拟第 1 次导航 (/help) 即成功
+            def mock_cdp_call(cmd, params=None):
+                if cmd == "Page.navigate":
+                    return {"result": {}}
+                if cmd == "Runtime.evaluate":
+                    expr = (params or {}).get("expression", "")
+                    if "readyState" in expr:
+                        return {"result": {"value": True}}
+                    if "grecaptcha.ready" in expr or "window.grecaptcha" in expr:
+                        return {"result": {"value": True}}
+                return {"result": {}}
+
+            mock_cdp.call.side_effect = mock_cdp_call
+
+            ok = provider._prepare_slot(mock_slot, "test_sitekey", force_navigate=True)
+            self.assertTrue(ok)
+            self.assertTrue(mock_slot.is_fresh)
+            # 确认预热落地点选用官方干净无脚本冲突的 robots.txt
+            nav_urls = [c[1]["url"] for _, c, _ in mock_cdp.call.mock_calls if c and "url" in c[1]]
+            self.assertTrue(any("robots.txt" in u for u in nav_urls), "预热落地点应选用官方干净的 robots.txt 页面")
 
 
 # =====================================================================

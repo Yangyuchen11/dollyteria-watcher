@@ -830,12 +830,42 @@
                                     <option value="store_pickup">🏬 店頭支払 (pay_procedure=8)</option>
                                 </select>
                             </div>
-                            <div class="form-group col-5" style="display: flex; align-items: flex-end; gap: 8px;">
-                                <button id="btn-test-dry-run-order" class="btn btn-secondary" style="flex: 1; min-width: 0; white-space: nowrap;" title="走通登录、加购、地址及支付选择全链路并在确认页发送零风险实盘探针验证官网风控">🧪 仿真下单 (含实盘风控探针)</button>
-                                <button id="btn-test-recaptcha-token" class="btn btn-accent" style="flex: 1; min-width: 0; white-space: nowrap;" title="无需加购与下单，直接在 0.3 秒内演练后台 Chrome 预热池与 Google reCAPTCHA 令牌签发通道">⚡ 令牌极速测试 (纯通道)</button>
+                            <div class="form-group col-5" style="display: flex; align-items: flex-end;">
+                                <div style="display: flex; flex-direction: column; width: 100%;">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <button type="button" id="btn-test-dry-run-order" class="btn btn-secondary" style="flex: 1; min-width: 0; white-space: nowrap;" title="走通登录、加购、地址及支付选择全链路验证下单流程">🧪 仿真测试</button>
+                                        <button type="button" id="btn-test-recaptcha-token" class="btn btn-accent" style="flex: 1; min-width: 0; white-space: nowrap;" title="无需加购与下单，直接在 0.3 秒内演练后台 Chrome 预热池与 Google reCAPTCHA 令牌签发通道">⚡ 令牌极速测试</button>
+                                    </div>
+                                    <label class="form-check-label" style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); margin-top: 6px; cursor: pointer;">
+                                        <input type="checkbox" id="ao-test-probe-toggle"> 附加实盘风控探针核验 (若遇 Google 短时频控可取消勾选，仅演练加购)
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <div id="ao-test-result" class="ao-test-result-box" style="display: none;"></div>
+
+                        <!-- Google v3 养号与信誉提升工具箱 -->
+                        <div class="browser-trust-box" style="margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: rgba(56, 189, 248, 0.05); border: 1px dashed rgba(56, 189, 248, 0.25);">
+                            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                                <div>
+                                    <div style="font-weight: 600; font-size: 13px; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+                                        <span>🛡️ Google reCAPTCHA v3 信誉与环境养号工具箱</span>
+                                        <span id="browser-profile-status-badge" class="badge" style="font-size: 11px; background: rgba(52, 211, 153, 0.15); color: #34d399;">持久化环境</span>
+                                    </div>
+                                    <div style="font-size: 12px; color: var(--text-secondary); margin-top: 3px;">
+                                        若遭遇 Google 动态限频降分，可点击在桌面弹出浏览器窗口登录 Google/Gmail 账号，或一键自动为环境注入真实浏览缓存
+                                    </div>
+                                </div>
+                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                    <button type="button" id="btn-open-gui-browser" class="btn btn-secondary btn-sm" title="在桌面弹出专用 Chrome 浏览器窗口，登录您的 Google/Gmail 账号或手动浏览以沉淀真实信任凭证">
+                                        <span>🌐 打开浏览器窗口 (登录 Google / 养号)</span>
+                                    </button>
+                                    <button type="button" id="btn-auto-warm-browser" class="btn btn-secondary btn-sm" title="自动在后台访问 Google 搜索主页与 Dollyteria 官网，沉淀真实 CSS/JS 磁盘缓存与指纹">
+                                        <span>⚡ 一键自动养号预热</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1246,6 +1276,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=3.1"></script>
+    <script src="/static/app.js?v=3.6"></script>
 </body>
 </html>

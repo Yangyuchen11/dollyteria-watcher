@@ -130,15 +130,15 @@ class DollyteriaScheduler:
                 drop_times = sched_cfg.get("drop_times", [])
                 today_str = now.strftime("%Y-%m-%d")
 
-                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前强制刷新并预热全新备用会话与风控通道
+                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前平滑探活并预热备用会话与风控通道 (避免临放货时发生重置震荡)
                 next_label, rem_drop_sec = self._get_next_drop_info()
                 if next_label and 1 <= rem_drop_sec <= 20:
                     prewarm_marker = f"{today_str}_{next_label}"
                     if prewarm_marker not in self._prewarmed_drop_markers:
                         self._prewarmed_drop_markers.add(prewarm_marker)
-                        logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，提前强制刷新并预热全新备用 Worker 会话与风控通道...")
+                        logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，提前平滑预热备用 Worker 会话与风控通道...")
                         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
-                            self.monitor.auto_order.preload_standby_workers(force_refresh=True)
+                            self.monitor.auto_order.preload_standby_workers(force_refresh=False)
 
                 for dt_str in drop_times:
                     parts = [int(p) for p in dt_str.strip().split(":") if p.strip().isdigit()]

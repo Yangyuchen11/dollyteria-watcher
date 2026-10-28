@@ -48,7 +48,8 @@
     "enabled": true,
     "interval_enabled": true,
     "interval_minutes": 30,
-    "max_stream_pages": 5
+    "max_stream_pages": 5,
+    "burst_probe_timeout_sec": 2.0
   },
   "watches": [
     {

@@ -41,19 +41,30 @@ class DollyteriaScraper:
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
 
-    def _get(self, url: str, params: Optional[dict] = None) -> Optional[str]:
+    def _get(
+        self,
+        url: str,
+        params: Optional[dict] = None,
+        timeout: Optional[float] = None,
+        session: Optional[requests.Session] = None,
+        max_retries: Optional[int] = None,
+    ) -> Optional[str]:
         """带重试机制的 HTTP GET 请求，针对集中上新访问繁忙与网络抖动进行弹性退避重试"""
         self.last_fetch_failed = False
         last_exc = None
-        for attempt in range(self.max_retries + 1):
+        req_timeout = timeout if timeout is not None else self.timeout
+        req_session = session if session is not None else self.session
+        retries = max_retries if max_retries is not None else self.max_retries
+
+        for attempt in range(retries + 1):
             try:
-                resp = self.session.get(url, params=params, timeout=self.timeout)
+                resp = req_session.get(url, params=params, timeout=req_timeout)
                 if resp.status_code == 200:
                     # 识别 200 状态码下的伪正常"访问集中/繁忙"占位页
                     text = resp.text
                     if any(busy_kw in text for busy_kw in ["アクセス集中", "大変混み合っております", "回線が混雑", "ただいま混雑"]):
-                        logger.warning(f"Dollyteria 提示访问繁忙排队中 (尝试 {attempt + 1}/{self.max_retries + 1})")
-                        if attempt < self.max_retries:
+                        logger.warning(f"Dollyteria 提示访问繁忙排队中 (尝试 {attempt + 1}/{retries + 1})")
+                        if attempt < retries:
                             retry_delay = round(min(0.5, 0.15 * (attempt + 1)), 2)
                             time.sleep(retry_delay)
                             continue
@@ -63,8 +74,8 @@ class DollyteriaScraper:
 
                 # 常见的瞬时繁忙状态码 (503 Service Unavailable, 429 Too Many Requests, 502/504 Gateway error)
                 if resp.status_code in [429, 502, 503, 504]:
-                    logger.warning(f"请求 {url} 遇到官网繁忙状态码 {resp.status_code} (尝试 {attempt + 1}/{self.max_retries + 1})")
-                    if attempt < self.max_retries:
+                    logger.warning(f"请求 {url} 遇到官网繁忙状态码 {resp.status_code} (尝试 {attempt + 1}/{retries + 1})")
+                    if attempt < retries:
                         retry_delay = round(min(0.5, 0.15 * (attempt + 1)), 2)
                         time.sleep(retry_delay)
                         continue
@@ -72,8 +83,8 @@ class DollyteriaScraper:
                     logger.warning(f"请求 {url} 返回状态码 {resp.status_code}")
             except Exception as e:
                 last_exc = e
-                logger.warning(f"请求失败 ({attempt + 1}/{self.max_retries + 1}): {e}")
-                if attempt < self.max_retries:
+                logger.warning(f"请求失败 ({attempt + 1}/{retries + 1}): {e}")
+                if attempt < retries:
                     retry_delay = round(min(0.5, 0.2 * (attempt + 1)), 2)
                     time.sleep(retry_delay)
         self.last_fetch_failed = True
@@ -160,11 +171,20 @@ class DollyteriaScraper:
 
         return items
 
-    def fetch_new_arrivals(self, num: int = 100, page: int = 1, in_stock_only: bool = True) -> List[Dict]:
+    def fetch_new_arrivals(
+        self,
+        num: int = 100,
+        page: int = 1,
+        in_stock_only: bool = True,
+        timeout: Optional[float] = None,
+        session: Optional[requests.Session] = None,
+        max_retries: Optional[int] = None,
+    ) -> List[Dict]:
         """
         抓取 Dollyteria 最新的上新流 (/new)
         这是最快获悉最新上架商品的方式，上新点往往第一时间出现在此。
         支持分页: page=1 (前100件), page=2 (101~200件), page=3 (201~300件)...
+        支持自定义 timeout / session / max_retries (供爆发期三路并发探针独立使用)
         """
         url = f"{BASE_URL}/new"
         params = {"num": str(num)}
@@ -173,7 +193,7 @@ class DollyteriaScraper:
         if in_stock_only:
             params["available"] = "1"
 
-        html = self._get(url, params=params)
+        html = self._get(url, params=params, timeout=timeout, session=session, max_retries=max_retries)
         items = self.parse_items(html)
         for it in items:
             it["is_new"] = True

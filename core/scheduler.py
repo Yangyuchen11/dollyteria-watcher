@@ -42,6 +42,8 @@ class DollyteriaScheduler:
     def stop(self):
         """停止调度线程"""
         self.running = False
+        if hasattr(self.monitor, "stop_burst_probes"):
+            self.monitor.stop_burst_probes()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         logger.info("⏰ Dollyteria 定时调度器已停止")
@@ -101,6 +103,9 @@ class DollyteriaScheduler:
         # 预先登录并储备备用 Worker 会话，保障爆发抢购零秒出击
         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
             self.monitor.auto_order.preload_standby_workers()
+        # 启动三路并发极速探针 (A:100件保底 | B:30件先锋 | C:30件交替)
+        if hasattr(self.monitor, "start_burst_probes"):
+            self.monitor.start_burst_probes(dur)
 
     def _run_loop(self):
         """调度主循环：每秒唤醒一次评估时间"""
@@ -117,14 +122,18 @@ class DollyteriaScheduler:
                 # 1. 检查爆发模式 (Burst Mode)
                 if self.is_bursting:
                     if now_ts < self.burst_end_time:
-                        burst_interval = float(sched_cfg.get("burst_interval_sec", 0.3))
-                        if now_ts - self.last_burst_check >= burst_interval:
+                        # 确保三路探针处于激活运行状态
+                        if hasattr(self.monitor, "is_burst_probes_running") and not self.monitor.is_burst_probes_running():
+                            self.monitor.start_burst_probes(int(self.burst_end_time - now_ts))
+                        # 周期性在终端汇报探测集群状态
+                        if now_ts - self.last_burst_check >= 3.0:
                             self.last_burst_check = now_ts
-                            logger.info(f"⚡ [爆发模式] 正在进行高频检测 (剩余 {int(self.burst_end_time - now_ts)}s)...")
-                            self.monitor.check_once(is_burst=True)
+                            logger.info(f"⚡ [爆发模式] 三路并发探针正在全力出击 (A:100件保底 | B:30件先锋 | C:30件交替) (剩余 {int(self.burst_end_time - now_ts)}s)...")
                     else:
                         self.is_bursting = False
-                        logger.info("⚡ 爆发模式持续时间结束，恢复正常巡检模式。")
+                        if hasattr(self.monitor, "stop_burst_probes"):
+                            self.monitor.stop_burst_probes()
+                        logger.info("⚡ 爆发模式持续时间结束，三路并发探针已安全停止，恢复正常巡检模式。")
 
                 # 2. 检查定点准时触发 (如 20:00:00 / 21:00:00)
                 drop_times = sched_cfg.get("drop_times", [])

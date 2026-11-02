@@ -186,6 +186,7 @@ class TriProbeBurstEngine:
                     timeout=timeout_sec, session=session_a, max_retries=0
                 )
                 if items:
+                    logger.info(f"✅ [探针A-全量保底] 第 1 页抓取成功: 获取 {len(items)} 条商品")
                     self.monitor.process_stream_items(items, source_tag="探针A-100件", is_burst=True)
                     if len(items) >= 100 and not self._stop_event.is_set():
                         try:
@@ -194,6 +195,7 @@ class TriProbeBurstEngine:
                                 timeout=timeout_sec, session=session_a, max_retries=0
                             )
                             if items_p2:
+                                logger.info(f"✅ [探针A-第2页] 第 2 页抓取成功: 获取 {len(items_p2)} 条商品")
                                 self.monitor.process_stream_items(items_p2, source_tag="探针A-第2页", is_burst=True)
                         except Exception as e:
                             logger.debug(f"⚠️ [探针A-第2页] 抓取异常: {e}")
@@ -228,6 +230,7 @@ class TriProbeBurstEngine:
                     timeout=timeout_sec, session=session_b, max_retries=0
                 )
                 if items:
+                    logger.info(f"✅ [探针B-死守前30] 第 1 页抓取成功: 获取 {len(items)} 条商品")
                     self.monitor.process_stream_items(items, source_tag="探针B-30件", is_burst=True)
                 else:
                     logger.debug("⚠️ [探针B] 未能获取数据，准备下一轮...")
@@ -281,6 +284,7 @@ class TriProbeBurstEngine:
 
                 if items:
                     tag = "探针C-第1页(1~30件)" if current_page == 1 else f"探针C-第{current_page}页({item_start}~{item_end}件)"
+                    logger.info(f"✅ [{tag}] 第 {current_page} 页抓取成功: 获取 {len(items)} 条商品")
                     matches = self.monitor.process_stream_items(items, source_tag=tag, is_burst=True)
 
                     # 判断是否继续顺延翻页：
@@ -520,6 +524,7 @@ class DollyteriaMonitor:
                 items = self.scraper.fetch_new_arrivals(num=100, page=p, in_stock_only=True)
                 if not items:
                     break
+                logger.info(f"✅ [基准线初始化] /new 第 {p} 页抓取成功: 获取 {len(items)} 条商品")
                 for it in items:
                     seen_set.add(it["id"])
                 self.archive_db.upsert_batch(items)
@@ -536,6 +541,7 @@ class DollyteriaMonitor:
                     combined_kw = " ".join(keywords)
                     if combined_kw:
                         search_items = self.scraper.search_products(combined_kw, num=100, page=1, in_stock_only=True)
+                        logger.info(f"✅ [基准线初始化] 关键词 [{combined_kw}] 抓取成功: 获取 {len(search_items)} 条商品")
                         for sit in search_items:
                             seen_set.add(sit["id"])
                         if search_items:
@@ -543,6 +549,7 @@ class DollyteriaMonitor:
                 else:
                     for kw in keywords:
                         search_items = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
+                        logger.info(f"✅ [基准线初始化] 关键词 [{kw}] 抓取成功: 获取 {len(search_items)} 条商品")
                         for sit in search_items:
                             seen_set.add(sit["id"])
                         if search_items:
@@ -841,6 +848,8 @@ class DollyteriaMonitor:
                 #    - 若当前页所有商品全部为全新商品 (说明上新数量超过 100 件溢出至下一页)，自动顺延拉取第 2 页、第 3 页 (最高可达 max_stream_pages，默认 5 页即 500 件)
                 # 每页一旦匹配到规则立即触发抢购，绝不等待后续页面！
                 max_pages = int(self.config.get("schedule", {}).get("max_stream_pages", 5))
+                stream_pages_fetched = 0
+                stream_items_fetched = 0
                 for page_idx in range(1, max_pages + 1):
                     logger.info(f"⚡ 正在抓取 Dollyteria /new 页面最新上新流 (第 {page_idx}/{max_pages} 页, {'爆发抢购' if is_burst else '常规巡检'})...")
                     new_arrivals = self.scraper.fetch_new_arrivals(num=100, page=page_idx, in_stock_only=True)
@@ -850,7 +859,11 @@ class DollyteriaMonitor:
                             logger.warning(f"⚠️ /new 第 {page_idx} 页因网络或 503 繁忙未能拉取，已记录断点，下一轮巡检将自动穿透续扫！")
                         else:
                             self._incomplete_from_page = 0
+                            logger.info(f"ℹ️ /new 上新流第 {page_idx} 页抓取完成: 当前页无更多商品 (已触底)")
                         break
+
+                    stream_pages_fetched += 1
+                    stream_items_fetched += len(new_arrivals)
 
                     for it in new_arrivals:
                         pool_items[it["id"]] = it
@@ -861,6 +874,8 @@ class DollyteriaMonitor:
                         if it["id"] not in seen_set:
                             page_new_items.append(it)
 
+                    logger.info(f"✅ /new 上新流第 {page_idx}/{max_pages} 页抓取成功: 获取 {len(new_arrivals)} 条商品 (其中全新待比对 {len(page_new_items)} 件)")
+
                     stage_matches = self.process_stream_items(new_arrivals, source_tag=f"第 {page_idx} 页", is_burst=is_burst)
                     total_new_matches.extend(stage_matches)
                     seen_set = set(str(sid) for sid in self.state.get("seen_ids", []))
@@ -868,21 +883,28 @@ class DollyteriaMonitor:
                     # 智能早停：若当前页已没有哪怕 1 件全新商品 (整页均为已见历史商品)，说明此次大上新已完全接驳完毕；或当前页已不足 100 件
                     if len(new_arrivals) < 100:
                         self._incomplete_from_page = 0
+                        logger.info(f"ℹ️ /new 上新流第 {page_idx} 页商品数不足 100 件 ({len(new_arrivals)} 件)，已完全获取所有最新上新。")
                         break
                     if len(page_new_items) == 0:
                         if page_idx < self._incomplete_from_page:
                             logger.info(f"🔄 第 {page_idx} 页已见，但上一轮在第 {self._incomplete_from_page} 页曾遇繁忙中断，继续向下穿透扫描...")
                             continue
                         self._incomplete_from_page = 0
+                        logger.info(f"ℹ️ /new 上新流第 {page_idx} 页均为已记录历史商品，上新流已完整接驳完毕，提前早停以节省网络消耗。")
                         break
                 else:
                     self._incomplete_from_page = 0
+
+                if stream_pages_fetched > 0:
+                    logger.info(f"📊 /new 上新流抓取完毕: 共成功抓取 {stream_pages_fetched} 页，累计获取 {stream_items_fetched} 条商品")
 
             # 2. 关键词全店搜索 (/product-list/?keyword=...)
             # 核心策略：爆发抢购模式下专攻 /new 主干道，完全跳过耗时的关键词全店搜索，杜绝 503 官网限流！
             if is_burst:
                 logger.debug("⚡ 处于爆发抢购模式 (Burst Mode)，跳过耗时的关键词全店搜索，专攻 /new 高速主干道。")
             else:
+                search_queries_count = 0
+                search_items_fetched = 0
                 stage2_pool = {}
                 for rule in active_rules:
                     mode = rule.get("search_mode", "both")
@@ -894,6 +916,9 @@ class DollyteriaMonitor:
                             if combined_kw:
                                 logger.info(f"正在进行多词同时满足(AND)搜索: [{combined_kw}] (规则: {rule.get('name')})...")
                                 res = self.scraper.search_products(combined_kw, num=100, page=1, in_stock_only=True)
+                                search_queries_count += 1
+                                search_items_fetched += len(res)
+                                logger.info(f"✅ 关键词搜索 [{combined_kw}] 抓取成功: 获取 {len(res)} 条商品 (规则: {rule.get('name')})")
                                 for it in res:
                                     pool_items[it["id"]] = it
                                     stage2_pool[it["id"]] = it
@@ -901,6 +926,9 @@ class DollyteriaMonitor:
                             for kw in keywords:
                                 logger.info(f"正在搜索关键词: [{kw}] (规则: {rule.get('name')})...")
                                 res = self.scraper.search_products(kw, num=100, page=1, in_stock_only=True)
+                                search_queries_count += 1
+                                search_items_fetched += len(res)
+                                logger.info(f"✅ 关键词搜索 [{kw}] 抓取成功: 获取 {len(res)} 条商品 (规则: {rule.get('name')})")
                                 for it in res:
                                     pool_items[it["id"]] = it
                                     stage2_pool[it["id"]] = it
@@ -983,6 +1011,12 @@ class DollyteriaMonitor:
                 stats["total_matches"] = stats.get("total_matches", 0) + len(total_new_matches)
             self._save_state()
 
+            total_pages_fetched = (stream_pages_fetched if needs_new_stream else 0) + (search_queries_count if not is_burst else 0)
+            logger.info(
+                f"🎉 本轮检测流程执行完毕: 共成功抓取 {total_pages_fetched} 页/次 "
+                f"(上新流 {stream_pages_fetched if needs_new_stream else 0} 页, 关键词搜索 {search_queries_count if not is_burst else 0} 次)，"
+                f"累计扫描 {len(pool_items)} 条商品 (命中 {len(total_new_matches)} 件新商品)"
+            )
             self.last_check_status = f"正常完成 (命中 {len(total_new_matches)} 件新商品)"
             return {
                 "status": "ok",
@@ -1007,11 +1041,14 @@ class DollyteriaMonitor:
         logger.info(f"⚡ 开始同步 /new 上新流商品至归档库 (最大 {max_pages} 页)...")
         all_items = []
         seen_pids = set()
+        pages_fetched = 0
         for p in range(1, max_pages + 1):
             try:
                 items = self.scraper.fetch_new_arrivals(num=100, page=p, in_stock_only=False)
                 if not items:
                     break
+                pages_fetched += 1
+                logger.info(f"✅ [上新流同步] 第 {p} 页抓取成功: 获取 {len(items)} 条商品")
                 if items[0]["id"] in seen_pids:
                     break
                 for it in items:
@@ -1032,7 +1069,7 @@ class DollyteriaMonitor:
             except Exception as e:
                 logger.error(f"写入归档库异常: {e}")
 
-        logger.info(f"⚡ 上新流归档同步完成: 共获取 {len(all_items)} 件商品 (新增入库: {inserted}, 更新: {updated})")
+        logger.info(f"⚡ 上新流归档同步完成: 共成功抓取 {pages_fetched} 页 / 累计 {len(all_items)} 条商品 (新增入库: {inserted}, 更新: {updated})")
         return {
             "status": "ok",
             "total_fetched": len(all_items),

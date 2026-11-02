@@ -3059,6 +3059,8 @@ function buildTerminalRowHtml(entry) {
     } else if (lvl === 'ERROR' || lvl === 'CRITICAL') {
         lvlClass = 'term-lvl-error';
         msgClass = 'is-error';
+    } else if (entry.message && (entry.message.includes('抓取成功') || entry.message.includes('成功抓取') || entry.message.includes('✅') || entry.message.includes('🎉'))) {
+        msgClass = 'is-success';
     }
 
     const t = entry.time_short || (entry.time ? entry.time.slice(11, 19) : '--:--:--');

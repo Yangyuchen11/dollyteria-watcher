@@ -3383,6 +3383,7 @@ input:checked+.slider:before {
 
 .term-msg.is-error { color: #fca5a5; font-weight: 600; }
 .term-msg.is-warn { color: #fde68a; }
+.term-msg.is-success { color: #86efac; font-weight: 500; }
 
 .term-scroll-pill {
     position: absolute;

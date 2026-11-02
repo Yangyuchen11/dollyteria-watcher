@@ -245,7 +245,7 @@ class DollyteriaArchiver:
                 self.current_page = page
 
                 logger.info(
-                    f"第 {page} 页抓取成功: 解析 {len(items)} 件 (新增 {ins}, 更新 {upd}) | "
+                    f"✅ 全站归档第 {page} 页抓取成功: 解析 {len(items)} 条商品 (新增入库 {ins}, 更新 {upd}) | "
                     f"进度: {self.current_page}/{self.total_pages or '?'} 页"
                 )
 
@@ -339,8 +339,8 @@ class DollyteriaArchiver:
                 self.current_page = page
 
                 logger.info(
-                    f"[在库盘点] 第 {page}/{self.total_pages or '?'} 页完成: "
-                    f"收录在售 {len(items)} 件 (累计在售 ID {len(live_in_stock_ids)} 个)"
+                    f"✅ [在库盘点] 第 {page}/{self.total_pages or '?'} 页抓取成功: "
+                    f"获取在售商品 {len(items)} 条 (累计在售 ID {len(live_in_stock_ids)} 个)"
                 )
 
                 if self.total_pages > 0 and page >= self.total_pages:

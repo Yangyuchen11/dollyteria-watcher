@@ -188,5 +188,128 @@ class TestTriProbeBurstEngine(unittest.TestCase):
         self.assertIn("806588", ordered_ids, "探针 C 顺延至第 2 页时必须成功命中并下单位于第 2 页的商品")
 
 
+    def test_05_worker_a_pages_up_to_5_or_until_old_item(self):
+        """
+        测试探针 A 行为：
+        1. 当商品全为新品时，循环翻页至第 5 页；
+        2. 当第 3 页遇到已记录的历史在库老商品时，立即早停，不再翻第 4、5 页。
+        """
+        self.monitor.state["seen_ids"] = ["old_item_999"]
+        a_pages_called = []
+
+        def mock_fetch(num=100, page=1, in_stock_only=True, timeout=None, session=None, max_retries=None):
+            th_name = threading.current_thread().name
+            if th_name == "BurstWorker_A_Full100":
+                a_pages_called.append(page)
+                if page < 3:
+                    return [{"id": f"new_a_{page}_{i}", "title": "新品", "price": 1000, "is_in_stock": True} for i in range(100)]
+                elif page == 3:
+                    # 第 3 页出现老商品 old_item_999
+                    return [{"id": f"new_a_3_{i}", "title": "新品", "price": 1000, "is_in_stock": True} for i in range(50)] + [
+                        {"id": "old_item_999", "title": "老商品", "price": 500, "is_in_stock": True}
+                    ]
+            return []
+
+        self.monitor.scraper.fetch_new_arrivals = mock_fetch
+        self.monitor.start_burst_probes(duration_sec=0.5)
+        time.sleep(0.35)
+        self.monitor.stop_burst_probes()
+
+        self.assertIn(1, a_pages_called, "探针 A 必须抓取了第 1 页")
+        self.assertIn(2, a_pages_called, "探针 A 必须翻到第 2 页")
+        self.assertIn(3, a_pages_called, "探针 A 必须翻到第 3 页")
+        self.assertNotIn(4, a_pages_called, "第 3 页出现老商品后，探针 A 必须早停，绝不能再翻第 4 页")
+        self.assertNotIn(5, a_pages_called, "第 3 页出现老商品后，探针 A 必须早停，绝不能再翻第 5 页")
+
+    def test_06_worker_c_cascades_deeply_until_old_item(self):
+        """
+        测试探针 C 行为：
+        突破旧有的 5 页限制，一直顺延深挖 (例如翻至第 7 页)，直到在第 7 页遇到老商品才停止接驳。
+        """
+        self.monitor.state["seen_ids"] = ["old_boundary_item"]
+        c_pages_called = []
+
+        def mock_fetch(num=100, page=1, in_stock_only=True, timeout=None, session=None, max_retries=None):
+            th_name = threading.current_thread().name
+            if th_name == "BurstWorker_C_Fast30":
+                c_pages_called.append(page)
+                if page < 7:
+                    # 1~6 页全为新品满 30 件
+                    return [{"id": f"c_item_{page}_{i}", "title": "新品", "price": 2000, "is_in_stock": True} for i in range(30)]
+                elif page == 7:
+                    # 第 7 页遇到老商品
+                    return [{"id": "old_boundary_item", "title": "历史老商品", "price": 1000, "is_in_stock": True}]
+            return []
+
+        self.monitor.scraper.fetch_new_arrivals = mock_fetch
+        self.monitor.start_burst_probes(duration_sec=0.7)
+        time.sleep(0.55)
+        self.monitor.stop_burst_probes()
+
+        # 验证探针 C 顺利穿透到了第 6 页和第 7 页
+        for p in range(1, 8):
+            self.assertIn(p, c_pages_called, f"探针 C 必须顺延翻至第 {p} 页")
+        self.assertNotIn(8, c_pages_called, "第 7 页遇到老商品后，探针 C 必须完成顺延停止深入")
+
+    def test_07_burst_upserts_non_target_items_to_archive_db(self):
+        """
+        测试爆发期间抓取到的非目标商品，只要库中没有，全部自动入库归档数据库
+        """
+        non_target_items = [
+            {"id": "non_target_101", "title": "普通娃娃书籍 Dollybird", "price": 880, "is_in_stock": True},
+            {"id": "non_target_102", "title": "普通展示支架", "price": 500, "is_in_stock": True},
+        ]
+        # 确保初始不在归档库
+        with self.monitor.archive_db._get_connection() as conn:
+            conn.execute("DELETE FROM products WHERE id IN ('non_target_101', 'non_target_102')")
+            conn.commit()
+        self.assertIsNone(self.monitor.archive_db.get_product_by_id("non_target_101"))
+        self.assertIsNone(self.monitor.archive_db.get_product_by_id("non_target_102"))
+
+        # 探针处理抓取到的商品 (不匹配任何规则)
+        matches = self.monitor.process_stream_items(non_target_items, source_tag="探针A-第1页", is_burst=True)
+        self.assertEqual(len(matches), 0, "非目标商品不应命中监控规则")
+
+        # 验证已自动成功入库 SQLite archive.db
+        p1 = self.monitor.archive_db.get_product_by_id("non_target_101")
+        p2 = self.monitor.archive_db.get_product_by_id("non_target_102")
+        self.assertIsNotNone(p1, "非目标商品 101 必须自动入库")
+        self.assertEqual(p1["title"], "普通娃娃书籍 Dollybird")
+        self.assertIsNotNone(p2, "非目标商品 102 必须自动入库")
+
+    def test_08_space_insensitive_keyword_matching(self):
+        """
+        测试规则正向关键词空格兼容：
+        规则中无论写 DearSD 还是 Dear SD，均能兼容命中含有空格的官方标题 Dear SD/まい 或无空格的 DearSD/OF
+        """
+        rule_no_space = {
+            "name": "DearSD测试",
+            "keywords": ["DearSD"],
+            "match_mode": "all",
+            "enabled": True,
+        }
+        item_with_space = {
+            "title": "Dear SD/まい:天使の里 おひなまつり 2021",
+            "model_number": "Y-26-11-03-001",
+            "price": 99000,
+            "is_in_stock": True,
+        }
+        self.assertTrue(self.monitor._matches_rule(item_with_space, rule_no_space), "关键词 'DearSD' 应成功匹配标题 'Dear SD/まい'")
+
+        rule_with_space = {
+            "name": "Dear SD测试",
+            "keywords": ["Dear SD"],
+            "match_mode": "all",
+            "enabled": True,
+        }
+        item_no_space = {
+            "title": "DearSD/OF:衣装セット",
+            "model_number": "Y-26-11-03-005",
+            "price": 2750,
+            "is_in_stock": True,
+        }
+        self.assertTrue(self.monitor._matches_rule(item_no_space, rule_with_space), "关键词 'Dear SD' 应成功匹配标题 'DearSD/OF:衣装セット'")
+
+
 if __name__ == "__main__":
     unittest.main()

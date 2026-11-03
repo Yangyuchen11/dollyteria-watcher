@@ -3,6 +3,7 @@
 负责规则匹配、去重缓存、有货过滤、触发调度与状态持久化
 """
 import os
+import re
 import json
 import time
 import datetime
@@ -128,6 +129,14 @@ class TriProbeBurstEngine:
         self.burst_end_time = 0.0
         self._drop_active = False
         self._drop_detected_time = 0.0
+        self.baseline_seen_ids: Set[str] = set()
+
+    def is_old_item(self, item: Dict) -> bool:
+        """检查商品是否为爆发启动前已存在的历史在库老商品"""
+        pid = str(item.get("id", "")).strip()
+        if not pid:
+            return False
+        return pid in self.baseline_seen_ids
 
     def notify_drop_detected(self):
         """通知引擎检测到官网上新发生，驱动探针C顺延深挖"""
@@ -144,11 +153,14 @@ class TriProbeBurstEngine:
         self.burst_end_time = time.time() + duration_sec
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
 
+        # 锁定爆发启动前的历史老商品基准快照 (用于精准判断大上新翻页何时见底)
+        self.baseline_seen_ids = set(str(sid) for sid in self.monitor.state.get("seen_ids", []))
+
         logger.info(
             f"🚀 [三路协同探测] 启动爆发期极速探测引擎 (持续 {int(duration_sec)} 秒)！\n"
-            f"  ├── 探针 A: 100 件全量保底 (timeout={timeout_sec}s, Session A, 覆盖大批量上新)\n"
-            f"  ├── 探针 B: 30 件轻量先锋 (timeout={timeout_sec}s, Session B, 毫秒级极速突击)\n"
-            f"  └── 探针 C: 30 件交替错峰 (timeout={timeout_sec}s, Session C, 错峰互锁防挂死)"
+            f"  ├── 探针 A: 100 件全量保底 (timeout={timeout_sec}s, 循环翻页至第5页或见老商品止)\n"
+            f"  ├── 探针 B: 30 件轻量先锋 (timeout={timeout_sec}s, 死守第1页毫秒级先锋突击)\n"
+            f"  └── 探针 C: 30 件交替顺延 (timeout={timeout_sec}s, 一直循环翻页直到看到老商品)"
         )
 
         self._threads = [
@@ -171,36 +183,43 @@ class TriProbeBurstEngine:
         logger.info("✅ [三路协同探测] 探针 A/B/C 已全部安全退出。")
 
     def _worker_a_heavy(self):
-        """探针 A：全量保底 100 件，保证任何深度的商品不漏"""
+        """探针 A：全量保底 100 件，循环翻页至第 5 页或看到老商品为止"""
         session_a = requests.Session()
         session_a.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
+        max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_stream_pages", 5))
+        max_a_pages = max(1, min(max_a_pages, 10))
 
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
             try:
-                logger.info(f"⚡ [探针A-全量保底] 正在抓取 /new 最新 100 件商品流 (timeout={timeout_sec}s)...")
-                items = self.monitor.scraper.fetch_new_arrivals(
-                    num=100, page=1, in_stock_only=True,
-                    timeout=timeout_sec, session=session_a, max_retries=0
-                )
-                if items:
-                    logger.info(f"✅ [探针A-全量保底] 第 1 页抓取成功: 获取 {len(items)} 条商品")
-                    self.monitor.process_stream_items(items, source_tag="探针A-100件", is_burst=True)
-                    if len(items) >= 100 and not self._stop_event.is_set():
-                        try:
-                            items_p2 = self.monitor.scraper.fetch_new_arrivals(
-                                num=100, page=2, in_stock_only=True,
-                                timeout=timeout_sec, session=session_a, max_retries=0
-                            )
-                            if items_p2:
-                                logger.info(f"✅ [探针A-第2页] 第 2 页抓取成功: 获取 {len(items_p2)} 条商品")
-                                self.monitor.process_stream_items(items_p2, source_tag="探针A-第2页", is_burst=True)
-                        except Exception as e:
-                            logger.debug(f"⚠️ [探针A-第2页] 抓取异常: {e}")
-                else:
-                    logger.debug("⚠️ [探针A] 未能获取数据 (503/超时)，准备下一轮重发...")
+                for page in range(1, max_a_pages + 1):
+                    if self._stop_event.is_set() or time.time() >= self.burst_end_time:
+                        break
+
+                    logger.info(f"⚡ [探针A-全量保底] 正在抓取 /new 第 {page}/{max_a_pages} 页 (100件/页, timeout={timeout_sec}s)...")
+                    items = self.monitor.scraper.fetch_new_arrivals(
+                        num=100, page=page, in_stock_only=True,
+                        timeout=timeout_sec, session=session_a, max_retries=0
+                    )
+                    if not items:
+                        logger.debug(f"⚠️ [探针A] 第 {page} 页未能获取数据 (503/超时)，中断本轮下翻")
+                        break
+
+                    logger.info(f"✅ [探针A-第{page}页] 抓取成功: 获取 {len(items)} 条商品")
+                    self.monitor.process_stream_items(items, source_tag=f"探针A-第{page}页", is_burst=True)
+
+                    # 判断是否看到老商品或触底
+                    has_old = any(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
+                    if has_old:
+                        logger.info(f"🏁 [探针A-触达老商品] 第 {page} 页已检测到历史在库老商品，本轮上新流扫描接驳完毕，停止继续翻页。")
+                        break
+
+                    if len(items) < 100:
+                        logger.info(f"🏁 [探针A-触底] 第 {page} 页商品数不足 100 件 ({len(items)} 件)，已触底全部上新。")
+                        break
+
             except Exception as e:
                 logger.debug(f"⚠️ [探针A] 请求异常: {e}")
 
@@ -249,9 +268,10 @@ class TriProbeBurstEngine:
 
     def _worker_c_light(self):
         """
-        探针 C：轻量交替与顺延探针
+        探针 C：轻量交替与顺延探针 (以 30 件极速轻量并发，一直循环顺延深挖至看到老商品为止)
         - 平常与探针 B 错峰交替死守第 1 页 (1~30件)
         - 一旦捕获到上新 (或系统检测到放货)，探针 C 立即顺延往后拉取第 2 页 (31~60件)、第 3 页 (61~90件)...
+        - 一直循环向后翻页深挖，直到在某页检测到历史在库老商品（或触底）
         - 顺延深挖全部接驳完毕后，自动返回第 1 页继续与探针 B 错峰守候
         """
         session_c = requests.Session()
@@ -260,7 +280,7 @@ class TriProbeBurstEngine:
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
         stagger = max(0.08, interval / 2.0)
         current_page = 1
-        max_c_pages = int(self.monitor.config.get("schedule", {}).get("max_stream_pages", 5))
+        MAX_C_SAFETY_PAGES = 50  # 安全上限 50 页 (覆盖 1500 件)，防止官网异常死循环
 
         # 启动时先错开半个周期
         if self._stop_event.wait(timeout=stagger):
@@ -287,29 +307,38 @@ class TriProbeBurstEngine:
                     logger.info(f"✅ [{tag}] 第 {current_page} 页抓取成功: 获取 {len(items)} 条商品")
                     matches = self.monitor.process_stream_items(items, source_tag=tag, is_burst=True)
 
-                    # 判断是否继续顺延翻页：
-                    # 1. 如果在第 1 页发现上新 (或最近 30 秒内有放货被记录) 且当前页满 30 件，立即启动顺延进入第 2 页
-                    # 2. 如果在第 2 页及以后且该页满 30 件，继续顺延至下一页
+                    has_old = any(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
                     is_drop_active = self._drop_active and (time.time() - self._drop_detected_time < 45.0)
 
                     if current_page == 1:
-                        if (matches or is_drop_active) and len(items) >= 30 and max_c_pages > 1:
-                            logger.info(f"🔄 [探针C-顺延启动] 第 1 页已取到并确认上新流，探针C立即顺延向后拉取第 2 页 (31~60件)...")
+                        # 第 1 页判定：若有放货迹象、规则命中或第 1 页包含新品，且满 30 件，立即启动顺延拉取第 2 页
+                        # 仅当整页全为已记录老商品时才不触发顺延
+                        is_all_old = all(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
+                        should_cascade = (matches or is_drop_active or (self.baseline_seen_ids and not is_all_old)) and not is_all_old
+                        if should_cascade and len(items) >= 30:
+                            logger.info(f"🔄 [探针C-顺延启动] 第 1 页已确认上新流，探针C立即顺延向后拉取第 2 页 (31~60件)...")
                             current_page = 2
                         else:
                             current_page = 1
                     else:
-                        # 处于顺延翻页阶段 (第 2 页及以后)
-                        if len(items) >= 30 and current_page < max_c_pages:
-                            current_page += 1
-                            logger.info(f"🔄 [探针C-继续顺延] 第 {current_page - 1} 页仍然满额，继续顺延抓取第 {current_page} 页 ({(current_page - 1)*30 + 1}~{current_page*30}件)...")
-                        else:
-                            logger.info(f"🏁 [探针C-顺延完成] 顺延深挖至第 {current_page} 页已全部接驳完毕，探针C回到第 1 页继续与探针B交替守候。")
+                        # 处于顺延翻页阶段 (第 2 页及以后)：一直循环向后翻页深挖，直到看到老商品为止！
+                        if has_old:
+                            logger.info(f"🏁 [探针C-顺延完成] 顺延深挖至第 {current_page} 页已遇到历史在库老商品，深挖接驳全部完毕，探针C回到第 1 页继续与探针B交替守候。")
                             current_page = 1
                             self._drop_active = False
+                        elif len(items) < 30:
+                            logger.info(f"🏁 [探针C-顺延触底] 顺延至第 {current_page} 页商品数不足 30 件 ({len(items)} 件)，已触底，回到第 1 页。")
+                            current_page = 1
+                            self._drop_active = False
+                        elif current_page >= MAX_C_SAFETY_PAGES:
+                            logger.info(f"🏁 [探针C-达到安全深度] 顺延已达到上限 {MAX_C_SAFETY_PAGES} 页 ({item_end} 件)，回到第 1 页。")
+                            current_page = 1
+                            self._drop_active = False
+                        else:
+                            current_page += 1
+                            logger.info(f"🔄 [探针C-继续顺延] 第 {current_page - 1} 页仍然满额且全为新品，继续顺延抓取第 {current_page} 页 ({(current_page - 1)*30 + 1}~{current_page*30}件)...")
                 else:
                     logger.debug(f"⚠️ [探针C-第{current_page}页] 未能获取数据 (503/超时)")
-                    # 深度翻页遇阻时回到第 1 页保底
                     if current_page > 1:
                         current_page = 1
 
@@ -598,18 +627,23 @@ class DollyteriaMonitor:
         keywords = [k.strip().lower() for k in rule.get("keywords", []) if k.strip()]
         match_mode = rule.get("match_mode", "all")
         if keywords:
+            full_text_nospace = re.sub(r"\s+", "", full_text)
+
+            def _kw_in_text(kw_str: str) -> bool:
+                parts = kw_str.split()
+                # 原始分词包含，或者去除中英文空格后整体包含 (智能兼容 "DearSD" 与 "Dear SD"、"幼SD" 与 "幼 SD" 等)
+                if all(p in full_text for p in parts):
+                    return True
+                kw_nospace = re.sub(r"\s+", "", kw_str)
+                return bool(kw_nospace and kw_nospace in full_text_nospace)
+
             if match_mode == "all":
                 # 多个词必须同时全部满足 (AND)
                 for kw in keywords:
-                    parts = kw.split()
-                    if not all(p in full_text for p in parts):
+                    if not _kw_in_text(kw):
                         return False
             else:
                 # 满足任一词即可 (OR)
-                def _kw_in_text(kw_str):
-                    parts = kw_str.split()
-                    return all(p in full_text for p in parts)
-
                 matched_kw = any(_kw_in_text(k) for k in keywords)
                 if not matched_kw:
                     return False
@@ -778,18 +812,18 @@ class DollyteriaMonitor:
                         logger.error(f"分发通知异常: {e}")
 
                 for it, r in stage_matches:
-                    it_id = str(it.get("id", "")).strip()
-                    seen_set.add(it_id)
                     hist_entry = dict(it)
                     hist_entry["rule_name"] = r.get("name")
                     self.state.setdefault("history", []).insert(0, hist_entry)
 
-                self.state["seen_ids"] = list(seen_set)
-                self._save_state()
+            # 无论是否命中监控规则，抓取到的所有全新商品（包含目标与非目标商品）只要库中没有均全部自动入库归档数据库
+            if page_new_items:
                 try:
-                    self.archive_db.upsert_batch([it for it, r in stage_matches])
+                    ins_cnt, upd_cnt = self.archive_db.upsert_batch(page_new_items)
+                    if ins_cnt > 0:
+                        logger.info(f"📦 [新品入库 ({source_tag})] 成功将 {ins_cnt} 件新上线商品收录至全数据档案库 (更新 {upd_cnt} 件)")
                 except Exception as e:
-                    logger.warning(f"同步流式命中商品至归档库失败: {e}")
+                    logger.warning(f"同步流式新品至归档库失败: {e}")
 
             for it in page_new_items:
                 it_id = str(it.get("id", "")).strip()
@@ -797,6 +831,7 @@ class DollyteriaMonitor:
                     seen_set.add(it_id)
 
             self.state["seen_ids"] = list(seen_set)
+            self._save_state()
             return [it for it, r in stage_matches]
 
     def start_burst_probes(self, duration_sec: float = 180):

@@ -242,8 +242,8 @@ class TestTriProbeBurstEngine(unittest.TestCase):
             return []
 
         self.monitor.scraper.fetch_new_arrivals = mock_fetch
-        self.monitor.start_burst_probes(duration_sec=0.7)
-        time.sleep(0.55)
+        self.monitor.start_burst_probes(duration_sec=1.2)
+        time.sleep(0.85)
         self.monitor.stop_burst_probes()
 
         # 验证探针 C 顺利穿透到了第 6 页和第 7 页

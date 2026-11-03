@@ -135,6 +135,17 @@ class DollyteriaScheduler:
                             self.monitor.stop_burst_probes()
                         logger.info("⚡ 爆发模式持续时间结束，三路并发探针已安全停止，恢复正常巡检模式。")
 
+                        # 爆发期结束后自动在后台发起一次全深度 (最大 20 页 / 2000 件) 扫尾兜底归档同步
+                        if hasattr(self.monitor, "sync_new_arrivals_to_archive"):
+                            def _post_burst_sweep():
+                                try:
+                                    logger.info("🧹 [大上新扫尾兜底] 爆发期结束，后台自动启动全深度上新流兜底归档与校验...")
+                                    self.monitor.sync_new_arrivals_to_archive(max_pages=20)
+                                except Exception as e:
+                                    logger.warning(f"大上新扫尾归档异常: {e}")
+
+                            threading.Thread(target=_post_burst_sweep, name="PostBurstSweep", daemon=True).start()
+
                 # 2. 检查定点准时触发 (如 20:00:00 / 21:00:00)
                 drop_times = sched_cfg.get("drop_times", [])
                 today_str = now.strftime("%Y-%m-%d")

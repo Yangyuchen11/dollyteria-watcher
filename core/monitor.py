@@ -188,8 +188,9 @@ class TriProbeBurstEngine:
         session_a.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
-        max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_stream_pages", 5))
-        max_a_pages = max(1, min(max_a_pages, 10))
+        # 探针 A 提升深度至 15 页 (100件/页，可覆盖最多 1500 件超级大上新)，依然严格以遇到历史老商品为止提前早停
+        max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_burst_a_pages", 15))
+        max_a_pages = max(5, min(max_a_pages, 25))
 
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
@@ -286,6 +287,7 @@ class TriProbeBurstEngine:
         if self._stop_event.wait(timeout=stagger):
             return
 
+        c_retry_count = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
             try:
@@ -303,6 +305,7 @@ class TriProbeBurstEngine:
                 )
 
                 if items:
+                    c_retry_count = 0
                     tag = "探针C-第1页(1~30件)" if current_page == 1 else f"探针C-第{current_page}页({item_start}~{item_end}件)"
                     logger.info(f"✅ [{tag}] 第 {current_page} 页抓取成功: 获取 {len(items)} 条商品")
                     matches = self.monitor.process_stream_items(items, source_tag=tag, is_burst=True)
@@ -340,12 +343,20 @@ class TriProbeBurstEngine:
                 else:
                     logger.debug(f"⚠️ [探针C-第{current_page}页] 未能获取数据 (503/超时)")
                     if current_page > 1:
-                        current_page = 1
+                        # 顺延深挖过程中遇到 503/网络抖动，执行原地微重试 (最多2次)，防止轻易前功尽弃退回第1页
+                        if c_retry_count < 2:
+                            c_retry_count += 1
+                            logger.warning(f"⚠️ [探针C-顺延深挖] 第 {current_page} 页请求遇繁忙/超时，原地快速重试 (第 {c_retry_count}/2 次)...")
+                        else:
+                            logger.info(f"⚠️ [探针C-顺延中断] 第 {current_page} 页重试耗尽，探针C安全重置回第 1 页。")
+                            current_page = 1
+                            c_retry_count = 0
 
             except Exception as e:
                 logger.debug(f"⚠️ [探针C] 请求异常: {e}")
                 if current_page > 1:
                     current_page = 1
+                    c_retry_count = 0
 
             elapsed = time.time() - t0
             sleep_time = max(0.05, interval - elapsed)
@@ -1101,6 +1112,13 @@ class DollyteriaMonitor:
             try:
                 inserted, updated = self.archive_db.upsert_batch(all_items)
                 self.archive_db.set_new_arrivals_ids([it["id"] for it in all_items])
+                # 同步更新已见缓存与基准线，确保与归档数据库完全一致
+                seen_set = set(str(sid) for sid in self.state.get("seen_ids", []))
+                for it in all_items:
+                    if it.get("is_in_stock", True):
+                        seen_set.add(str(it["id"]).strip())
+                self.state["seen_ids"] = list(seen_set)
+                self._save_state()
             except Exception as e:
                 logger.error(f"写入归档库异常: {e}")
 

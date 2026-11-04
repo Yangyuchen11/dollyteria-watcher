@@ -742,6 +742,8 @@ class DollyteriaMonitor:
                                 f"🔁 [Auto-Order 无限续抢机制] 商品 [{pid}] 本轮重试耗尽但官网尚未售罄！"
                                 f"已自动加入续抢待命队列 (累计续抢轮次: 第 {count} 轮)，不设上限无限次自动续抢，直至抢购成功或官方售罄！"
                             )
+                        # 无缝立即续抢调度：冷却 2 秒后立即在后台自主发起下一轮冲刺，绝不干等 15 分钟巡检！
+                        self._spawn_immediate_reorder(item, rule, count)
                 if order_res and order_res.get("success"):
                     try:
                         self.notifier.dispatch_order_success(item=item, order_result=order_res, rule=rule)
@@ -759,6 +761,43 @@ class DollyteriaMonitor:
         futures = [self._order_executor.submit(_worker_task, item, rule) for item, rule in order_tasks]
         if wait_completion:
             concurrent.futures.wait(futures, timeout=45)
+
+    def _spawn_immediate_reorder(self, item: Dict, rule: Dict, attempt_count: int, cooldown_sec: float = 2.0) -> None:
+        """
+        无缝立即续抢调度器：
+        在单轮极速冲刺因持续 503 等原因耗尽重试但商品尚未售罄时，
+        无需干等下一轮 15~30 分钟大巡检，直接在后台短暂冷却 2 秒后瞬时核验库存，并自动发起下一轮冲刺！
+        """
+        pid = str(item.get("id", "")).strip()
+        if not pid or not self.config.get("auto_order", {}).get("enabled", False):
+            return
+
+        def _reorder_worker():
+            time.sleep(cooldown_sec)
+            with self._reorder_lock:
+                if pid not in self._pending_reorders:
+                    return
+
+            try:
+                stock_info = self.scraper.check_product_stock(pid)
+                if stock_info.get("is_in_stock"):
+                    logger.info(
+                        f"⚡⚡ [Auto-Order 快速续抢出击] 商品 [{pid}] 经询盘确认官网仍在库！"
+                        f"冷却完毕立即发起第 {attempt_count} 轮抢购流水线..."
+                    )
+                    with self._reorder_lock:
+                        self._pending_reorders.pop(pid, None)
+                    self._execute_auto_orders_concurrent([(item, rule)])
+                else:
+                    logger.info(f"🛑 [Auto-Order 续抢终止] 商品 [{pid}] 经单品询盘确认官网已售罄，自动移出续抢队列。")
+                    with self._reorder_lock:
+                        self._pending_reorders.pop(pid, None)
+                        self._reorder_attempt_counts.pop(pid, None)
+            except Exception as e:
+                logger.warning(f"[Auto-Order 续抢] 询盘核验商品 [{pid}] 异常: {e}")
+
+        t = threading.Thread(target=_reorder_worker, name=f"FastReorder_{pid}_{attempt_count}", daemon=True)
+        t.start()
 
     def process_stream_items(self, items: List[Dict], source_tag: str = "A", is_burst: bool = False) -> List[Dict]:
         """

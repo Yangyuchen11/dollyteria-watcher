@@ -1727,7 +1727,42 @@ class AutoOrderHook:
                         logger.warning(f"❌ [Auto-Order] 加购商品 [{item_id}] 连续 {retries + 1} 次遇到官网繁忙 (503)，达到最大重试上限")
                         return False, "加购未成功：官网持续繁忙 (503)", False
 
-                # 4. 其他未能识别的页面跳转 (如重定向回商品页但未入车)
+                # 4. 关键防御：若响应停留在商品详情页 (且非 503 繁忙)，精准探查是否因前序请求已成功入车而导致重复加购被弹回
+                if is_on_product_page:
+                    try:
+                        cart_check_resp = self.session.get("https://www.dollyteria.com/cart", timeout=3)
+                        if cart_check_resp and cart_check_resp.status_code == 200:
+                            cart_check_text = ""
+                            try:
+                                cart_check_text = cart_check_resp.content.decode("euc-jp", "ignore")
+                            except Exception:
+                                cart_check_text = cart_check_resp.text
+
+                            # 不可伪造特征：购物车中专属于该商品的专属删除按钮 name="cart_remove_{item_id}"
+                            has_remove_btn = (f'name="cart_remove_{item_id}"' in cart_check_text or 
+                                              f"name='cart_remove_{item_id}'" in cart_check_text or 
+                                              f"cart_remove_{item_id}" in cart_check_text)
+                            has_prod_link = f"/product/{item_id}" in cart_check_text
+
+                            if has_remove_btn and has_prod_link:
+                                logger.info(f"🎉 [Auto-Order] 100% 精准核验：商品 [{item_id}] 实际上已在购物车中 (前序请求已生效入车)！立即推进结算！")
+                                # 顺带清理购物车中可能存在的其他旧残留商品
+                                try:
+                                    c_soup = BeautifulSoup(cart_check_text, "html.parser")
+                                    for inp in c_soup.find_all("input", {"type": "submit"}):
+                                        rname = inp.get("name", "")
+                                        if rname.startswith("cart_remove_") and rname != f"cart_remove_{item_id}":
+                                            self.session.post("https://www.dollyteria.com/cart", data={
+                                                "cart_operation_page": "step_zero_cart",
+                                                rname: "削除"
+                                            }, timeout=3)
+                                except Exception:
+                                    pass
+                                return True, "商品已在购物车中并已完成核验", False
+                    except Exception as e:
+                        logger.debug(f"[Auto-Order] 探查购物车状态异常: {e}")
+
+                # 5. 其他未能识别的页面跳转 (如重定向回商品页但未入车)
                 if attempt < retries:
                     logger.warning(f"⚠️ [Auto-Order] 加购未能进入购物车 (页面: {r.url})，正在重新尝试加购 (第 {attempt + 1} 次)...")
                     time.sleep(delay)

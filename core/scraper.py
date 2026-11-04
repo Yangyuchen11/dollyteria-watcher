@@ -233,7 +233,7 @@ class DollyteriaScraper:
 
         soup = BeautifulSoup(html, "html.parser")
         has_cart_btn = bool(soup.select_one("input[name=cart_add_btn]") or soup.select_one(".add_cart_btn"))
-        has_cart_form = bool(soup.select_one("form[name=cart_form]") or soup.select_one("#cart_form"))
+        has_cart_form = bool(soup.select_one("form[name=cart_form]") or soup.select_one("#cart_form") or soup.select_one("#productadd") or soup.select_one("form.product_form"))
 
         price_el = soup.select_one(".selling_price .figure") or soup.select_one(".price")
         price_str = price_el.get_text(strip=True) if price_el else ""

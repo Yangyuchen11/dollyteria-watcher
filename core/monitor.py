@@ -6,6 +6,7 @@ import os
 import re
 import json
 import time
+import random
 import datetime
 import logging
 import threading
@@ -192,8 +193,10 @@ class TriProbeBurstEngine:
         max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_burst_a_pages", 15))
         max_a_pages = max(5, min(max_a_pages, 25))
 
+        fail_streak_a = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
+            had_error_a = False
             try:
                 for page in range(1, max_a_pages + 1):
                     if self._stop_event.is_set() or time.time() >= self.burst_end_time:
@@ -206,6 +209,7 @@ class TriProbeBurstEngine:
                     )
                     if not items:
                         logger.debug(f"⚠️ [探针A] 第 {page} 页未能获取数据 (503/超时)，中断本轮下翻")
+                        had_error_a = True
                         break
 
                     logger.info(f"✅ [探针A-第{page}页] 抓取成功: 获取 {len(items)} 条商品")
@@ -223,9 +227,21 @@ class TriProbeBurstEngine:
 
             except Exception as e:
                 logger.debug(f"⚠️ [探针A] 请求异常: {e}")
+                had_error_a = True
 
-            elapsed = time.time() - t0
-            sleep_time = max(0.05, interval - elapsed)
+            if had_error_a:
+                fail_streak_a += 1
+                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
+                if fail_streak_a <= 5:
+                    sleep_time = min(0.20, 0.08 + (fail_streak_a - 1) * 0.025)
+                else:
+                    backoff = min(0.35, 0.20 + (fail_streak_a - 5) * 0.03)
+                    sleep_time = backoff + random.uniform(0.02, 0.06)
+            else:
+                fail_streak_a = 0
+                elapsed = time.time() - t0
+                sleep_time = max(0.05, interval - elapsed)
+
             if self._stop_event.wait(timeout=sleep_time):
                 break
 
@@ -241,8 +257,10 @@ class TriProbeBurstEngine:
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
 
+        fail_streak_b = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
+            had_error_b = False
             try:
                 logger.info(f"⚡ [探针B-死守前30] 正在极速抓取 /new 第 1 页 (1~30件, timeout={timeout_sec}s)...")
                 items = self.monitor.scraper.fetch_new_arrivals(
@@ -254,11 +272,24 @@ class TriProbeBurstEngine:
                     self.monitor.process_stream_items(items, source_tag="探针B-30件", is_burst=True)
                 else:
                     logger.debug("⚠️ [探针B] 未能获取数据，准备下一轮...")
+                    had_error_b = True
             except Exception as e:
                 logger.debug(f"⚠️ [探针B] 请求异常: {e}")
+                had_error_b = True
 
-            elapsed = time.time() - t0
-            sleep_time = max(0.05, interval - elapsed)
+            if had_error_b:
+                fail_streak_b += 1
+                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
+                if fail_streak_b <= 5:
+                    sleep_time = min(0.20, 0.08 + (fail_streak_b - 1) * 0.025)
+                else:
+                    backoff = min(0.35, 0.20 + (fail_streak_b - 5) * 0.03)
+                    sleep_time = backoff + random.uniform(0.02, 0.06)
+            else:
+                fail_streak_b = 0
+                elapsed = time.time() - t0
+                sleep_time = max(0.05, interval - elapsed)
+
             if self._stop_event.wait(timeout=sleep_time):
                 break
 
@@ -288,8 +319,10 @@ class TriProbeBurstEngine:
             return
 
         c_retry_count = 0
+        fail_streak_c = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
             t0 = time.time()
+            had_error_c = False
             try:
                 item_start = (current_page - 1) * 30 + 1
                 item_end = current_page * 30
@@ -341,6 +374,7 @@ class TriProbeBurstEngine:
                             current_page += 1
                             logger.info(f"🔄 [探针C-继续顺延] 第 {current_page - 1} 页仍然满额且全为新品，继续顺延抓取第 {current_page} 页 ({(current_page - 1)*30 + 1}~{current_page*30}件)...")
                 else:
+                    had_error_c = True
                     logger.debug(f"⚠️ [探针C-第{current_page}页] 未能获取数据 (503/超时)")
                     if current_page > 1:
                         # 顺延深挖过程中遇到 503/网络抖动，执行原地微重试 (最多2次)，防止轻易前功尽弃退回第1页
@@ -354,12 +388,24 @@ class TriProbeBurstEngine:
 
             except Exception as e:
                 logger.debug(f"⚠️ [探针C] 请求异常: {e}")
+                had_error_c = True
                 if current_page > 1:
                     current_page = 1
                     c_retry_count = 0
 
-            elapsed = time.time() - t0
-            sleep_time = max(0.05, interval - elapsed)
+            if had_error_c:
+                fail_streak_c += 1
+                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
+                if fail_streak_c <= 5:
+                    sleep_time = min(0.20, 0.08 + (fail_streak_c - 1) * 0.025)
+                else:
+                    backoff = min(0.35, 0.20 + (fail_streak_c - 5) * 0.03)
+                    sleep_time = backoff + random.uniform(0.02, 0.06)
+            else:
+                fail_streak_c = 0
+                elapsed = time.time() - t0
+                sleep_time = max(0.05, interval - elapsed)
+
             if self._stop_event.wait(timeout=sleep_time):
                 break
 

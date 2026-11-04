@@ -150,13 +150,24 @@ class DollyteriaScheduler:
                 drop_times = sched_cfg.get("drop_times", [])
                 today_str = now.strftime("%Y-%m-%d")
 
-                # 智能前置预热：若距离下一轮定点上新仅剩 20 秒，提前平滑探活并预热备用会话与风控通道 (避免临放货时发生重置震荡)
+                # 智能前置预热与临战保鲜：
+                # 阶段 1 (临战 60 秒)：在定点上新前整整 1 分钟 (如 20:59:00)，强制对全部备用 Worker 会话执行重新登录与心跳保鲜
+                # 彻底消除因白天闲置 1~2 小时导致的 PHP Session 冷失效，确保 21:00 开跑时全部 Session 与 TCP 连接均为最新热态
                 next_label, rem_drop_sec = self._get_next_drop_info()
-                if next_label and 1 <= rem_drop_sec <= 20:
-                    prewarm_marker = f"{today_str}_{next_label}"
+                if next_label and 45 <= rem_drop_sec <= 65:
+                    prewarm_60s_marker = f"{today_str}_{next_label}_warm60s"
+                    if prewarm_60s_marker not in self._prewarmed_drop_markers:
+                        self._prewarmed_drop_markers.add(prewarm_60s_marker)
+                        logger.info(f"⏳ 距离定点上新 [{next_label}] 剩余 {rem_drop_sec} 秒 (临战保鲜期)，强制执行备用 Worker 会话刷新与心跳探活...")
+                        if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
+                            self.monitor.auto_order.preload_standby_workers(force_refresh=True)
+
+                # 阶段 2 (临战 15 秒)：平滑就绪与差额补齐校验
+                if next_label and 1 <= rem_drop_sec <= 15:
+                    prewarm_marker = f"{today_str}_{next_label}_ready15s"
                     if prewarm_marker not in self._prewarmed_drop_markers:
                         self._prewarmed_drop_markers.add(prewarm_marker)
-                        logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，提前平滑预热备用 Worker 会话与风控通道...")
+                        logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，核验备用 Worker 会话与风控通道完全就绪...")
                         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
                             self.monitor.auto_order.preload_standby_workers(force_refresh=False)
 

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <defs>
+    <!-- 经典深蓝到天蓝科技感渐变 (高辨识度) -->
+    <linearGradient id="dollyBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="42%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+
+    <!-- 顶部轻微玻璃感高光 -->
+    <linearGradient id="dollyGloss" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.36" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- 柔和微投影 -->
+    <filter id="dollyDropShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="2.5" stdDeviation="2.5" flood-color="#0f172a" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <!-- 外层圆角矩形高质感蓝色徽章 -->
+  <rect x="6" y="6" width="116" height="116" rx="30" ry="30" fill="url(#dollyBg)" stroke="rgba(255,255,255,0.45)" stroke-width="2.5" />
+
+  <!-- 顶部轻微玻璃弧光 -->
+  <path d="M 6,36 C 6,19 19,6 36,6 L 92,6 C 109,6 122,19 122,36 C 122,52 86,64 6,52 Z" fill="url(#dollyGloss)" />
+
+  <!-- 核心主体内容 (带微阴影) -->
+  <g filter="url(#dollyDropShadow)">
+    <!-- Dollyteria 品牌大写字母 D -->
+    <path fill-rule="evenodd" fill="#ffffff" d="M 28,26 L 66,26 C 89,26 103,42 103,64 C 103,86 89,102 66,102 L 28,102 Z M 48,44 L 62,44 C 74,44 82,53 82,64 C 82,75 74,84 62,84 L 48,84 Z" />
+
+    <!-- Dolly 娃娃特征：右上角可爱白色蝴蝶结 (Bowknot) -->
+    <!-- 左蝶翼 -->
+    <path d="M 91,29 C 78,19 71,22 69,28 C 67,35 77,39 89,32 Z" fill="#f0f9ff" />
+    <!-- 右蝶翼 -->
+    <path d="M 96,29 C 109,19 116,22 118,28 C 120,35 110,39 98,32 Z" fill="#f0f9ff" />
+    <!-- 飘带 -->
+    <path d="M 90,32 C 85,39 79,46 73,50 C 78,46 86,40 92,33 Z" fill="#f0f9ff" />
+    <path d="M 97,32 C 102,39 108,46 114,50 C 109,46 101,40 95,33 Z" fill="#f0f9ff" />
+    <!-- 中心结扣 -->
+    <circle cx="93.5" cy="30.5" r="4.8" fill="#ffffff" stroke="#bae6fd" stroke-width="0.8" />
+
+    <!-- 右下角闪烁四角星芒 (上新好物闪光) -->
+    <path d="M 104,82 Q 104,90 112,90 Q 104,90 104,98 Q 104,90 96,90 Q 104,90 104,82 Z" fill="#ffffff" />
+    <circle cx="104" cy="90" r="1.5" fill="#38bdf8" />
+  </g>
+</svg>

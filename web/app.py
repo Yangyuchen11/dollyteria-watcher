@@ -98,6 +98,11 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         """轻量级健康检查接口，供 Docker 与 Dokploy 容器平台探针使用"""
         return jsonify({"status": "ok", "app": "dollyteria-watcher"})
 
+    @app.route("/favicon.ico")
+    def favicon():
+        """直接提供 Dollyteria 专用高辨识度蓝色 Favicon 图标"""
+        return send_file(os.path.join(static_dir, "favicon.ico"), mimetype="image/x-icon")
+
     # SSE 事件广播队列列表
     event_queues = []
 

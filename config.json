@@ -38,6 +38,7 @@
   "schedule": {
     "burst_duration_sec": 180,
     "burst_interval_sec": 0.2,
+    "burst_probe_timeout_sec": 2,
     "daily_stock_sync": {
       "enabled": true,
       "time": "05:00:00"
@@ -48,12 +49,11 @@
     "enabled": true,
     "interval_enabled": true,
     "interval_minutes": 30,
-    "max_stream_pages": 5,
-    "burst_probe_timeout_sec": 2.0
+    "max_stream_pages": 5
   },
   "watches": [
     {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1793015639467",
@@ -68,7 +68,7 @@
       "search_mode": "new_stream"
     },
     {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [
         "U-25-12-24"
@@ -85,7 +85,7 @@
       "search_mode": "new_stream"
     },
     {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1793015707951",
@@ -116,22 +116,7 @@
       "search_mode": "new_stream"
     },
     {
-      "auto_order": true,
-      "enabled": true,
-      "exclude_keywords": [],
-      "id": "w_1793015771404",
-      "keywords": [
-        "幼SD",
-        "まい"
-      ],
-      "match_mode": "all",
-      "max_price": 89000,
-      "min_price": 10000,
-      "name": "幼SDまい",
-      "search_mode": "new_stream"
-    },
-    {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1793015791890",
@@ -146,7 +131,7 @@
       "search_mode": "new_stream"
     },
     {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1793015810592",
@@ -161,7 +146,7 @@
       "search_mode": "new_stream"
     },
     {
-      "auto_order": true,
+      "auto_order": false,
       "enabled": true,
       "exclude_keywords": [],
       "id": "w_1793015827235",
@@ -203,6 +188,21 @@
       "min_price": 0,
       "name": "DearSD汎用",
       "search_mode": "new_stream"
+    },
+    {
+      "id": "w_1794389020099",
+      "name": "ＳＤ女の子/のの",
+      "keywords": [
+        "ＳＤ女の子/のの",
+        "U-26-11-11"
+      ],
+      "exclude_keywords": [],
+      "min_price": 0,
+      "max_price": 0,
+      "search_mode": "new_stream",
+      "match_mode": "all",
+      "auto_order": true,
+      "enabled": true
     }
   ],
   "web_password": ""

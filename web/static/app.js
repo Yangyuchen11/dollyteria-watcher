@@ -1553,7 +1553,7 @@ function bindEvents() {
                                     ${escapeHtml(p.message || '')}
                                 </div>
                                 <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-                                    探针令牌特征: <span style="font-family: monospace;">${escapeHtml(p.token_preview || '--')}</span> • 采用未勾选规约的零风险实盘探针技术，绝不产生实际扣款或订单！
+                                    探针令牌特征: <span style="font-family: monospace;">${escapeHtml(p.token_preview || '--')}</span> (长度: <strong>${escapeHtml(String(p.token_length || '--'))}</strong>) • 采用未勾选规约的零风险实盘探针技术，绝不产生实际扣款或订单！
                                 </div>
                             </div>
                         `;

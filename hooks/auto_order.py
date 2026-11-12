@@ -448,7 +448,12 @@ class RecaptchaTokenProvider:
                     const origGetParam = proto.getParameter;
                     proto.getParameter = function(param) {
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        if (param === 37446) {
+                            const isWin = (navigator.platform && navigator.platform.indexOf('Win') >= 0);
+                            return isWin
+                                ? 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)'
+                                : 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2, OpenGL 4.5.0 core)';
+                        }
                         return origGetParam.apply(this, arguments);
                     };
                 };

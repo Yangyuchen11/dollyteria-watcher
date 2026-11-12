@@ -1303,33 +1303,33 @@ class RecaptchaTokenProvider:
         # 2. 探测 Chromium 浏览器内核实际使用的出口 IP (通过 CDP 在运行中 Tab 内部执行真实网络请求)
         br_ip = None
         br_err = None
-        with self._lock:
-            if self._ensure_browser_and_pool_ready():
-                targets = self._slots
-                if targets:
-                    for slot in targets:
-                        try:
-                            cdp = _SimpleCDPClient(slot.ws_url, timeout=6.0)
-                            js_eval = (
-                                "fetch('https://api.ipify.org?format=json')"
-                                ".then(r => r.json())"
-                                ".then(d => d.ip)"
-                                ".catch(e => 'ERR:' + String(e))"
-                            )
-                            res = cdp.call("Runtime.evaluate", {
-                                "expression": js_eval,
-                                "awaitPromise": True,
-                                "returnByValue": True,
-                            })
-                            cdp.close()
-                            val = res.get("result", {}).get("value", "")
-                            if val and not str(val).startswith("ERR:"):
-                                br_ip = str(val).strip()
-                                break
-                            elif val:
-                                br_err = str(val)
-                        except Exception as e:
-                            br_err = str(e)
+        if self._ensure_browser_and_pool_ready():
+            with self._lock:
+                targets = list(self._slots)
+            if targets:
+                for slot in targets:
+                    try:
+                        cdp = _SimpleCDPClient(slot.ws_url, timeout=6.0)
+                        js_eval = (
+                            "fetch('https://api.ipify.org?format=json')"
+                            ".then(r => r.json())"
+                            ".then(d => d.ip)"
+                            ".catch(e => 'ERR:' + String(e))"
+                        )
+                        res = cdp.call("Runtime.evaluate", {
+                            "expression": js_eval,
+                            "awaitPromise": True,
+                            "returnByValue": True,
+                        })
+                        cdp.close()
+                        val = res.get("result", {}).get("value", "")
+                        if val and not str(val).startswith("ERR:"):
+                            br_ip = str(val).strip()
+                            break
+                        elif val:
+                            br_err = str(val)
+                    except Exception as e:
+                        br_err = str(e)
             else:
                 br_err = "浏览器进程未能成功就绪"
 

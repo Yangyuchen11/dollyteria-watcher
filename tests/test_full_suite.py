@@ -2854,13 +2854,11 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
             nav_urls = [c[1]["url"] for _, c, _ in mock_cdp.call.mock_calls if c and "url" in c[1]]
             self.assertTrue(any("robots.txt" in u for u in nav_urls), "预热落地点应选用官方干净的 robots.txt 页面")
 
-    def test_50_rolling_token_magazine_503_hot_swap_and_probe_yield(self):
+    def test_50_recaptcha_retry_on_verify_fail_and_probe_yield(self):
         """
-        测试上新高峰 3 重防护机制：
-        1. N+1 无限滚动接力弹匣 + 503 冲刺途中实时热换弹：
-           模拟 /cart/confirm 连续遭遇 6 次 503，验证第 1 枚和第 2 枚令牌在各自连续撞上 3 次 503 后均自动 0.00s 热切换为后台预签新令牌，
-           第 7 次突破 503 进入 PHP 时直接携带全新的第 3 枚令牌 token_mag_v3 一次通关！
-        2. 抢购期间三路探针自动让路：
+        测试验证重试与探针让路机制：
+        1. 验证提交 /cart/confirm 若遇到 reCAPTCHA 验证未通过，自动释放旧令牌并换签全新 Token 原地重交直至成功。
+        2. 抢购期间探针自动让路：
            验证下单执行期间 AutoOrderHook.is_checkout_active() 为 True，三路探针主动避让，下单完成后立即恢复 False。
         """
         hook = AutoOrderHook(
@@ -2875,13 +2873,13 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
         hook.is_logged_in = True
         resps = build_checkout_responses("812708", "SD/フルチョイス:F-26", "55,000円", payment_label="店頭支払")
 
-        token_seq = iter(["token_mag_v1", "token_mag_v2", "token_mag_v3", "token_mag_v4"])
+        token_seq = iter(["token_retry_v1", "token_retry_v2"])
         confirm_submitted_tokens = []
         active_during_confirm = []
         released_tokens = []
 
         def mock_get_token(*args, **kwargs):
-            return next(token_seq, "token_mag_overflow")
+            return next(token_seq, "token_overflow")
 
         def mock_request(method, url, **kwargs):
             if method == "GET" and "/cart/customer" in url:
@@ -2894,13 +2892,10 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
                 active_during_confirm.append(AutoOrderHook.is_checkout_active())
                 tok = kwargs.get("data", {}).get("recaptcha_token", "")
                 confirm_submitted_tokens.append(tok)
-                # 模拟前 6 次提交均遭遇 503（第 1~3 次消耗 v1，第 4~6 次热换弹为 v2，第 7 次热换弹为 v3 并突破 503）
-                if len(confirm_submitted_tokens) <= 6:
-                    return make_response(503, html="503 Service Temporarily Unavailable")
-                # 第 7 次突破 503，要求必须是热切换后的最新鲜令牌 token_mag_v3
-                if tok == "token_mag_v3":
-                    return resps["complete"]
-                return resps["confirm_recaptcha_err"]
+                # 第 1 次返回 reCAPTCHA 拦截，第 2 次携带新令牌成功
+                if tok == "token_retry_v1":
+                    return resps["confirm_recaptcha_err"]
+                return resps["complete"]
             return make_response(200)
 
         hook.session.post = MagicMock(return_value=resps["cart"])
@@ -2911,15 +2906,11 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
              patch.object(provider, "release_tokens", side_effect=lambda toks: released_tokens.extend(toks)):
             res = hook.execute_checkout("812708", "SD/フルチョイス:F-26", dry_run=False, payment_method="store_pickup")
 
-        self.assertTrue(res["success"], f"经历 6 次 503 与两次 N+1 热换弹后应一次突破下单成功: {res}")
-        self.assertEqual(confirm_submitted_tokens[:3], ["token_mag_v1", "token_mag_v1", "token_mag_v1"])
-        self.assertEqual(confirm_submitted_tokens[3:6], ["token_mag_v2", "token_mag_v2", "token_mag_v2"])
-        self.assertEqual(confirm_submitted_tokens[6], "token_mag_v3")
+        self.assertTrue(res["success"], f"换签新 Token 后应成功下单: {res}")
+        self.assertEqual(confirm_submitted_tokens, ["token_retry_v1", "token_retry_v2"])
         self.assertTrue(all(active_during_confirm), "下单冲刺期间 AutoOrderHook.is_checkout_active() 必须保持 True")
         self.assertFalse(AutoOrderHook.is_checkout_active(), "下单结束后 AutoOrderHook.is_checkout_active() 必须立即归位 False")
-        self.assertIn("token_mag_v1", released_tokens)
-        self.assertIn("token_mag_v2", released_tokens)
-        self.assertIn("token_mag_v3", released_tokens)
+        self.assertIn("token_retry_v1", released_tokens)
 
     def test_51_priority_rule_exclusivity_and_probe_d_sniper(self):
         """

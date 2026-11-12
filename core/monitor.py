@@ -612,7 +612,6 @@ class DollyteriaMonitor:
             retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
             max_retries=int(ao_cfg.get("max_retries", 35)),
             standby_workers=int(ao_cfg.get("standby_workers", 2)),
-            proxy=(ao_cfg.get("proxy") or self.config.get("proxy") or "").strip(),
         )
 
         self.is_checking = False
@@ -765,14 +764,6 @@ class DollyteriaMonitor:
         self.auto_order.retry_delay = float(ao_cfg.get("retry_delay_sec", 0.15))
         self.auto_order.max_retries = int(ao_cfg.get("max_retries", 35))
         self.auto_order.standby_workers_count = int(ao_cfg.get("standby_workers", 2))
-        new_proxy = (ao_cfg.get("proxy") or new_cfg.get("proxy") or "").strip()
-        if new_proxy != getattr(self.auto_order, "proxy", ""):
-            self.auto_order.proxy = new_proxy
-            if new_proxy:
-                req_p = new_proxy.replace("socks5://", "socks5h://", 1) if new_proxy.startswith("socks5://") else new_proxy
-                self.auto_order.session.proxies.update({"http": req_p, "https": req_p})
-            else:
-                self.auto_order.session.proxies.clear()
 
         # 实时同步 reCAPTCHA v3 预热浏览器标签页池大小与备用会话数一致
         try:

@@ -448,12 +448,7 @@ class RecaptchaTokenProvider:
                     const origGetParam = proto.getParameter;
                     proto.getParameter = function(param) {
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) {
-                            const isWin = (navigator.platform && navigator.platform.indexOf('Win') >= 0);
-                            return isWin
-                                ? 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)'
-                                : 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2, OpenGL 4.5.0 core)';
-                        }
+                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
                         return origGetParam.apply(this, arguments);
                     };
                 };
@@ -690,7 +685,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=0,0",
+                    "--window-position=-32000,-32000",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -1536,16 +1531,7 @@ class AutoOrderHook:
         for h in ["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]:
             self.session.headers.pop(h, None)
 
-    def _safe_request(
-        self,
-        method: str,
-        url: str,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-        on_busy_before_sleep=None,
-        on_busy_after_sleep=None,
-        **kwargs,
-    ) -> Optional[requests.Response]:
+    def _safe_request(self, method: str, url: str, max_retries: Optional[int] = None, retry_delay: Optional[float] = None, **kwargs) -> Optional[requests.Response]:
         """带有 503/繁忙/网络抖动迅速重试的 HTTP 请求包装器 (默认继承 auto_order.max_retries，如 35 次)"""
         retries = self.max_retries if max_retries is None else int(max_retries)
         delay = self.retry_delay if retry_delay is None else retry_delay
@@ -1558,33 +1544,13 @@ class AutoOrderHook:
                 if is_busy:
                     if attempt < retries:
                         logger.warning(f"[Auto-Order] 结算推进 {url} 遇到繁忙 ({resp.status_code}/排队)，正在迅速重试 (第 {attempt + 1}/{retries} 次)...")
-                        if on_busy_before_sleep:
-                            try:
-                                on_busy_before_sleep(attempt + 1)
-                            except Exception:
-                                pass
                         time.sleep(delay)
-                        if on_busy_after_sleep:
-                            try:
-                                on_busy_after_sleep(attempt + 1)
-                            except Exception:
-                                pass
                         continue
                 return resp
             except (requests.Timeout, requests.ConnectionError) as e:
                 if attempt < retries:
                     logger.warning(f"[Auto-Order] 结算推进 {url} 网络异常 ({e})，正在迅速重试 (第 {attempt + 1}/{retries} 次)...")
-                    if on_busy_before_sleep:
-                        try:
-                            on_busy_before_sleep(attempt + 1)
-                        except Exception:
-                            pass
                     time.sleep(delay)
-                    if on_busy_after_sleep:
-                        try:
-                            on_busy_after_sleep(attempt + 1)
-                        except Exception:
-                            pass
                     continue
             except Exception as e:
                 logger.error(f"[Auto-Order] 请求 {url} 发生未捕获异常: {e}")
@@ -1626,7 +1592,6 @@ class AutoOrderHook:
                         retry_delay=self.retry_delay,
                         max_retries=self.max_retries,
                         standby_workers=self.standby_workers_count,
-                        proxy=self.proxy,
                     )
                     w._is_standby_worker = True
                     ok, _ = w.login()
@@ -1657,7 +1622,6 @@ class AutoOrderHook:
                         retry_delay=self.retry_delay,
                         max_retries=self.max_retries,
                         standby_workers=self.standby_workers_count,
-                        proxy=self.proxy,
                     )
                     w._is_standby_worker = True
                     ok, _ = w.login()
@@ -1708,7 +1672,6 @@ class AutoOrderHook:
             retry_delay=self.retry_delay,
             max_retries=self.max_retries,
             standby_workers=self.standby_workers_count,
-            proxy=self.proxy,
         )
         worker._is_standby_worker = True
         worker._is_busy = True
@@ -2026,17 +1989,15 @@ class AutoOrderHook:
                     "mode": "shipping-select",
                     "shipping-id": ship_id,
                 }, timeout=10, allow_redirects=True)
-                if not r_ship:
-                    return False, "地址选择未能正常响应", None
-                text_ship = r_ship.content.decode("utf-8", "ignore")
-                soup_ship = BeautifulSoup(text_ship, "html.parser")
             else:
                 # 尝试直接访问 /cart/shipping?shipping_no=1
                 r_ship = self._safe_request("GET", "https://www.dollyteria.com/cart/shipping?shipping_no=1", timeout=10, allow_redirects=True)
-                if not r_ship:
-                    return False, "地址选择未能正常响应", None
-                text_ship = r_ship.content.decode("utf-8", "ignore")
-                soup_ship = BeautifulSoup(text_ship, "html.parser")
+
+            if not r_ship:
+                return False, "地址选择未能正常响应", None
+
+            text_ship = r_ship.content.decode("utf-8", "ignore")
+            soup_ship = BeautifulSoup(text_ship, "html.parser")
 
             # 3. 在配送方式与支付方式表单中选择指定支付方式
             form = soup_ship.find("form", action=lambda a: a and "cart/shipping" in a) or soup_ship.find("form")
@@ -2221,10 +2182,8 @@ class AutoOrderHook:
         # 真实下单模式或 Dry-Run 开启风控探针时，在加购与推进结算的同时，并行启动 reCAPTCHA v3 令牌预取，实现确认页 0 等待
         token_box = {"token": "", "issued_at": 0.0}
         used_tokens: List[str] = []
-        backup_lock = threading.Lock()
-        backup_box = {"token": "", "issued_at": 0.0, "inflight": False, "thread": None}
-        token_thread: Optional[threading.Thread] = None
         AutoOrderHook._begin_active_checkout()
+        token_thread: Optional[threading.Thread] = None
         if not is_dry or probe_recaptcha:
             def _prefetch_recaptcha():
                 try:
@@ -2233,10 +2192,9 @@ class AutoOrderHook:
                         action="submit",
                     )
                     if tok:
-                        with backup_lock:
-                            token_box["token"] = tok
-                            token_box["issued_at"] = time.time()
-                            used_tokens.append(tok)
+                        token_box["token"] = tok
+                        token_box["issued_at"] = time.time()
+                        used_tokens.append(tok)
                 except Exception as e:
                     logger.warning(f"[Auto-Order] 并行预取 reCAPTCHA 令牌异常: {e}")
 
@@ -2467,23 +2425,19 @@ class AutoOrderHook:
                     token_thread.join(timeout=12.0)
                 recaptcha_token = token_box.get("token", "")
                 token_issued_at = token_box.get("issued_at", 0.0)
-                token_age = (time.time() - token_issued_at) if (recaptcha_token and token_issued_at > 0) else 0.0
-                token_too_old = bool(recaptcha_token and token_age > 4.5)
-                provider = RecaptchaTokenProvider.get_instance()
+                token_too_old = bool(recaptcha_token and token_issued_at > 0 and (time.time() - token_issued_at) > 12.0)
 
                 if not recaptcha_token or page_sitekey != DEFAULT_RECAPTCHA_SITEKEY or token_too_old:
                     if token_too_old and recaptcha_token:
-                        logger.info(f"[Auto-Order] 加购/结算排队耗时 {token_age:.1f}s (>4.5s)，预取令牌已老化，正在从备用预热 Tab 极速换签全新令牌...")
-                        provider.release_tokens([recaptcha_token])
-                    recaptcha_token = provider.get_token(
+                        logger.info("[Auto-Order] 加购/结算重试耗时较长，预取令牌已超 12s，正在实时换签新令牌...")
+                        RecaptchaTokenProvider.get_instance().release_tokens([recaptcha_token])
+                    recaptcha_token = RecaptchaTokenProvider.get_instance().get_token(
                         sitekey=page_sitekey,
                         action="submit",
                         force_fresh=True,
                     )
-                    token_issued_at = time.time()
                     if recaptcha_token:
-                        with backup_lock:
-                            used_tokens.append(recaptcha_token)
+                        used_tokens.append(recaptcha_token)
 
                 if recaptcha_token:
                     final_data["recaptcha_token"] = recaptcha_token
@@ -2497,117 +2451,13 @@ class AutoOrderHook:
                 success = False
                 is_sold_out_at_confirm = False
 
-                # 支持若遇到 reCAPTCHA 校验拦截或 /cart/confirm 连续 503 繁忙时：
-                # 1. N+1 滚动接力弹匣：一旦 /cart/confirm 遭遇 503 或拒签，立即在后台空闲预热 Tab 异步预签下一枚全新备用令牌
-                # 2. 503 冲刺途中热换弹：当同一令牌在 /cart/confirm 连续遭遇 >=3 次 503（或已超 3.5s 且遭遇 503）且后台备用新令牌已就绪时，
-                #    利用重试间隙 0.00s 瞬间热替换 final_data["recaptcha_token"]，杜绝半穿透 503 暗中核销旧令牌导致突破 503 时白白拒签！
+                # 支持若遇到 reCAPTCHA 校验拦截时，保持购物车与确认页状态，自动轮换预热 Tab 实时重签新 Token 持续重试直至成功
+                # 换签上限设为预热备用会话数的 2 倍 (如 4 会话对应 8 次，最多 8 轮)，耗时仅 ~2.5s，确保每个预热 Tab 得到充分轮换
+                # 若 8 轮均未通过且商品未售罄，由外层「未售罄自动续抢机制」在下个巡检周期无缝接管，杜绝单线程死锁或中途耗时冷启动
                 max_recaptcha_attempts = min(8, max(4, self.standby_workers_count * 2))
-                confirm_state = {
-                    "current_token_issued_at": token_issued_at or time.time(),
-                    "busy_streak_on_token": 0,
-                    "total_busy_retries": 0,
-                    "hot_swaps": 0,
-                }
-
-                def _trigger_backup_prefetch():
-                    with backup_lock:
-                        if backup_box["token"] or backup_box["inflight"]:
-                            return
-                        backup_box["inflight"] = True
-
-                    def _bg_sign():
-                        try:
-                            btok = provider.get_token(
-                                sitekey=page_sitekey,
-                                action="submit",
-                                force_fresh=True,
-                            )
-                            with backup_lock:
-                                if btok:
-                                    backup_box["token"] = btok
-                                    backup_box["issued_at"] = time.time()
-                                    used_tokens.append(btok)
-                        except Exception as e:
-                            logger.debug(f"[Auto-Order] 后台预签备用接力令牌异常: {e}")
-                        finally:
-                            with backup_lock:
-                                backup_box["inflight"] = False
-
-                    b_th = threading.Thread(target=_bg_sign, name=f"RecaptchaRelay_{item_id}", daemon=True)
-                    with backup_lock:
-                        backup_box["thread"] = b_th
-                    b_th.start()
-
-                def _consume_backup_token(wait_for_inflight: bool = False) -> Tuple[str, float]:
-                    b_th = None
-                    with backup_lock:
-                        if backup_box["token"]:
-                            btok = backup_box["token"]
-                            bts = backup_box["issued_at"]
-                            backup_box["token"] = ""
-                            backup_box["issued_at"] = 0.0
-                            return btok, bts
-                        if wait_for_inflight and backup_box["inflight"]:
-                            b_th = backup_box["thread"]
-                    if b_th is not None:
-                        b_th.join(timeout=6.0)
-                        with backup_lock:
-                            if backup_box["token"]:
-                                btok = backup_box["token"]
-                                bts = backup_box["issued_at"]
-                                backup_box["token"] = ""
-                                backup_box["issued_at"] = 0.0
-                                return btok, bts
-                    return "", 0.0
-
-                def _on_confirm_busy_before_sleep(_busy_attempt: int):
-                    confirm_state["busy_streak_on_token"] += 1
-                    confirm_state["total_busy_retries"] += 1
-                    # 一旦 /cart/confirm 遭遇 503，立即在后台预热 Tab 预签下一发备用令牌，与 0.15s 重试等待完全并行重叠
-                    if confirm_state["hot_swaps"] < max_recaptcha_attempts:
-                        _trigger_backup_prefetch()
-
-                def _on_confirm_busy_after_sleep(_busy_attempt: int):
-                    # 若当前令牌已连续撞上 >=3 次 503，或账龄 >=3.5s 且撞上 503（随时可能已被半穿透请求核销），
-                    # 只要后台备用新令牌已就绪，立即 0.00s 热换弹并预装下一枚 N+1 令牌！
-                    cur_age = time.time() - confirm_state["current_token_issued_at"]
-                    should_hot_swap = (
-                        confirm_state["busy_streak_on_token"] >= 3
-                        or (confirm_state["busy_streak_on_token"] >= 1 and cur_age >= 3.5)
-                    )
-                    if should_hot_swap and confirm_state["hot_swaps"] < max_recaptcha_attempts:
-                        new_tok, new_ts = _consume_backup_token(wait_for_inflight=False)
-                        if new_tok:
-                            old_tok = final_data.get("recaptcha_token", "")
-                            if old_tok:
-                                provider.release_tokens([old_tok])
-                            final_data["recaptcha_token"] = new_tok
-                            confirm_state["current_token_issued_at"] = new_ts or time.time()
-                            confirm_state["busy_streak_on_token"] = 0
-                            confirm_state["hot_swaps"] += 1
-                            logger.info(
-                                f"🔄 [Auto-Order 503热换弹] /cart/confirm 冲刺途中 0.00s 无缝切换后台预签鲜活令牌 "
-                                f"(第 {confirm_state['hot_swaps']} 次换弹, 长度: {len(new_tok)})，并自动接力预装下一枚备用令牌..."
-                            )
-                            if confirm_state["hot_swaps"] < max_recaptcha_attempts:
-                                _trigger_backup_prefetch()
-
-                soldout_kws = [
-                    "在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ",
-                    "現在、商品はございません", "カートに商品がありません",
-                    "商品は入っていません", "カートは空です",
-                ]
-
+                provider = RecaptchaTokenProvider.get_instance()
                 for submit_attempt in range(max_recaptcha_attempts):
-                    resp_complete = self._safe_request(
-                        "POST",
-                        action_url,
-                        data=final_data,
-                        timeout=15,
-                        allow_redirects=True,
-                        on_busy_before_sleep=_on_confirm_busy_before_sleep,
-                        on_busy_after_sleep=_on_confirm_busy_after_sleep,
-                    )
+                    resp_complete = self._safe_request("POST", action_url, data=final_data, timeout=15, allow_redirects=True)
                     if not resp_complete:
                         continue
                     complete_text = resp_complete.content.decode("utf-8", "ignore")
@@ -2618,13 +2468,14 @@ class AutoOrderHook:
                         break
 
                     # 1. 优先检查商品是否已被他人抢先下单导致库存不足/售罄，若是立即终止，不浪费任何重试！
+                    soldout_kws = ["在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ", "現在、商品はございません"]
                     if any(k in complete_text for k in soldout_kws):
                         logger.warning("🛑 [Auto-Order] 确认页提示商品已售罄或已被抢购，智能熔断立即终止重试！")
                         is_sold_out_at_confirm = True
                         self.clear_cart()
                         break
 
-                    # 2. 若因 reCAPTCHA 验证未通过，优先 0.00s 瞬时提取后台接力弹匣中的鲜活令牌，或立即在下一个预热 Tab 重签原地重交
+                    # 2. 若因 reCAPTCHA 验证未通过，立即释放旧令牌并在下一个预热 Tab (Round-Robin) 上实时重签新 Token 原地重交
                     if "reCAPTCHAの検証に失敗しました" in complete_text:
                         cur_tok = final_data.get("recaptcha_token", "")
                         if cur_tok:
@@ -2636,26 +2487,14 @@ class AutoOrderHook:
                             )
                         if cur_tok:
                             provider.release_tokens([cur_tok])
-
-                        fresh_tok, fresh_ts = _consume_backup_token(wait_for_inflight=True)
-                        if not fresh_tok:
-                            fresh_tok = provider.get_token(
-                                sitekey=page_sitekey,
-                                action="submit",
-                                force_fresh=True,
-                            )
-                            fresh_ts = time.time()
-                            if fresh_tok:
-                                with backup_lock:
-                                    used_tokens.append(fresh_tok)
-
+                        fresh_tok = provider.get_token(
+                            sitekey=page_sitekey,
+                            action="submit",
+                            force_fresh=True,
+                        )
                         if fresh_tok:
+                            used_tokens.append(fresh_tok)
                             final_data["recaptcha_token"] = fresh_tok
-                            confirm_state["current_token_issued_at"] = fresh_ts or time.time()
-                            confirm_state["busy_streak_on_token"] = 0
-                            # 若真实预热池就绪或已发生过 503，立即在后台异步预装下一枚 N+1 接力令牌
-                            if (confirm_state["total_busy_retries"] > 0 or len(provider._slots) > 0) and submit_attempt < max_recaptcha_attempts - 2:
-                                _trigger_backup_prefetch()
                             continue
                     break
 
@@ -2677,6 +2516,7 @@ class AutoOrderHook:
                         txt = el.get_text(" ", strip=True)
                         if txt and txt not in err_reasons and len(txt) < 200:
                             err_reasons.append(txt)
+                    soldout_kws = ["在庫が不足", "売り切れ", "売切", "品切れ", "在庫切れ", "現在、商品はございません"]
                     if any(k in complete_text for k in soldout_kws):
                         if not is_sold_out_at_confirm:
                             is_sold_out_at_confirm = True
@@ -2704,22 +2544,14 @@ class AutoOrderHook:
         finally:
             AutoOrderHook._end_active_checkout()
             if not is_dry:
-                with backup_lock:
-                    initial_rel = list(used_tokens)
-                if initial_rel:
-                    RecaptchaTokenProvider.get_instance().release_tokens(initial_rel)
-                b_th = backup_box.get("thread")
-                if (token_thread is not None and token_thread.is_alive()) or (b_th is not None and b_th.is_alive()):
+                if token_thread is not None and token_thread.is_alive():
                     def _cleanup_inflight():
-                        if token_thread is not None:
-                            token_thread.join(timeout=12.0)
-                        if b_th is not None:
-                            b_th.join(timeout=12.0)
-                        with backup_lock:
-                            late_rel = list(used_tokens)
-                        if late_rel:
-                            RecaptchaTokenProvider.get_instance().release_tokens(late_rel)
+                        token_thread.join(timeout=12.0)
+                        if used_tokens:
+                            RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
                     threading.Thread(target=_cleanup_inflight, daemon=True).start()
+                elif used_tokens:
+                    RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
 
     def on_item_matched(self, item: Dict, rule: Dict) -> Optional[Dict]:
         """监控引擎命中商品时的自动加购与下单入口 (严格遵循 self.dry_run 配置)"""

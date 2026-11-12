@@ -3,9 +3,7 @@ services:
     build: .
     container_name: dollyteria-monitor
     restart: always
-    ports:
-      # 默认监听 5000 端口。若与服务器上的 yurara ERP 冲突，可将冒号左侧改为 5001:5000 或其他高位端口
-      - "5000:5000"
+    network_mode: "host"
     environment:
       - TZ=Asia/Tokyo
       - PORT=5000

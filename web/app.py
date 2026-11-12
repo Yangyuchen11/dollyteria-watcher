@@ -161,13 +161,9 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             except Exception as e:
                 data["cdp_err"] = str(e)
             finally:
-                if cdp: cdp.close()
-                try:
-            data["ip_route"] = subprocess.check_output(['ip', 'route'], text=True)
-            data["ip_addr"] = subprocess.check_output(['ip', 'addr'], text=True)
-        except Exception as e:
-            data["ip_cmd_err"] = str(e)
-return jsonify(data)
+                if cdp:
+                    cdp.close()
+        return jsonify(data)
 
     @app.route("/api/auth/status")
     def api_auth_status():

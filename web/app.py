@@ -144,6 +144,9 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         try:
             r = requests.get("https://www.google.com/recaptcha/api.js", timeout=5)
             data["google_status"] = r.status_code
+            data["google_ips"] = socket.gethostbyname_ex("www.google.com")
+            data["gstatic_ips"] = socket.gethostbyname_ex("www.gstatic.com")
+            data["dolly_ips"] = socket.gethostbyname_ex("www.dollyteria.com")
         except Exception as e:
             data["google_err"] = str(e)
         try:

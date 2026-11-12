@@ -199,6 +199,7 @@ class RecaptchaTokenProvider:
         self._slots: List[_RecaptchaTabSlot] = []
         self._active_token_slots: Dict[str, Tuple[_RecaptchaTabSlot, int, str]] = {}
         self._rr_index: int = 0
+        self._focused_target_id: str = ""
         self._is_ready: bool = False
         self._keepalive_started: bool = False
         self.browser_user_agent: str = DEFAULT_USER_AGENT
@@ -254,13 +255,18 @@ class RecaptchaTokenProvider:
     def _get_configured_proxy() -> Optional[str]:
         """读取系统或 config.json 中配置的代理 (支持 auto_order.proxy 或全局 proxy，规避云厂商数据中心 IP 被 Google v3 扣分)"""
         try:
-            cfg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
-            if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cdata = json.load(f)
-                    p = (cdata.get("auto_order", {}).get("proxy") or cdata.get("proxy") or "").strip()
-                    if p:
-                        return p
+            candidates = []
+            data_dir = os.environ.get("DATA_DIR", "").strip()
+            if data_dir:
+                candidates.append(os.path.join(data_dir, "config.json"))
+            candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json")))
+            for cfg_path in candidates:
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cdata = json.load(f)
+                        p = (cdata.get("auto_order", {}).get("proxy") or cdata.get("proxy") or "").strip()
+                        if p:
+                            return p
         except Exception:
             pass
         return None
@@ -573,34 +579,35 @@ class RecaptchaTokenProvider:
                             cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
                         except Exception:
                             pass
+                        if self._focused_target_id != slot.target_id:
+                            time.sleep(0.05)
+                            self._focused_target_id = slot.target_id
                         for mx, my in [(140, 220), (210, 260), (295, 235), (350, 195)]:
                             cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
+                            time.sleep(0.01)
 
-                    warmup_expr = (
-                        f"new Promise((resolve) => {{"
-                        f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ resolve(''); return; }}"
-                        f"  setTimeout(() => {{"
-                        f"    window.grecaptcha.ready(() => {{"
-                        f"      window.grecaptcha.execute('{sitekey}', {{action: 'pageview'}})"
-                        f"        .then(t => resolve(t || '')).catch(() => resolve(''));"
-                        f"    }});"
-                        f"  }}, 180);"
-                        f"}})"
-                    )
-                    w_res = cdp.call("Runtime.evaluate", {
-                        "expression": warmup_expr,
-                        "awaitPromise": True,
-                        "returnByValue": True,
-                    })
-                    w_tok = w_res.get("result", {}).get("value", "")
-                    if isinstance(w_tok, str) and len(w_tok) > 100:
-                        slot.is_warmed = True
-                    else:
-                        slot.is_warmed = True
+                        warmup_expr = (
+                            f"new Promise((resolve) => {{"
+                            f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ resolve(''); return; }}"
+                            f"  setTimeout(() => {{"
+                            f"    window.grecaptcha.ready(() => {{"
+                            f"      window.grecaptcha.execute('{sitekey}', {{action: 'pageview'}})"
+                            f"        .then(t => resolve(t || '')).catch(() => resolve(''));"
+                            f"    }});"
+                            f"  }}, 180);"
+                            f"}})"
+                        )
+                        w_res = cdp.call("Runtime.evaluate", {
+                            "expression": warmup_expr,
+                            "awaitPromise": True,
+                            "returnByValue": True,
+                        })
+                        w_tok = w_res.get("result", {}).get("value", "")
+                        slot.is_warmed = bool(isinstance(w_tok, str) and len(w_tok) > 100)
 
-                    # 热身握手完成后再预埋两段平滑光标事件，供正式下单签发时直接打包高熵行为信号
-                    for mx, my in [(310, 240), (245, 275)]:
-                        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
+                        # 热身握手完成后再预埋两段平滑光标事件，供正式下单签发时直接打包高熵行为信号
+                        for mx, my in [(310, 240), (245, 275)]:
+                            cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
                 except Exception:
                     slot.is_warmed = False
 
@@ -608,6 +615,8 @@ class RecaptchaTokenProvider:
                 slot.sitekey = sitekey
                 slot.prepared_at = time.time()
                 slot.last_touch_at = slot.prepared_at
+                if force_navigate:
+                    slot.last_failed = False
                 return True
             slot.is_fresh = False
             slot.is_warmed = False
@@ -645,6 +654,11 @@ class RecaptchaTokenProvider:
                     try:
                         cmd = f'Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\' or Name = \'msedge.exe\'" | Where-Object {{ $_.CommandLine -like "*{os.path.basename(profile_base)}*" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}'
                         subprocess.run(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        subprocess.run(["pkill", "-9", "-f", os.path.basename(profile_base)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
                     except Exception:
                         pass
 
@@ -837,6 +851,15 @@ class RecaptchaTokenProvider:
 
         with self._lock:
             ready_tabs = sum(1 for s in self._slots if s.is_fresh)
+            primary_slot = None
+            if self._slots:
+                start_idx = self._rr_index % len(self._slots)
+                for offset in range(len(self._slots)):
+                    cand = self._slots[(start_idx + offset) % len(self._slots)]
+                    if cand.is_fresh and not cand.in_use:
+                        primary_slot = cand
+                        self._rr_index = (start_idx + offset) % len(self._slots)
+                        break
             if ready_tabs > 0 or any(s.in_use for s in self._slots):
                 self._is_ready = True
                 if not was_ready or added_tabs > 0 or removed_tabs > 0:
@@ -844,8 +867,25 @@ class RecaptchaTokenProvider:
                         f"🛡️ [reCAPTCHA] Dollyteria 官网 reCAPTCHA v3 多标签预热池就绪 "
                         f"(独立标签页: {ready_tabs}/{target_count} 个，与备用会话数同步)！"
                     )
-                return True
-            return False
+                ok_ready = True
+            else:
+                ok_ready = False
+
+        # 确保主粘性预热槽位在并行初始化完成后稳居窗口前台焦点，避免多 Tab 并发预热后主槽位被后台化
+        if ok_ready and primary_slot is not None and self._focused_target_id != primary_slot.target_id:
+            try:
+                with self._focus_lock:
+                    cdp_focus = _SimpleCDPClient(primary_slot.ws_url, timeout=3.0)
+                    try:
+                        cdp_focus.call("Target.activateTarget", {"targetId": primary_slot.target_id})
+                        cdp_focus.call("Page.bringToFront", {})
+                        cdp_focus.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+                        self._focused_target_id = primary_slot.target_id
+                    finally:
+                        cdp_focus.close()
+            except Exception:
+                pass
+        return ok_ready
 
     def _execute_on_slot(self, slot: _RecaptchaTabSlot, sitekey: str, action: str) -> str:
         """在指定独占 Tab 槽位上执行 grecaptcha.execute 并返回全新 Token (调用方已持有 slot.lock)"""
@@ -864,7 +904,16 @@ class RecaptchaTokenProvider:
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=8.0)
+            expr = (
+                f"new Promise((resolve, reject) => {{"
+                f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
+                f"  window.grecaptcha.ready(() => {{"
+                f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
+                f"  }});"
+                f"}})"
+            )
             with self._focus_lock:
+                switched_tab = (self._focused_target_id != slot.target_id)
                 try:
                     cdp.call("Target.activateTarget", {"targetId": slot.target_id})
                 except Exception:
@@ -877,27 +926,25 @@ class RecaptchaTokenProvider:
                     cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
                 except Exception:
                     pass
+                self._focused_target_id = slot.target_id
+                if switched_tab:
+                    time.sleep(0.05)
+
                 # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
                 try:
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
+                    time.sleep(0.015)
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 265, "y": 245})
+                    time.sleep(0.015)
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 320, "y": 210})
                 except Exception:
                     pass
 
-            expr = (
-                f"new Promise((resolve, reject) => {{"
-                f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
-                f"  window.grecaptcha.ready(() => {{"
-                f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
-                f"  }});"
-                f"}})"
-            )
-            res = cdp.call("Runtime.evaluate", {
-                "expression": expr,
-                "awaitPromise": True,
-                "returnByValue": True,
-            })
+                res = cdp.call("Runtime.evaluate", {
+                    "expression": expr,
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                })
             token = res.get("result", {}).get("value", "")
             if isinstance(token, str) and len(token) > 100:
                 slot.is_fresh = True
@@ -917,20 +964,20 @@ class RecaptchaTokenProvider:
                 cdp.close()
 
     def _try_borrow_fast_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
-        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab (粘性高分优先)"""
+        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab (粘性高分优先，并发或失败时自动轮转下一槽位)"""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None or not self._slots:
                 return None
             n = len(self._slots)
             start = self._rr_index % n
-            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位 (保持粘性，不盲目切走优质槽位)
+            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位 (保持粘性，复用已处于前台的高分槽位；若该槽位正忙 in_use 则自动顺延下一槽位)
             for offset in range(n):
                 idx = (start + offset) % n
                 s = self._slots[idx]
                 if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
                     s.in_use = True
                     s.borrow_seq += 1
-                    self._rr_index = (idx + 1) % n  # 轮转至下一个预热槽位，实现多 Tab 接力轮换
+                    self._rr_index = idx  # 成功槽位保持粘性，下次优先继续使用；若并发/换弹期间 in_use=True 则自动借用下一个槽位
                     return s
             # 2. 次选任意已预热就绪槽位
             for offset in range(n):
@@ -962,7 +1009,7 @@ class RecaptchaTokenProvider:
                     if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
                         s.in_use = True
                         s.borrow_seq += 1
-                        self._rr_index = (idx + 1) % n  # 轮转至下一个预热槽位，实现多 Tab 接力轮换
+                        self._rr_index = idx  # 成功槽位保持粘性
                         return s
                 # 2. 找任意已预热好的槽位
                 for offset in range(n):
@@ -1001,6 +1048,10 @@ class RecaptchaTokenProvider:
             entry = self._active_token_slots.get(token)
             if entry:
                 slot, seq, sitekey = entry
+                slot_idx = self._slots.index(slot) if slot in self._slots else -1
+                if not success and slot_idx >= 0 and len(self._slots) > 1:
+                    # 遭遇拒签时立即将指针轮转至下一个槽位，严禁连续两次借用同一个失败槽位
+                    self._rr_index = (slot_idx + 1) % len(self._slots)
                 with slot.lock:
                     if success:
                         slot.success_count += 1
@@ -1010,6 +1061,7 @@ class RecaptchaTokenProvider:
                         slot.last_failed = True
                         # 遭遇官网拒绝拦截，立即强制该槽位下线重置刷新
                         slot.is_fresh = False
+                        slot.is_warmed = False
 
     def release_slots(
         self,
@@ -1358,6 +1410,10 @@ class RecaptchaTokenProvider:
 
     def _touch_slot_keepalive(self, slot: _RecaptchaTabSlot):
         """对健康空闲的预热 Tab 注入轻量微动信号，维持页面活跃与持续交互熵，避免粗暴重载洗掉页面停留时长"""
+        if AutoOrderHook.is_checkout_active():
+            return
+        if not self._focus_lock.acquire(blocking=False):
+            return
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=3.0)
@@ -1371,6 +1427,7 @@ class RecaptchaTokenProvider:
         finally:
             if cdp:
                 cdp.close()
+            self._focus_lock.release()
 
     def start_prewarm(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, pool_size: Optional[int] = None):
         """启动后台多标签页预热池与定时保活线程 (保持与 Standby Sessions 数量一致的独立 Tab 处于 grecaptcha.ready 状态)"""
@@ -1417,6 +1474,8 @@ class RecaptchaTokenProvider:
                             with s.lock:
                                 if not s.in_use and s.is_fresh:
                                     self._touch_slot_keepalive(s)
+                                    if not s.is_fresh and not s.in_use:
+                                        self._prepare_slot(s, self._sitekey, force_navigate=True)
                 except Exception:
                     pass
 

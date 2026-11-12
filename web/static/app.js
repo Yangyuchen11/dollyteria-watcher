@@ -2930,11 +2930,45 @@ function initTerminalModule() {
                 showToast('当前暂无可复制的终端日志', 'warning');
                 return;
             }
-            navigator.clipboard.writeText(text).then(() => {
-                showToast('📋 已成功复制终端全部日志到剪贴板', 'success');
-            }).catch(() => {
+            const fallbackCopy = (str) => {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = str;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.top = '-9999px';
+                    ta.style.left = '-9999px';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    ta.setSelectionRange(0, str.length);
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    return ok;
+                } catch (err) {
+                    return false;
+                }
+            };
+            const onCopySuccess = () => {
+                const origHtml = btnCopy.innerHTML;
+                btnCopy.innerHTML = '✅ 已复制';
+                setTimeout(() => { btnCopy.innerHTML = origHtml; }, 1500);
+                showToast(`📋 已成功复制终端全部日志 (${terminalLogs.length} 行) 到剪贴板`, 'success');
+            };
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function' && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(onCopySuccess).catch(() => {
+                    if (fallbackCopy(text)) {
+                        onCopySuccess();
+                    } else {
+                        showToast('复制失败，请手动选取文字', 'error');
+                    }
+                });
+            } else if (fallbackCopy(text)) {
+                onCopySuccess();
+            } else {
                 showToast('复制失败，请手动选取文字', 'error');
-            });
+            }
         });
     }
 

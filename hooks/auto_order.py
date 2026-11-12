@@ -490,6 +490,16 @@ class RecaptchaTokenProvider:
                         });
                     }
                 }
+
+                // 7. 屏幕物理边界防异常侦测 (确保 screenX/Y, screenTop/Left 处于正常物理坐标范围，杜绝负坐标或异常偏移被 Google BotGuard 判定为无头窗口)
+                Object.defineProperty(window, 'screenX', { get: () => 0, configurable: true });
+                Object.defineProperty(window, 'screenY', { get: () => 0, configurable: true });
+                Object.defineProperty(window, 'screenTop', { get: () => 0, configurable: true });
+                Object.defineProperty(window, 'screenLeft', { get: () => 0, configurable: true });
+                if (window.screen) {
+                    Object.defineProperty(screen, 'availTop', { get: () => 0, configurable: true });
+                    Object.defineProperty(screen, 'availLeft', { get: () => 0, configurable: true });
+                }
             } catch (e) {}
             """
             try:
@@ -711,7 +721,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=-32000,-32000",
+                    "--window-position=0,0",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -906,10 +916,10 @@ class RecaptchaTokenProvider:
                 return ""
 
         # 确保 Google BotGuard 完成基础信誉握手与后台遥测收集：
-        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，已具备完整高熵信誉，无需额外沉淀即可极速秒签
-        # - 若为未经过热身的冷槽位，轻量沉淀 0.3s 避免空载
+        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，轻量沉淀 0.25s 确保遥测数据绑定
+        # - 若为未经过热身的冷槽位，轻量沉淀 0.5s 避免空载
         elapsed_since_prep = time.time() - getattr(slot, "prepared_at", 0)
-        min_settle = 0.02 if getattr(slot, "is_warmed", False) else 0.3
+        min_settle = 0.25 if getattr(slot, "is_warmed", False) else 0.5
         if elapsed_since_prep < min_settle:
             time.sleep(min_settle - elapsed_since_prep)
 
@@ -1440,53 +1450,57 @@ class RecaptchaTokenProvider:
             return {"success": False, "message": "无法启动浏览器内核进行预热"}
 
         steps = []
-        slot = None
         with self._lock:
-            if self._slots:
-                slot = self._slots[0]
-        if not slot:
+            slots_to_warm = list(self._slots)
+        if not slots_to_warm:
             return {"success": False, "message": "未找到可用的标签页槽位"}
 
-        cdp = None
         try:
-            cdp = _SimpleCDPClient(slot.ws_url, timeout=15.0)
+            for idx, slot in enumerate(slots_to_warm):
+                cdp = None
+                try:
+                    cdp = _SimpleCDPClient(slot.ws_url, timeout=15.0)
 
-            # 1. 访问 Google 搜索主页
-            cdp.call("Page.navigate", {"url": "https://www.google.com/"})
-            time.sleep(2.0)
-            steps.append("已访问 Google 搜索主页，沉淀基础检索 Cookie 与 TLS 票据")
+                    # 1. 访问 Google 搜索主页
+                    cdp.call("Page.navigate", {"url": "https://www.google.com/"})
+                    time.sleep(1.5)
+                    if idx == 0:
+                        steps.append("已访问 Google 搜索主页，沉淀基础检索 Cookie 与 TLS 票据")
 
-            for _ in range(3):
-                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": random.randint(100, 500), "y": random.randint(150, 400)})
-                time.sleep(0.05)
+                    for _ in range(3):
+                        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": random.randint(100, 500), "y": random.randint(150, 400)})
+                        time.sleep(0.05)
 
-            # 2. 访问 Dollyteria 官网使用指南页 (真实 DOM)
-            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/help"})
-            time.sleep(2.0)
-            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 300, behavior: 'smooth'})"})
-            steps.append("已加载 Dollyteria 官网帮助中心，缓存 9 组核心样式表与 22 组脚本文件")
+                    # 2. 访问 Dollyteria 官网使用指南页 (真实 DOM)
+                    cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/help"})
+                    time.sleep(1.5)
+                    cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 300, behavior: 'smooth'})"})
+                    if idx == 0:
+                        steps.append("已加载 Dollyteria 官网帮助中心，缓存 9 组核心样式表与 22 组脚本文件")
 
-            # 3. 访问 Dollyteria 官网在售商品流
-            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/product-list?num=10"})
-            time.sleep(2.0)
-            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 400, behavior: 'smooth'})"})
-            steps.append("已加载 Dollyteria 在售商品流，缓存真实商品图片与布局 DOM")
+                    # 3. 访问 Dollyteria 官网在售商品流
+                    cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/product-list?num=10"})
+                    time.sleep(1.5)
+                    cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 400, behavior: 'smooth'})"})
+                    if idx == 0:
+                        steps.append("已加载 Dollyteria 在售商品流，缓存真实商品图片与布局 DOM")
 
-            # 4. 重新初始化为就绪状态
-            with slot.lock:
-                self._prepare_slot(slot, self._sitekey, force_navigate=True)
-            steps.append("已重新就绪 reCAPTCHA v3 独立预热通道")
+                    # 4. 重新初始化为就绪状态并标记全面热身完毕
+                    with slot.lock:
+                        self._prepare_slot(slot, self._sitekey, force_navigate=True)
+                        slot.is_warmed = True
+                finally:
+                    if cdp:
+                        cdp.close()
 
+            steps.append(f"已为全部 {len(slots_to_warm)} 个独立预热槽位完成全链条养号与信誉注入")
             return {
                 "success": True,
                 "steps": steps,
-                "message": "浏览器环境养号与缓存预热已顺利完成！已为持久化配置文件注入真实浏览记录。",
+                "message": f"全部 {len(slots_to_warm)} 个预热标签页养号与缓存预热已顺利完成！已为持久化配置文件注入真实浏览记录。",
             }
         except Exception as e:
             return {"success": False, "steps": steps, "message": f"养号过程遇到异常: {e}"}
-        finally:
-            if cdp:
-                cdp.close()
 
     def get_profile_status(self) -> Dict:
         """检查当前持久化数据目录及 Google 登录状态"""

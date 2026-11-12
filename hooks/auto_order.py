@@ -2272,6 +2272,8 @@ class AutoOrderHook:
                         probe_tok = token_box.get("token")
                     if not probe_tok:
                         probe_tok = RecaptchaTokenProvider.get_instance().get_token(force_fresh=True)
+                        if probe_tok:
+                            used_tokens.append(probe_tok)
 
                     if probe_tok:
                         try:
@@ -2543,15 +2545,14 @@ class AutoOrderHook:
                 }
         finally:
             AutoOrderHook._end_active_checkout()
-            if not is_dry:
-                if token_thread is not None and token_thread.is_alive():
-                    def _cleanup_inflight():
-                        token_thread.join(timeout=12.0)
-                        if used_tokens:
-                            RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
-                    threading.Thread(target=_cleanup_inflight, daemon=True).start()
-                elif used_tokens:
-                    RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
+            if token_thread is not None and token_thread.is_alive():
+                def _cleanup_inflight():
+                    token_thread.join(timeout=12.0)
+                    if used_tokens:
+                        RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
+                threading.Thread(target=_cleanup_inflight, daemon=True).start()
+            elif used_tokens:
+                RecaptchaTokenProvider.get_instance().release_tokens(list(used_tokens))
 
     def on_item_matched(self, item: Dict, rule: Dict) -> Optional[Dict]:
         """监控引擎命中商品时的自动加购与下单入口 (严格遵循 self.dry_run 配置)"""

@@ -814,17 +814,7 @@
                         </div>
                     </div>
 
-                    <div class="form-row">
-                        <div class="form-group col-12">
-                            <label class="form-label">网络与出口代理通道 (Proxy - HTTP / SOCKS5)</label>
-                            <div style="display: flex; gap: 8px;">
-                                <input type="text" id="ao-proxy" class="form-control" placeholder="留空为直连。支持 http://127.0.0.1:7890、socks5://127.0.0.1:7890 或住宅代理 URL">
-                                <button type="button" id="btn-check-proxy" class="btn btn-secondary" style="white-space: nowrap;">🔍 校验双端出口 IP</button>
-                            </div>
-                            <span class="form-tip">云端 Docker 部署若使用宿主机代理客户端，请填写 <code>http://host.docker.internal:7890</code> 或宿主机 IP，保存后点击右侧校验。</span>
-                            <div id="proxy-check-status" style="margin-top: 8px; font-size: 13px; display: none; line-height: 1.5; padding: 8px 12px; border-radius: 6px; background: rgba(0,0,0,0.04);"></div>
-                        </div>
-                    </div>
+
 
                     <div class="form-actions">
                         <button id="btn-save-auto-order" class="btn btn-primary">保存下单配置</button>

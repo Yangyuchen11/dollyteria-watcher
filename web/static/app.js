@@ -94,9 +94,6 @@ const elements = {
     aoStandbyWorkers: document.getElementById('ao-standby-workers'),
     aoRetryDelay: document.getElementById('ao-retry-delay'),
     aoMaxRetries: document.getElementById('ao-max-retries'),
-    aoProxy: document.getElementById('ao-proxy'),
-    btnCheckProxy: document.getElementById('btn-check-proxy'),
-    proxyCheckStatus: document.getElementById('proxy-check-status'),
 
     // 档案库一键下单 (独立开关与仿真控制)
     quickBuyEnabled: document.getElementById('quick-buy-enabled'),
@@ -892,7 +889,6 @@ function populateAutoOrderForm() {
     if (elements.aoStandbyWorkers) elements.aoStandbyWorkers.value = ao.standby_workers ?? 2;
     if (elements.aoRetryDelay) elements.aoRetryDelay.value = ao.retry_delay_sec ?? 0.15;
     if (elements.aoMaxRetries) elements.aoMaxRetries.value = ao.max_retries ?? 35;
-    if (elements.aoProxy) elements.aoProxy.value = ao.proxy || currentConfig?.proxy || '';
     updateAoModeBanner();
 }
 
@@ -1474,9 +1470,8 @@ function bindEvents() {
                 max_workers: parseInt(elements.aoMaxWorkers?.value) || 6,
                 standby_workers: parseInt(elements.aoStandbyWorkers?.value) || 2,
                 retry_delay_sec: parseFloat(elements.aoRetryDelay?.value) || 0.15,
-                max_retries: parseInt(elements.aoMaxRetries?.value) || 35,
-                proxy: elements.aoProxy ? elements.aoProxy.value.trim() : ''
-};
+                max_retries: parseInt(elements.aoMaxRetries?.value) || 35
+            };
             if (elements.quickBuyEnabled) {
                 if (!currentConfig.quick_buy) currentConfig.quick_buy = {};
                 currentConfig.quick_buy.enabled = elements.quickBuyEnabled.checked;
@@ -1484,47 +1479,6 @@ function bindEvents() {
             }
             saveConfig();
             updateAoModeBanner();
-        });
-    }
-
-    if (elements.btnCheckProxy) {
-        elements.btnCheckProxy.addEventListener('click', async () => {
-            const proxyVal = elements.aoProxy ? elements.aoProxy.value.trim() : '';
-            elements.btnCheckProxy.disabled = true;
-            elements.btnCheckProxy.textContent = '⏳ 检测中...';
-            if (elements.proxyCheckStatus) {
-                elements.proxyCheckStatus.style.display = 'block';
-                elements.proxyCheckStatus.style.color = 'var(--text-secondary)';
-                elements.proxyCheckStatus.textContent = '正在通过 Python 会话与 Chromium 浏览器分别探测出口 IP...';
-            }
-            try {
-                const res = await fetch('/api/network/check_proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ proxy: proxyVal })
-                });
-                const data = await res.json();
-                if (elements.proxyCheckStatus) {
-                    elements.proxyCheckStatus.style.display = 'block';
-                    const msg = (data.message || '').replace(/\n/g, '<br>');
-                    if (data.matched) {
-                        elements.proxyCheckStatus.style.color = '#10b981';
-                        elements.proxyCheckStatus.innerHTML = '<strong>' + msg + '</strong>';
-                    } else {
-                        elements.proxyCheckStatus.style.color = '#ef4444';
-                        elements.proxyCheckStatus.innerHTML = '<strong>' + msg + '</strong>';
-                    }
-                }
-            } catch (err) {
-                if (elements.proxyCheckStatus) {
-                    elements.proxyCheckStatus.style.display = 'block';
-                    elements.proxyCheckStatus.style.color = '#ef4444';
-                    elements.proxyCheckStatus.textContent = '检测请求异常: ' + (err.message || String(err));
-                }
-            } finally {
-                elements.btnCheckProxy.disabled = false;
-                elements.btnCheckProxy.textContent = '🔍 校验双端出口 IP';
-            }
         });
     }
 

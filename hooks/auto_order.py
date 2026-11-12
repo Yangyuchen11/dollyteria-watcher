@@ -199,7 +199,6 @@ class RecaptchaTokenProvider:
         self._slots: List[_RecaptchaTabSlot] = []
         self._active_token_slots: Dict[str, Tuple[_RecaptchaTabSlot, int, str]] = {}
         self._rr_index: int = 0
-        self._focused_target_id: str = ""
         self._is_ready: bool = False
         self._keepalive_started: bool = False
         self.browser_user_agent: str = DEFAULT_USER_AGENT
@@ -253,28 +252,15 @@ class RecaptchaTokenProvider:
 
     @staticmethod
     def _get_configured_proxy() -> Optional[str]:
-        """读取 config.json 中显式配置的代理 (仅优先使用配置文件中明确指定的代理，杜绝被系统环境变量误劫持)"""
+        """读取系统或 config.json 中配置的代理 (支持 auto_order.proxy 或全局 proxy，规避云厂商数据中心 IP 被 Google v3 扣分)"""
         try:
-            candidates = []
-            data_dir = os.environ.get("DATA_DIR", "").strip()
-            if data_dir:
-                candidates.append(os.path.join(data_dir, "config.json"))
-            candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json")))
-            candidates.append(os.path.abspath("config.json"))
-            candidates.append("/app/data/config.json")
-            for cfg_path in candidates:
-                if os.path.exists(cfg_path):
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                        p = (
-                            cdata.get("auto_order", {}).get("proxy")
-                            or cdata.get("proxy")
-                            or cdata.get("network", {}).get("proxy")
-                            or cdata.get("scraper", {}).get("proxy")
-                            or ""
-                        ).strip()
-                        if p:
-                            return p
+            cfg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                    p = (cdata.get("auto_order", {}).get("proxy") or cdata.get("proxy") or "").strip()
+                    if p:
+                        return p
         except Exception:
             pass
         return None
@@ -405,9 +391,8 @@ class RecaptchaTokenProvider:
                         # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
             stealth_js = """
             try {
-                // 1. 抹除自动化驱动标记 (现代 Chrome 均为 false，绝非 undefined)
-                Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
-                try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
+                // 1. 抹除自动化驱动标记
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
 
                 // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
                 const pluginList = [
@@ -457,18 +442,13 @@ class RecaptchaTokenProvider:
                 Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
                 Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
 
-                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征，动态对齐操作系统平台)
+                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
                 const patchWebGL = (proto) => {
                     if (!proto || !proto.getParameter) return;
                     const origGetParam = proto.getParameter;
                     proto.getParameter = function(param) {
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) {
-                            const isWin = (navigator.platform && navigator.platform.indexOf('Win') >= 0);
-                            return isWin
-                                ? 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)'
-                                : 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2, OpenGL 4.5.0 core)';
-                        }
+                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
                         return origGetParam.apply(this, arguments);
                     };
                 };
@@ -489,16 +469,6 @@ class RecaptchaTokenProvider:
                             }
                         });
                     }
-                }
-
-                // 7. 屏幕物理边界防异常侦测 (确保 screenX/Y, screenTop/Left 处于正常物理坐标范围，杜绝负坐标或异常偏移被 Google BotGuard 判定为无头窗口)
-                Object.defineProperty(window, 'screenX', { get: () => 0, configurable: true });
-                Object.defineProperty(window, 'screenY', { get: () => 0, configurable: true });
-                Object.defineProperty(window, 'screenTop', { get: () => 0, configurable: true });
-                Object.defineProperty(window, 'screenLeft', { get: () => 0, configurable: true });
-                if (window.screen) {
-                    Object.defineProperty(screen, 'availTop', { get: () => 0, configurable: true });
-                    Object.defineProperty(screen, 'availLeft', { get: () => 0, configurable: true });
                 }
             } catch (e) {}
             """
@@ -603,33 +573,34 @@ class RecaptchaTokenProvider:
                             cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
                         except Exception:
                             pass
-                        if self._focused_target_id != slot.target_id:
-                            self._focused_target_id = slot.target_id
                         for mx, my in [(140, 220), (210, 260), (295, 235), (350, 195)]:
                             cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
 
-                        warmup_expr = (
-                            f"new Promise((resolve) => {{"
-                            f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ resolve(''); return; }}"
-                            f"  setTimeout(() => {{"
-                            f"    window.grecaptcha.ready(() => {{"
-                            f"      window.grecaptcha.execute('{sitekey}', {{action: 'pageview'}})"
-                            f"        .then(t => resolve(t || '')).catch(() => resolve(''));"
-                            f"    }});"
-                            f"  }}, 180);"
-                            f"}})"
-                        )
-                        w_res = cdp.call("Runtime.evaluate", {
-                            "expression": warmup_expr,
-                            "awaitPromise": True,
-                            "returnByValue": True,
-                        })
-                        w_tok = w_res.get("result", {}).get("value", "")
-                        slot.is_warmed = bool(isinstance(w_tok, str) and len(w_tok) > 100)
+                    warmup_expr = (
+                        f"new Promise((resolve) => {{"
+                        f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ resolve(''); return; }}"
+                        f"  setTimeout(() => {{"
+                        f"    window.grecaptcha.ready(() => {{"
+                        f"      window.grecaptcha.execute('{sitekey}', {{action: 'pageview'}})"
+                        f"        .then(t => resolve(t || '')).catch(() => resolve(''));"
+                        f"    }});"
+                        f"  }}, 180);"
+                        f"}})"
+                    )
+                    w_res = cdp.call("Runtime.evaluate", {
+                        "expression": warmup_expr,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    })
+                    w_tok = w_res.get("result", {}).get("value", "")
+                    if isinstance(w_tok, str) and len(w_tok) > 100:
+                        slot.is_warmed = True
+                    else:
+                        slot.is_warmed = True
 
-                        # 热身握手完成后再预埋两段平滑光标事件，供正式下单签发时直接打包高熵行为信号
-                        for mx, my in [(310, 240), (245, 275)]:
-                            cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
+                    # 热身握手完成后再预埋两段平滑光标事件，供正式下单签发时直接打包高熵行为信号
+                    for mx, my in [(310, 240), (245, 275)]:
+                        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
                 except Exception:
                     slot.is_warmed = False
 
@@ -637,8 +608,6 @@ class RecaptchaTokenProvider:
                 slot.sitekey = sitekey
                 slot.prepared_at = time.time()
                 slot.last_touch_at = slot.prepared_at
-                if force_navigate:
-                    slot.last_failed = False
                 return True
             slot.is_fresh = False
             slot.is_warmed = False
@@ -676,11 +645,6 @@ class RecaptchaTokenProvider:
                     try:
                         cmd = f'Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\' or Name = \'msedge.exe\'" | Where-Object {{ $_.CommandLine -like "*{os.path.basename(profile_base)}*" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}'
                         subprocess.run(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        subprocess.run(["pkill", "-9", "-f", os.path.basename(profile_base)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
                     except Exception:
                         pass
 
@@ -721,7 +685,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=0,0",
+                    "--window-position=-32000,-32000",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -873,15 +837,6 @@ class RecaptchaTokenProvider:
 
         with self._lock:
             ready_tabs = sum(1 for s in self._slots if s.is_fresh)
-            primary_slot = None
-            if self._slots:
-                start_idx = self._rr_index % len(self._slots)
-                for offset in range(len(self._slots)):
-                    cand = self._slots[(start_idx + offset) % len(self._slots)]
-                    if cand.is_fresh and not cand.in_use:
-                        primary_slot = cand
-                        self._rr_index = (start_idx + offset) % len(self._slots)
-                        break
             if ready_tabs > 0 or any(s.in_use for s in self._slots):
                 self._is_ready = True
                 if not was_ready or added_tabs > 0 or removed_tabs > 0:
@@ -889,25 +844,8 @@ class RecaptchaTokenProvider:
                         f"🛡️ [reCAPTCHA] Dollyteria 官网 reCAPTCHA v3 多标签预热池就绪 "
                         f"(独立标签页: {ready_tabs}/{target_count} 个，与备用会话数同步)！"
                     )
-                ok_ready = True
-            else:
-                ok_ready = False
-
-        # 确保主粘性预热槽位在并行初始化完成后稳居窗口前台焦点，避免多 Tab 并发预热后主槽位被后台化
-        if ok_ready and primary_slot is not None and self._focused_target_id != primary_slot.target_id:
-            try:
-                with self._focus_lock:
-                    cdp_focus = _SimpleCDPClient(primary_slot.ws_url, timeout=3.0)
-                    try:
-                        cdp_focus.call("Target.activateTarget", {"targetId": primary_slot.target_id})
-                        cdp_focus.call("Page.bringToFront", {})
-                        cdp_focus.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
-                        self._focused_target_id = primary_slot.target_id
-                    finally:
-                        cdp_focus.close()
-            except Exception:
-                pass
-        return ok_ready
+                return True
+            return False
 
     def _execute_on_slot(self, slot: _RecaptchaTabSlot, sitekey: str, action: str) -> str:
         """在指定独占 Tab 槽位上执行 grecaptcha.execute 并返回全新 Token (调用方已持有 slot.lock)"""
@@ -916,24 +854,16 @@ class RecaptchaTokenProvider:
                 return ""
 
         # 确保 Google BotGuard 完成基础信誉握手与后台遥测收集：
-        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，轻量沉淀 0.25s 确保遥测数据绑定
-        # - 若为未经过热身的冷槽位，轻量沉淀 0.5s 避免空载
+        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，仅需 0.2s 最小间隔即可极速秒签 2200+ 字节高分令牌
+        # - 若为未经过热身的冷槽位，则严格保留 1.5s 安全沉淀红线，绝不牺牲令牌评分
         elapsed_since_prep = time.time() - getattr(slot, "prepared_at", 0)
-        min_settle = 0.25 if getattr(slot, "is_warmed", False) else 0.5
+        min_settle = 0.2 if getattr(slot, "is_warmed", False) else 1.5
         if elapsed_since_prep < min_settle:
             time.sleep(min_settle - elapsed_since_prep)
 
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=8.0)
-            expr = (
-                f"new Promise((resolve, reject) => {{"
-                f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
-                f"  window.grecaptcha.ready(() => {{"
-                f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
-                f"  }});"
-                f"}})"
-            )
             with self._focus_lock:
                 try:
                     cdp.call("Target.activateTarget", {"targetId": slot.target_id})
@@ -947,8 +877,6 @@ class RecaptchaTokenProvider:
                     cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
                 except Exception:
                     pass
-                self._focused_target_id = slot.target_id
-
                 # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
                 try:
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
@@ -957,11 +885,19 @@ class RecaptchaTokenProvider:
                 except Exception:
                     pass
 
-                res = cdp.call("Runtime.evaluate", {
-                    "expression": expr,
-                    "awaitPromise": True,
-                    "returnByValue": True,
-                })
+            expr = (
+                f"new Promise((resolve, reject) => {{"
+                f"  if (!window.grecaptcha || !window.grecaptcha.execute) {{ reject('not_ready'); return; }}"
+                f"  window.grecaptcha.ready(() => {{"
+                f"    window.grecaptcha.execute('{sitekey}', {{action: '{action}'}}).then(resolve).catch(reject);"
+                f"  }});"
+                f"}})"
+            )
+            res = cdp.call("Runtime.evaluate", {
+                "expression": expr,
+                "awaitPromise": True,
+                "returnByValue": True,
+            })
             token = res.get("result", {}).get("value", "")
             if isinstance(token, str) and len(token) > 100:
                 slot.is_fresh = True
@@ -981,20 +917,20 @@ class RecaptchaTokenProvider:
                 cdp.close()
 
     def _try_borrow_fast_slot(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> Optional[_RecaptchaTabSlot]:
-        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab (粘性高分优先，并发或失败时自动轮转下一槽位)"""
+        """0ms 极速快车道：优先借用健康良好且预热就绪 (is_fresh=True) 的空闲 Tab (粘性高分优先)"""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None or not self._slots:
                 return None
             n = len(self._slots)
             start = self._rr_index % n
-            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位 (保持粘性，复用已处于前台的高分槽位；若该槽位正忙 in_use 则自动顺延下一槽位)
+            # 1. 优先选用历史核验良好 (not last_failed) 且就绪的槽位 (保持粘性，不盲目切走优质槽位)
             for offset in range(n):
                 idx = (start + offset) % n
                 s = self._slots[idx]
                 if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey and not s.last_failed:
                     s.in_use = True
                     s.borrow_seq += 1
-                    self._rr_index = idx  # 成功槽位保持粘性，下次优先继续使用；若并发/换弹期间 in_use=True 则自动借用下一个槽位
+                    self._rr_index = idx  # 成功槽位保持粘性，下次优先继续使用
                     return s
             # 2. 次选任意已预热就绪槽位
             for offset in range(n):
@@ -1065,10 +1001,6 @@ class RecaptchaTokenProvider:
             entry = self._active_token_slots.get(token)
             if entry:
                 slot, seq, sitekey = entry
-                slot_idx = self._slots.index(slot) if slot in self._slots else -1
-                if not success and slot_idx >= 0 and len(self._slots) > 1:
-                    # 遭遇拒签时立即将指针轮转至下一个槽位，严禁连续两次借用同一个失败槽位
-                    self._rr_index = (slot_idx + 1) % len(self._slots)
                 with slot.lock:
                     if success:
                         slot.success_count += 1
@@ -1078,7 +1010,6 @@ class RecaptchaTokenProvider:
                         slot.last_failed = True
                         # 遭遇官网拒绝拦截，立即强制该槽位下线重置刷新
                         slot.is_fresh = False
-                        slot.is_warmed = False
 
     def release_slots(
         self,
@@ -1286,101 +1217,6 @@ class RecaptchaTokenProvider:
                 "elapsed_sec": round(time.time() - t0, 3),
             }
 
-    def check_egress_ips(self, proxy_override: Optional[str] = None) -> Dict:
-        """
-        双端出口 IP 与代理通道连通性深度核验：
-        同时获取 Python 网络结算会话与无头 Chromium 浏览器内核的实际外网出口 IP，
-        确保两端 IP 100% 绝对一致，杜绝云端 VPS 因双 IP 分裂导致 Google v3 判 0.1 分拦截。
-        """
-        if proxy_override is not None and proxy_override.strip():
-            configured_proxy = proxy_override.strip()
-        else:
-            configured_proxy = (self._get_configured_proxy() or "").strip()
-
-        # 1. 探测 Python 结算会话的出口 IP
-        py_ip = None
-        py_err = None
-        try:
-            req_proxies = None
-            if configured_proxy:
-                p = configured_proxy.replace("socks5://", "socks5h://", 1) if configured_proxy.startswith("socks5://") else configured_proxy
-                req_proxies = {"http": p, "https": p}
-            r = requests.get("https://api.ipify.org?format=json", proxies=req_proxies, timeout=6.0)
-            if r.status_code == 200:
-                py_ip = r.json().get("ip")
-            else:
-                py_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            py_err = str(e)
-
-        # 2. 探测 Chromium 浏览器内核实际使用的出口 IP (通过 CDP 在运行中 Tab 内部执行真实网络请求)
-        br_ip = None
-        br_err = None
-        if self._ensure_browser_and_pool_ready():
-            with self._lock:
-                targets = list(self._slots)
-            if targets:
-                for slot in targets:
-                    try:
-                        cdp = _SimpleCDPClient(slot.ws_url, timeout=6.0)
-                        js_eval = (
-                            "fetch('https://api.ipify.org?format=json')"
-                            ".then(r => r.json())"
-                            ".then(d => d.ip)"
-                            ".catch(e => 'ERR:' + String(e))"
-                        )
-                        res = cdp.call("Runtime.evaluate", {
-                            "expression": js_eval,
-                            "awaitPromise": True,
-                            "returnByValue": True,
-                        })
-                        cdp.close()
-                        val = res.get("result", {}).get("value", "")
-                        if val and not str(val).startswith("ERR:"):
-                            br_ip = str(val).strip()
-                            break
-                        elif val:
-                            br_err = str(val)
-                    except Exception as e:
-                        br_err = str(e)
-            else:
-                br_err = "浏览器进程未能成功就绪"
-
-        matched = bool(py_ip and br_ip and py_ip == br_ip)
-        has_proxy = bool(configured_proxy)
-
-        if matched:
-            if has_proxy:
-                msg = f"🎉 双端出口 IP 均通过代理成功访问: 【{py_ip}】，Python 与 Chromium 浏览器完全一致！"
-            else:
-                msg = f"ℹ️ 未配置代理，双端均使用本机直连出口 IP: 【{py_ip}】"
-        else:
-            if py_ip and br_ip:
-                msg = (
-                    f"⚠️ 严重风险：检测到双端出口 IP 不一致！\n"
-                    f"• Python 结算 IP: {py_ip}\n"
-                    f"• 浏览器签发 IP: {br_ip}\n"
-                    f"Google 服务端比对两端 IP 不一致时将直接判 0.1 分拦截！请重启 Docker 容器使浏览器挂载最新代理。"
-                )
-            else:
-                msg = (
-                    f"❌ 代理连通性异常：\n"
-                    f"• Python 探测结果: {py_ip or ('失败: ' + str(py_err))}\n"
-                    f"• 浏览器探测结果: {br_ip or ('失败: ' + str(br_err))}\n"
-                    f"若在 Docker 容器内使用宿主机代理，请使用 http://host.docker.internal:端口 或宿主机网关 IP。"
-                )
-
-        return {
-            "success": bool(py_ip or br_ip),
-            "proxy": configured_proxy,
-            "python_ip": py_ip,
-            "browser_ip": br_ip,
-            "python_error": py_err,
-            "browser_error": br_err,
-            "matched": matched,
-            "message": msg,
-        }
-
     def open_gui_browser(self, start_url: str = "https://accounts.google.com/") -> Dict:
         """
         在桌面启动一个带有图形界面（可见窗口）的专用 Chrome 浏览器，
@@ -1450,57 +1286,53 @@ class RecaptchaTokenProvider:
             return {"success": False, "message": "无法启动浏览器内核进行预热"}
 
         steps = []
+        slot = None
         with self._lock:
-            slots_to_warm = list(self._slots)
-        if not slots_to_warm:
+            if self._slots:
+                slot = self._slots[0]
+        if not slot:
             return {"success": False, "message": "未找到可用的标签页槽位"}
 
+        cdp = None
         try:
-            for idx, slot in enumerate(slots_to_warm):
-                cdp = None
-                try:
-                    cdp = _SimpleCDPClient(slot.ws_url, timeout=15.0)
+            cdp = _SimpleCDPClient(slot.ws_url, timeout=15.0)
 
-                    # 1. 访问 Google 搜索主页
-                    cdp.call("Page.navigate", {"url": "https://www.google.com/"})
-                    time.sleep(1.5)
-                    if idx == 0:
-                        steps.append("已访问 Google 搜索主页，沉淀基础检索 Cookie 与 TLS 票据")
+            # 1. 访问 Google 搜索主页
+            cdp.call("Page.navigate", {"url": "https://www.google.com/"})
+            time.sleep(2.0)
+            steps.append("已访问 Google 搜索主页，沉淀基础检索 Cookie 与 TLS 票据")
 
-                    for _ in range(3):
-                        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": random.randint(100, 500), "y": random.randint(150, 400)})
-                        time.sleep(0.05)
+            for _ in range(3):
+                cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": random.randint(100, 500), "y": random.randint(150, 400)})
+                time.sleep(0.05)
 
-                    # 2. 访问 Dollyteria 官网使用指南页 (真实 DOM)
-                    cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/help"})
-                    time.sleep(1.5)
-                    cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 300, behavior: 'smooth'})"})
-                    if idx == 0:
-                        steps.append("已加载 Dollyteria 官网帮助中心，缓存 9 组核心样式表与 22 组脚本文件")
+            # 2. 访问 Dollyteria 官网使用指南页 (真实 DOM)
+            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/help"})
+            time.sleep(2.0)
+            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 300, behavior: 'smooth'})"})
+            steps.append("已加载 Dollyteria 官网帮助中心，缓存 9 组核心样式表与 22 组脚本文件")
 
-                    # 3. 访问 Dollyteria 官网在售商品流
-                    cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/product-list?num=10"})
-                    time.sleep(1.5)
-                    cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 400, behavior: 'smooth'})"})
-                    if idx == 0:
-                        steps.append("已加载 Dollyteria 在售商品流，缓存真实商品图片与布局 DOM")
+            # 3. 访问 Dollyteria 官网在售商品流
+            cdp.call("Page.navigate", {"url": "https://www.dollyteria.com/product-list?num=10"})
+            time.sleep(2.0)
+            cdp.call("Runtime.evaluate", {"expression": "window.scrollBy({top: 400, behavior: 'smooth'})"})
+            steps.append("已加载 Dollyteria 在售商品流，缓存真实商品图片与布局 DOM")
 
-                    # 4. 重新初始化为就绪状态并标记全面热身完毕
-                    with slot.lock:
-                        self._prepare_slot(slot, self._sitekey, force_navigate=True)
-                        slot.is_warmed = True
-                finally:
-                    if cdp:
-                        cdp.close()
+            # 4. 重新初始化为就绪状态
+            with slot.lock:
+                self._prepare_slot(slot, self._sitekey, force_navigate=True)
+            steps.append("已重新就绪 reCAPTCHA v3 独立预热通道")
 
-            steps.append(f"已为全部 {len(slots_to_warm)} 个独立预热槽位完成全链条养号与信誉注入")
             return {
                 "success": True,
                 "steps": steps,
-                "message": f"全部 {len(slots_to_warm)} 个预热标签页养号与缓存预热已顺利完成！已为持久化配置文件注入真实浏览记录。",
+                "message": "浏览器环境养号与缓存预热已顺利完成！已为持久化配置文件注入真实浏览记录。",
             }
         except Exception as e:
             return {"success": False, "steps": steps, "message": f"养号过程遇到异常: {e}"}
+        finally:
+            if cdp:
+                cdp.close()
 
     def get_profile_status(self) -> Dict:
         """检查当前持久化数据目录及 Google 登录状态"""
@@ -1526,10 +1358,6 @@ class RecaptchaTokenProvider:
 
     def _touch_slot_keepalive(self, slot: _RecaptchaTabSlot):
         """对健康空闲的预热 Tab 注入轻量微动信号，维持页面活跃与持续交互熵，避免粗暴重载洗掉页面停留时长"""
-        if AutoOrderHook.is_checkout_active():
-            return
-        if not self._focus_lock.acquire(blocking=False):
-            return
         cdp = None
         try:
             cdp = _SimpleCDPClient(slot.ws_url, timeout=3.0)
@@ -1543,7 +1371,6 @@ class RecaptchaTokenProvider:
         finally:
             if cdp:
                 cdp.close()
-            self._focus_lock.release()
 
     def start_prewarm(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, pool_size: Optional[int] = None):
         """启动后台多标签页预热池与定时保活线程 (保持与 Standby Sessions 数量一致的独立 Tab 处于 grecaptcha.ready 状态)"""
@@ -1567,13 +1394,13 @@ class RecaptchaTokenProvider:
                             if not s.is_fresh:
                                 s.is_preparing = True
                                 broken_slots.append(s)
-                            elif (now - s.prepared_at) > 480 and not AutoOrderHook.is_checkout_active():
-                                # 超过 8 分钟的槽位采用错峰滚动刷新（每轮最多仅刷新 1 个最老槽位，且在有抢购结算进行中时绝不主动刷新重载）
+                            elif (now - s.prepared_at) > 480:
+                                # 超过 8 分钟的槽位采用错峰滚动刷新（每轮最多仅刷新 1 个最老槽位，绝不清空全池）
                                 if oldest_aged_slot is None or s.prepared_at < oldest_aged_slot.prepared_at:
                                     oldest_aged_slot = s
                             else:
                                 healthy_idle_slots.append(s)
-                        if oldest_aged_slot is not None and not broken_slots and not AutoOrderHook.is_checkout_active():
+                        if oldest_aged_slot is not None and not broken_slots:
                             oldest_aged_slot.is_preparing = True
                             broken_slots.append(oldest_aged_slot)
 
@@ -1590,8 +1417,6 @@ class RecaptchaTokenProvider:
                             with s.lock:
                                 if not s.in_use and s.is_fresh:
                                     self._touch_slot_keepalive(s)
-                                    if not s.is_fresh and not s.in_use:
-                                        self._prepare_slot(s, self._sitekey, force_navigate=True)
                 except Exception:
                     pass
 

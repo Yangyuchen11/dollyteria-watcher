@@ -3,7 +3,8 @@ services:
     build: .
     container_name: dollyteria-monitor
     restart: always
-    network_mode: "host"
+    ports:
+      - "5000:5000"
     environment:
       - TZ=Asia/Tokyo
       - PORT=5000

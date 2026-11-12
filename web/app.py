@@ -158,6 +158,10 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
                 cdp = _SimpleCDPClient(provider._slots[0].ws_url, timeout=3)
                 ev = cdp.call("Runtime.evaluate", {"expression": "JSON.stringify({screenX: window.screenX, screenY: window.screenY, innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, webdriver: navigator.webdriver, ua: navigator.userAgent})", "returnByValue": True})
                 data["cdp_eval"] = ev.get("result", {}).get("value")
+                ev_ip = cdp.call("Runtime.evaluate", {"expression": "fetch('https://api.ipify.org').then(r => r.text()).catch(e => String(e))", "awaitPromise": True, "returnByValue": True})
+                data["chromium_ipify"] = ev_ip.get("result", {}).get("value")
+                ev_gl = cdp.call("Runtime.evaluate", {"expression": "WebGLRenderingContext.prototype.getParameter.toString()", "returnByValue": True})
+                data["get_param_tostring"] = ev_gl.get("result", {}).get("value")
             except Exception as e:
                 data["cdp_err"] = str(e)
             finally:

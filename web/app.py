@@ -127,6 +127,43 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         return render_template("index.html")
 
     # 鉴权相关 API 路由
+    @app.route("/api/debug/network")
+    def api_debug_network():
+        import requests, socket, os, subprocess
+        data = {}
+        try:
+            data["ipify"] = requests.get("https://api.ipify.org", timeout=5).text.strip()
+        except Exception as e:
+            data["ipify"] = str(e)
+        try:
+            data["dolly_ip"] = socket.gethostbyname("www.dollyteria.com")
+            r = requests.get("https://www.dollyteria.com", timeout=5)
+            data["dolly_status"] = r.status_code
+        except Exception as e:
+            data["dolly_err"] = str(e)
+        try:
+            r = requests.get("https://www.google.com/recaptcha/api.js", timeout=5)
+            data["google_status"] = r.status_code
+        except Exception as e:
+            data["google_err"] = str(e)
+        from hooks.auto_order import RecaptchaTokenProvider
+        provider = RecaptchaTokenProvider.get_instance()
+        data["is_ready"] = provider._is_ready
+        data["slots"] = len(provider._slots)
+        data["browser_ua"] = provider.browser_user_agent
+        if provider._slots:
+            from hooks.auto_order import _SimpleCDPClient
+            cdp = None
+            try:
+                cdp = _SimpleCDPClient(provider._slots[0].ws_url, timeout=3)
+                ev = cdp.call("Runtime.evaluate", {"expression": "JSON.stringify({screenX: window.screenX, screenY: window.screenY, innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, webdriver: navigator.webdriver, ua: navigator.userAgent})", "returnByValue": True})
+                data["cdp_eval"] = ev.get("result", {}).get("value")
+            except Exception as e:
+                data["cdp_err"] = str(e)
+            finally:
+                if cdp: cdp.close()
+        return jsonify(data)
+
     @app.route("/api/auth/status")
     def api_auth_status():
         pwd = get_configured_password()

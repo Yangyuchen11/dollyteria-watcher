@@ -685,7 +685,7 @@ class RecaptchaTokenProvider:
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=-32000,-32000",
+                    "--window-position=0,0",
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",

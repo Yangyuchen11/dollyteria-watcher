@@ -1282,7 +1282,10 @@ class RecaptchaTokenProvider:
         同时获取 Python 网络结算会话与无头 Chromium 浏览器内核的实际外网出口 IP，
         确保两端 IP 100% 绝对一致，杜绝云端 VPS 因双 IP 分裂导致 Google v3 判 0.1 分拦截。
         """
-        configured_proxy = (proxy_override if proxy_override is not None else (self._get_configured_proxy() or "")).strip()
+        if proxy_override is not None and proxy_override.strip():
+            configured_proxy = proxy_override.strip()
+        else:
+            configured_proxy = (self._get_configured_proxy() or "").strip()
 
         # 1. 探测 Python 结算会话的出口 IP
         py_ip = None

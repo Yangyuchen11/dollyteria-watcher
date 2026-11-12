@@ -495,7 +495,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     @app.route("/api/network/check_proxy", methods=["POST"])
     def api_network_check_proxy():
         data = request.json or {}
-        proxy_val = data.get("proxy")
+        proxy_val = (data.get("proxy") or "").strip() or None
         from hooks.auto_order import RecaptchaTokenProvider
         provider = RecaptchaTokenProvider.get_instance()
         res = provider.check_egress_ips(proxy_override=proxy_val)

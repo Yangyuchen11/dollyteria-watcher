@@ -146,6 +146,11 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             data["google_status"] = r.status_code
         except Exception as e:
             data["google_err"] = str(e)
+        try:
+            p_out = subprocess.check_output(['ping', '-c', '1', '-W', '2', '10.6.0.1'], text=True)
+            data["ping_wg_server"] = p_out.strip()
+        except Exception as e:
+            data["ping_wg_server"] = str(e)
         from hooks.auto_order import RecaptchaTokenProvider
         provider = RecaptchaTokenProvider.get_instance()
         data["is_ready"] = provider._is_ready

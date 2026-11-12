@@ -150,6 +150,22 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         except Exception as e:
             data["google_err"] = str(e)
         try:
+            ipt = subprocess.check_output(['iptables', '-t', 'nat', '-L', 'POSTROUTING', '-n'], text=True)
+            data["iptables_nat"] = ipt.strip()
+        except Exception as e:
+            data["iptables_err"] = str(e)
+        from hooks.auto_order import _SimpleCDPClient
+        if provider._slots:
+            t_cdp = None
+            try:
+                t_cdp = _SimpleCDPClient(provider._slots[0].ws_url, timeout=3)
+                f_res = t_cdp.call("Runtime.evaluate", {"expression": "(() => { const c = document.createElement('canvas'); const ctx = c.getContext('2d'); ctx.font = '16px sans-serif'; const m1 = ctx.measureText('Hello World 12345').width; ctx.font = '16px \"Noto Sans CJK JP\", \"IPAGothic\", sans-serif'; const m2 = ctx.measureText('ご注文手続き 返品特約').width; return JSON.stringify({m1, m2}); })()", "returnByValue": True})
+                data["cloud_font_measure"] = f_res.get("result", {}).get("value")
+            except Exception as e:
+                data["cloud_font_measure_err"] = str(e)
+            finally:
+                if t_cdp: t_cdp.close()
+        try:
             p_out = subprocess.check_output(['ping', '-c', '1', '-W', '2', '10.6.0.1'], text=True)
             data["ping_wg_server"] = p_out.strip()
         except Exception as e:

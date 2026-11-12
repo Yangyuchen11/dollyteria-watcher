@@ -253,14 +253,7 @@ class RecaptchaTokenProvider:
 
     @staticmethod
     def _get_configured_proxy() -> Optional[str]:
-        """读取系统环境变量或 config.json 中配置的代理 (支持 ALL_PROXY, HTTP_PROXY, auto_order.proxy 等)"""
-        # 1. 优先读取系统环境变量
-        for env_k in ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]:
-            val = os.environ.get(env_k, "").strip()
-            if val:
-                return val
-
-        # 2. 依次读取持久化数据卷与根目录下的配置文件
+        """读取 config.json 中显式配置的代理 (仅优先使用配置文件中明确指定的代理，杜绝被系统环境变量误劫持)"""
         try:
             candidates = []
             data_dir = os.environ.get("DATA_DIR", "").strip()
@@ -412,8 +405,9 @@ class RecaptchaTokenProvider:
                         # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
             stealth_js = """
             try {
-                // 1. 抹除自动化驱动标记
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+                // 1. 抹除自动化驱动标记 (现代 Chrome 均为 false，绝非 undefined)
+                Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+                try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
 
                 // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
                 const pluginList = [
@@ -463,13 +457,18 @@ class RecaptchaTokenProvider:
                 Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
                 Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
 
-                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
+                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征，动态对齐操作系统平台)
                 const patchWebGL = (proto) => {
                     if (!proto || !proto.getParameter) return;
                     const origGetParam = proto.getParameter;
                     proto.getParameter = function(param) {
                         if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        if (param === 37446) {
+                            const isWin = (navigator.platform && navigator.platform.indexOf('Win') >= 0);
+                            return isWin
+                                ? 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)'
+                                : 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2, OpenGL 4.5.0 core)';
+                        }
                         return origGetParam.apply(this, arguments);
                     };
                 };
@@ -595,11 +594,9 @@ class RecaptchaTokenProvider:
                         except Exception:
                             pass
                         if self._focused_target_id != slot.target_id:
-                            time.sleep(0.05)
                             self._focused_target_id = slot.target_id
                         for mx, my in [(140, 220), (210, 260), (295, 235), (350, 195)]:
                             cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
-                            time.sleep(0.01)
 
                         warmup_expr = (
                             f"new Promise((resolve) => {{"
@@ -909,10 +906,10 @@ class RecaptchaTokenProvider:
                 return ""
 
         # 确保 Google BotGuard 完成基础信誉握手与后台遥测收集：
-        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，仅需 0.2s 最小间隔即可极速秒签 2200+ 字节高分令牌
-        # - 若为未经过热身的冷槽位，则严格保留 1.5s 安全沉淀红线，绝不牺牲令牌评分
+        # - 若槽位已在预热期完成焦点激活、前置鼠标轨迹与静默热身握手 (is_warmed=True)，已具备完整高熵信誉，无需额外沉淀即可极速秒签
+        # - 若为未经过热身的冷槽位，轻量沉淀 0.3s 避免空载
         elapsed_since_prep = time.time() - getattr(slot, "prepared_at", 0)
-        min_settle = 0.2 if getattr(slot, "is_warmed", False) else 1.5
+        min_settle = 0.02 if getattr(slot, "is_warmed", False) else 0.3
         if elapsed_since_prep < min_settle:
             time.sleep(min_settle - elapsed_since_prep)
 
@@ -928,7 +925,6 @@ class RecaptchaTokenProvider:
                 f"}})"
             )
             with self._focus_lock:
-                switched_tab = (self._focused_target_id != slot.target_id)
                 try:
                     cdp.call("Target.activateTarget", {"targetId": slot.target_id})
                 except Exception:
@@ -942,15 +938,11 @@ class RecaptchaTokenProvider:
                 except Exception:
                     pass
                 self._focused_target_id = slot.target_id
-                if switched_tab:
-                    time.sleep(0.05)
 
                 # 模拟真实人类平滑光标轨迹 (产生 isTrusted: true 原生输入事件，向 Google BotGuard 注入高熵交互信号)
                 try:
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 180, "y": 260})
-                    time.sleep(0.015)
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 265, "y": 245})
-                    time.sleep(0.015)
                     cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 320, "y": 210})
                 except Exception:
                     pass
@@ -1283,6 +1275,98 @@ class RecaptchaTokenProvider:
                 "browser_exe": browser_exe,
                 "elapsed_sec": round(time.time() - t0, 3),
             }
+
+    def check_egress_ips(self, proxy_override: Optional[str] = None) -> Dict:
+        """
+        双端出口 IP 与代理通道连通性深度核验：
+        同时获取 Python 网络结算会话与无头 Chromium 浏览器内核的实际外网出口 IP，
+        确保两端 IP 100% 绝对一致，杜绝云端 VPS 因双 IP 分裂导致 Google v3 判 0.1 分拦截。
+        """
+        configured_proxy = (proxy_override if proxy_override is not None else (self._get_configured_proxy() or "")).strip()
+
+        # 1. 探测 Python 结算会话的出口 IP
+        py_ip = None
+        py_err = None
+        try:
+            req_proxies = None
+            if configured_proxy:
+                p = configured_proxy.replace("socks5://", "socks5h://", 1) if configured_proxy.startswith("socks5://") else configured_proxy
+                req_proxies = {"http": p, "https": p}
+            r = requests.get("https://api.ipify.org?format=json", proxies=req_proxies, timeout=6.0)
+            if r.status_code == 200:
+                py_ip = r.json().get("ip")
+            else:
+                py_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            py_err = str(e)
+
+        # 2. 探测 Chromium 浏览器内核实际使用的出口 IP (通过 CDP 在运行中 Tab 内部执行真实网络请求)
+        br_ip = None
+        br_err = None
+        with self._lock:
+            if self._ensure_browser_and_pool_ready():
+                targets = self._slots
+                if targets:
+                    for slot in targets:
+                        try:
+                            cdp = _SimpleCDPClient(slot.ws_url, timeout=6.0)
+                            js_eval = (
+                                "fetch('https://api.ipify.org?format=json')"
+                                ".then(r => r.json())"
+                                ".then(d => d.ip)"
+                                ".catch(e => 'ERR:' + String(e))"
+                            )
+                            res = cdp.call("Runtime.evaluate", {
+                                "expression": js_eval,
+                                "awaitPromise": True,
+                                "returnByValue": True,
+                            })
+                            cdp.close()
+                            val = res.get("result", {}).get("value", "")
+                            if val and not str(val).startswith("ERR:"):
+                                br_ip = str(val).strip()
+                                break
+                            elif val:
+                                br_err = str(val)
+                        except Exception as e:
+                            br_err = str(e)
+            else:
+                br_err = "浏览器进程未能成功就绪"
+
+        matched = bool(py_ip and br_ip and py_ip == br_ip)
+        has_proxy = bool(configured_proxy)
+
+        if matched:
+            if has_proxy:
+                msg = f"🎉 双端出口 IP 均通过代理成功访问: 【{py_ip}】，Python 与 Chromium 浏览器完全一致！"
+            else:
+                msg = f"ℹ️ 未配置代理，双端均使用本机直连出口 IP: 【{py_ip}】"
+        else:
+            if py_ip and br_ip:
+                msg = (
+                    f"⚠️ 严重风险：检测到双端出口 IP 不一致！\n"
+                    f"• Python 结算 IP: {py_ip}\n"
+                    f"• 浏览器签发 IP: {br_ip}\n"
+                    f"Google 服务端比对两端 IP 不一致时将直接判 0.1 分拦截！请重启 Docker 容器使浏览器挂载最新代理。"
+                )
+            else:
+                msg = (
+                    f"❌ 代理连通性异常：\n"
+                    f"• Python 探测结果: {py_ip or ('失败: ' + str(py_err))}\n"
+                    f"• 浏览器探测结果: {br_ip or ('失败: ' + str(br_err))}\n"
+                    f"若在 Docker 容器内使用宿主机代理，请使用 http://host.docker.internal:端口 或宿主机网关 IP。"
+                )
+
+        return {
+            "success": bool(py_ip or br_ip),
+            "proxy": configured_proxy,
+            "python_ip": py_ip,
+            "browser_ip": br_ip,
+            "python_error": py_err,
+            "browser_error": br_err,
+            "matched": matched,
+            "message": msg,
+        }
 
     def open_gui_browser(self, start_url: str = "https://accounts.google.com/") -> Dict:
         """

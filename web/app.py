@@ -492,6 +492,15 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = provider.test_token_generation(sitekey=sitekey, action=action)
         return jsonify(res)
 
+    @app.route("/api/network/check_proxy", methods=["POST"])
+    def api_network_check_proxy():
+        data = request.json or {}
+        proxy_val = data.get("proxy")
+        from hooks.auto_order import RecaptchaTokenProvider
+        provider = RecaptchaTokenProvider.get_instance()
+        res = provider.check_egress_ips(proxy_override=proxy_val)
+        return jsonify(res)
+
     @app.route("/api/browser/open_gui", methods=["POST"])
     def api_browser_open_gui():
         from hooks.auto_order import RecaptchaTokenProvider

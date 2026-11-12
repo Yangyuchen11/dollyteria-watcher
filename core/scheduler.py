@@ -163,13 +163,22 @@ class DollyteriaScheduler:
                             self.monitor.auto_order.preload_standby_workers(force_refresh=True)
 
                 # 阶段 2 (临战 15 秒)：平滑就绪与差额补齐校验
-                if next_label and 1 <= rem_drop_sec <= 15:
+                if next_label and 5 <= rem_drop_sec <= 15:
                     prewarm_marker = f"{today_str}_{next_label}_ready15s"
                     if prewarm_marker not in self._prewarmed_drop_markers:
                         self._prewarmed_drop_markers.add(prewarm_marker)
                         logger.info(f"⏳ 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，核验备用 Worker 会话与风控通道完全就绪...")
                         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
                             self.monitor.auto_order.preload_standby_workers(force_refresh=False)
+
+                # 阶段 3 (临战 3 秒)：并发预建连探针 A/B/C/D 与下单 Worker 的底层 TCP + TLS 1.3 长连接池
+                if next_label and 2 <= rem_drop_sec <= 4:
+                    preconnect_marker = f"{today_str}_{next_label}_preconnect3s"
+                    if preconnect_marker not in self._prewarmed_drop_markers:
+                        self._prewarmed_drop_markers.add(preconnect_marker)
+                        logger.info(f"🔥 距离定点上新 [{next_label}] 仅剩 {rem_drop_sec} 秒，正在并发预热探针与下单通道 TLS 长连接池...")
+                        if hasattr(self.monitor, "prewarm_burst_connections"):
+                            threading.Thread(target=self.monitor.prewarm_burst_connections, name="PrewarmBurstConn", daemon=True).start()
 
                 for dt_str in drop_times:
                     parts = [int(p) for p in dt_str.strip().split(":") if p.strip().isdigit()]
@@ -179,14 +188,25 @@ class DollyteriaScheduler:
                     minute = parts[1] if len(parts) > 1 else 0
                     second = parts[2] if len(parts) > 2 else 0
 
-                    marker = f"{today_str}_{hour:02d}:{minute:02d}:{second:02d}"
+                    # 计算目标时刻的时间戳差值，支持跨整点小时/跨午夜在目标时刻前 1 秒 (如配置 21:00:00 则在 20:59:59.0) 准时启动爆发
+                    target_dt = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+                    diff_sec = (target_dt - now).total_seconds()
+                    if diff_sec < -43200:
+                        target_dt += timedelta(days=1)
+                        diff_sec = (target_dt - now).total_seconds()
+                    elif diff_sec > 43200:
+                        target_dt -= timedelta(days=1)
+                        diff_sec = (target_dt - now).total_seconds()
 
-                    # 当前时间与目标时间是否吻合 (允许秒级命中)
-                    is_time_hit = (now.hour == hour and now.minute == minute and abs(now.second - second) <= 1)
+                    target_date_str = target_dt.strftime("%Y-%m-%d")
+                    marker = f"{target_date_str}_{hour:02d}:{minute:02d}:{second:02d}"
+
+                    # 在配置时间 -1.0s ~ +1.0s 窗口内准时触发 (如配置 21:00:00，则在 20:59:59.0 立即启动爆发)
+                    is_time_hit = (-1.0 <= diff_sec <= 1.05)
 
                     if is_time_hit and marker not in self._triggered_today_markers:
                         self._triggered_today_markers.add(marker)
-                        logger.info(f"🎯 准时命中定点上新时刻 [{dt_str}]！启动爆发抢购监控！")
+                        logger.info(f"🎯 准时命中定点上新时刻 [{dt_str}] (提前 1 秒于 {now.strftime('%H:%M:%S')} 抢跑点火)！启动爆发抢购监控！")
                         self.trigger_burst(sched_cfg.get("burst_duration_sec", 180))
                         break
 
@@ -224,9 +244,10 @@ class DollyteriaScheduler:
 
             except Exception as e:
                 logger.error(f"调度循环异常: {e}", exc_info=True)
+                rem_drop_sec = -1
 
-            # 动态微休眠：爆发抢购期使用 50ms 超高速唤醒，精准执行 0.3s 等高频轮询；平常巡检期使用 0.5s 低功耗休眠
-            loop_sleep = 0.05 if self.is_bursting else 0.5
+            # 动态微休眠：爆发抢购期或临战最后 5 秒使用 50ms 超高速唤醒，确保在 -1.00s 毫秒级准时点火；平常巡检期使用 0.5s 低功耗休眠
+            loop_sleep = 0.05 if (self.is_bursting or (0 <= rem_drop_sec <= 5)) else 0.5
             time.sleep(loop_sleep)
 
     def get_status(self) -> Dict:

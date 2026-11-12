@@ -537,6 +537,7 @@ function renderWatches() {
         };
 
         const autoOrderEnabled = Boolean(rule.auto_order);
+        const priorityEnabled = Boolean(rule.enabled && rule.priority);
         const globalAoEnabled = Boolean(currentConfig.auto_order?.enabled);
 
         let modeCardClass = 'mode-notify';
@@ -558,7 +559,10 @@ function renderWatches() {
             statusBadgeHtml = '<span class="rule-status-badge status-notify-only" title="仅消息提醒模式，绝不自动下单">🔔 提醒模式</span>';
         }
 
-        card.className = `watch-card ${rule.enabled ? '' : 'disabled'} ${modeCardClass}`;
+        if (priorityEnabled) {
+            statusBadgeHtml += ' <span class="rule-status-badge status-priority-sniper" title="已开启探针 D 优先狙击通道（全站唯一），爆发期将绕开 /new 翻页直接搜索命中该规则关键词">🎯 探针D优先狙击</span>';
+        }
+        card.className = `watch-card ${rule.enabled ? '' : 'disabled'} ${modeCardClass} ${priorityEnabled ? 'priority-active' : ''}`;
 
         card.innerHTML = `
             <div class="watch-card-body">
@@ -580,6 +584,15 @@ function renderWatches() {
                             <label class="switch switch-sm">
                                 <input type="checkbox" class="watch-auto-buy-toggle" data-idx="${idx}" ${autoOrderEnabled ? 'checked' : ''} ${!rule.enabled ? 'disabled' : ''}>
                                 <span class="slider slider-emerald"></span>
+                            </label>
+                        </div>
+                        <div class="switch-divider"></div>
+                        <div class="watch-switch-item ${!rule.enabled ? 'disabled' : ''}" title="优先狙击开关（全站唯一互斥）：开启后爆发期将激活「探针 D」绕开 /new 翻页直接搜索狙击此规则关键词">
+                            <span class="switch-icon">🎯</span>
+                            <span class="switch-text">优先</span>
+                            <label class="switch switch-sm">
+                                <input type="checkbox" class="watch-priority-toggle" data-idx="${idx}" ${priorityEnabled ? 'checked' : ''} ${!rule.enabled ? 'disabled' : ''}>
+                                <span class="slider slider-amber"></span>
                             </label>
                         </div>
                     </div>
@@ -639,6 +652,9 @@ function renderWatches() {
         chk.addEventListener('change', (e) => {
             const idx = parseInt(e.target.dataset.idx);
             currentConfig.watches[idx].enabled = e.target.checked;
+            if (!e.target.checked) {
+                currentConfig.watches[idx].priority = false;
+            }
             saveConfig(true);
             renderWatches();
         });
@@ -657,6 +673,28 @@ function renderWatches() {
                 showToast(`已将 [${ruleName}] 加入自动购买名单${globalOn ? '（已启动真实自动下单）' : '（注：需在自动下单界面启动真实自动下单）'}`, 'success');
             } else {
                 showToast(`已将 [${ruleName}] 设为【提醒模式】（命中时绝不自动下单）`, 'info');
+            }
+        });
+    });
+
+    elements.watchesContainer.querySelectorAll('.watch-priority-toggle').forEach(chk => {
+        chk.addEventListener('change', (e) => {
+            const idx = parseInt(e.target.dataset.idx);
+            const isChecked = e.target.checked;
+            if (isChecked) {
+                currentConfig.watches.forEach((r, i) => {
+                    r.priority = (i === idx);
+                });
+            } else {
+                currentConfig.watches[idx].priority = false;
+            }
+            saveConfig(true);
+            renderWatches();
+            const ruleName = currentConfig.watches[idx].name;
+            if (isChecked) {
+                showToast(`🎯 已将 [${ruleName}] 设为唯一【优先狙击】规则！爆发期将启用探针 D 直搜该规则关键词`, 'success');
+            } else {
+                showToast(`已取消 [${ruleName}] 的优先狙击模式`, 'info');
             }
         });
     });
@@ -971,6 +1009,7 @@ function saveRuleFromModal() {
         search_mode: searchMode,
         match_mode: matchMode,
         auto_order: autoOrderVal,
+        priority: existingIdx >= 0 ? Boolean(currentConfig.watches[existingIdx].priority) : false,
         enabled: existingIdx >= 0 ? currentConfig.watches[existingIdx].enabled : true
     };
 

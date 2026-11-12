@@ -1495,6 +1495,33 @@ class AutoOrderHook:
         self._pool_lock = threading.Lock()
         self._standby_workers: List['AutoOrderHook'] = []
 
+    def warm_standby_connections(self) -> int:
+        """
+        在定点爆发前 3 秒并发预热主会话与所有备用 Worker 的底层 TCP + TLS 1.3 长连接，
+        确保命中商品触发 add_to_cart 的第一毫秒无需握手直接发送 POST 请求。
+        """
+        with self._pool_lock:
+            workers = [self] + list(self._standby_workers)
+        results = []
+        threads = []
+
+        def _ping_worker(w: 'AutoOrderHook'):
+            try:
+                resp = w.session.get("https://www.dollyteria.com/robots.txt", timeout=(1.5, 2.0))
+                results.append(resp.status_code < 500)
+            except Exception:
+                results.append(False)
+
+        for w in workers:
+            t = threading.Thread(target=_ping_worker, args=(w,), daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=2.2)
+        warmed = sum(1 for r in results if r)
+        logger.info(f"🔥 [下单连接池预热] 已完成 {warmed}/{len(workers)} 个抢购 Worker 会话 TLS 套接字热身！")
+        return warmed
+
     def _sync_browser_fingerprint_headers(self):
         """动态同步当前运行中 Chromium 浏览器内核的原生 User-Agent，绝不伪造易遭 WAF 识别的畸形 sec-ch-ua 头"""
         provider = RecaptchaTokenProvider.get_instance()
@@ -1969,9 +1996,18 @@ class AutoOrderHook:
                 text_cust = r_cust.content.decode("utf-8", "ignore")
                 soup_cust = BeautifulSoup(text_cust, "html.parser")
 
-            # 2. 检查是否在地址选择页面 (/cart/shipping 或 shipping-list)
+            # 2. 检查是否已在配送与支付方式选择页 (已登录常规场景下 GET /cart/customer 会直接 302 抵达 /cart/shipping 并返回支付表单)
             shipping_select_form = soup_cust.find("form", action=lambda a: a and "shipping-list" in a)
-            if shipping_select_form:
+            has_pay_form_already = bool(
+                soup_cust.find("input", {"name": "pay_procedure"})
+                or soup_cust.find("select", {"name": "delivery[1][shipping_method]"})
+            )
+            if has_pay_form_already and not shipping_select_form:
+                logger.info("⚡ [Auto-Order] 结算入口已直达配送与支付表单页 (/cart/shipping)，跳过冗余地址跳转请求！")
+                r_ship = r_cust
+                text_ship = text_cust
+                soup_ship = soup_cust
+            elif shipping_select_form:
                 action = shipping_select_form.get("action")
                 ship_id = "99999999"
                 id_inp = shipping_select_form.find("input", {"name": "shipping-id"})
@@ -1982,15 +2018,17 @@ class AutoOrderHook:
                     "mode": "shipping-select",
                     "shipping-id": ship_id,
                 }, timeout=10, allow_redirects=True)
+                if not r_ship:
+                    return False, "地址选择未能正常响应", None
+                text_ship = r_ship.content.decode("utf-8", "ignore")
+                soup_ship = BeautifulSoup(text_ship, "html.parser")
             else:
                 # 尝试直接访问 /cart/shipping?shipping_no=1
                 r_ship = self._safe_request("GET", "https://www.dollyteria.com/cart/shipping?shipping_no=1", timeout=10, allow_redirects=True)
-
-            if not r_ship:
-                return False, "地址选择未能正常响应", None
-
-            text_ship = r_ship.content.decode("utf-8", "ignore")
-            soup_ship = BeautifulSoup(text_ship, "html.parser")
+                if not r_ship:
+                    return False, "地址选择未能正常响应", None
+                text_ship = r_ship.content.decode("utf-8", "ignore")
+                soup_ship = BeautifulSoup(text_ship, "html.parser")
 
             # 3. 在配送方式与支付方式表单中选择指定支付方式
             form = soup_ship.find("form", action=lambda a: a and "cart/shipping" in a) or soup_ship.find("form")

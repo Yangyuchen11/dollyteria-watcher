@@ -117,10 +117,11 @@ class TriProbeBurstEngine:
     """
     三路协同并发爆发探测引擎 (Tri-Probe Burst Engine)
     针对定点放货高峰期官网 503 限流与长连接挂起卡死设计的并发探测集群：
-    - 探针 A (BurstWorker_A_Full100)：单次拉取 100 件，timeout=2.0s，独立 Session A，全量保底覆盖与大深度溢出翻页
-    - 探针 B (BurstWorker_B_Fast30)：单次极速拉取 30 件，timeout=2.0s，独立 Session B，先锋突击
-    - 探针 C (BurstWorker_C_Fast30)：单次极速拉取 30 件，timeout=2.0s，独立 Session C，与探针 B 错峰交替探测
-    - 共享内存原子排重 (process_stream_items)：A 与 BC 互相对照校验，先到先抢，绝不漏单，绝不重单！
+    - 探针 A (BurstWorker_A_Full100)：开局前 12s 尚未破墙时以 30件/页 轻装协防突围，破墙后恢复 100件/页 全量保底覆盖与大深度溢出翻页
+    - 探针 B (BurstWorker_B_Fast30)：单次极速拉取 30 件，独立持久 Session B，死守第 1 页毫秒级先锋突击；突破第 1 页且发现新品时立即联动探针 C 直扑第 2 页
+    - 探针 C (BurstWorker_C_Fast30)：单次极速拉取 30 件，独立持久 Session C，与探针 B 错峰交替探测，一旦第 1 页破墙立即跃迁拉取第 2、3... 页直至见底
+    - 探针 D (BurstWorker_D_Sniper)：当某条监控规则开启「🎯 优先 (priority=True)」时激活，独立持久 Session D，绕开 /new 翻页直接请求 /product-list/?keyword=... 精准直击目标商品
+    - 共享内存原子排重 (process_stream_items)：ABCD 四路互相对照校验，先到先抢，绝不漏单，绝不重单！
     """
     def __init__(self, monitor: "DollyteriaMonitor"):
         self.monitor = monitor
@@ -128,9 +129,52 @@ class TriProbeBurstEngine:
         self._threads: List[threading.Thread] = []
         self._stop_event = threading.Event()
         self.burst_end_time = 0.0
+        self._burst_start_time = 0.0
         self._drop_active = False
         self._drop_detected_time = 0.0
+        self._first_page_broken = False
+        self._page1_cascade_ready = False
         self.baseline_seen_ids: Set[str] = set()
+        # 持久复用的独立探针连接池 (支持在爆发前 -3s 预建连，开抢瞬间 0 握手直发)
+        self.session_a = self.monitor.scraper.create_probe_session()
+        self.session_b = self.monitor.scraper.create_probe_session()
+        self.session_c = self.monitor.scraper.create_probe_session()
+        self.session_d = self.monitor.scraper.create_probe_session()
+
+    def get_priority_rule(self) -> Optional[Dict]:
+        """获取当前已启用且开启了「🎯 优先 (priority=True)」的唯一监控规则"""
+        for rule in self.monitor.config.get("watches", []):
+            if rule.get("enabled", True) and rule.get("priority", False):
+                kws = [k.strip() for k in rule.get("keywords", []) if k.strip()]
+                if kws:
+                    return rule
+        return None
+
+    def prewarm_connections(self) -> int:
+        """
+        在定点爆发前 3 秒并发预热探针 A/B/C(/D) 的底层 TCP + TLS 1.3 长连接，
+        确保整点启动时所有 Socket 均处于 Keep-Alive ESTABLISHED 热态。
+        """
+        sessions = [self.session_a, self.session_b, self.session_c]
+        if self.get_priority_rule() is not None:
+            sessions.append(self.session_d)
+        warmed = 0
+        threads = []
+        results = []
+
+        def _warm_one(sess):
+            ok = self.monitor.scraper.warm_session(sess, timeout=2.0)
+            results.append(ok)
+
+        for s in sessions:
+            t = threading.Thread(target=_warm_one, args=(s,), daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=2.2)
+        warmed = sum(1 for r in results if r)
+        logger.info(f"🔥 [探针连接池预热] 已完成 {warmed}/{len(sessions)} 路爆发探针 TLS 长连接热身就绪！")
+        return warmed
 
     def is_old_item(self, item: Dict) -> bool:
         """检查商品是否为爆发启动前已存在的历史在库老商品"""
@@ -143,6 +187,8 @@ class TriProbeBurstEngine:
         """通知引擎检测到官网上新发生，驱动探针C顺延深挖"""
         self._drop_active = True
         self._drop_detected_time = time.time()
+        self._first_page_broken = True
+        self._page1_cascade_ready = True
 
     def start(self, duration_sec: float = 180):
         if self.running:
@@ -151,23 +197,35 @@ class TriProbeBurstEngine:
 
         self.running = True
         self._stop_event.clear()
-        self.burst_end_time = time.time() + duration_sec
+        now_ts = time.time()
+        self._burst_start_time = now_ts
+        self.burst_end_time = now_ts + duration_sec
+        self._first_page_broken = False
+        self._page1_cascade_ready = False
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
 
         # 锁定爆发启动前的历史老商品基准快照 (用于精准判断大上新翻页何时见底)
         self.baseline_seen_ids = set(str(sid) for sid in self.monitor.state.get("seen_ids", []))
+        prio_rule = self.get_priority_rule()
+        d_desc = (
+            f"已激活！精准直击规则 [{prio_rule.get('name')}] (关键词: {', '.join(prio_rule.get('keywords', []))})"
+            if prio_rule
+            else "待命 (未开启优先规则，开启后实时激活)"
+        )
 
         logger.info(
-            f"🚀 [三路协同探测] 启动爆发期极速探测引擎 (持续 {int(duration_sec)} 秒)！\n"
-            f"  ├── 探针 A: 100 件全量保底 (timeout={timeout_sec}s, 循环翻页至第5页或见老商品止)\n"
-            f"  ├── 探针 B: 30 件轻量先锋 (timeout={timeout_sec}s, 死守第1页毫秒级先锋突击)\n"
-            f"  └── 探针 C: 30 件交替顺延 (timeout={timeout_sec}s, 一直循环翻页直到看到老商品)"
+            f"🚀 [四路协同探测] 启动爆发期极速探测引擎 (持续 {int(duration_sec)} 秒)！\n"
+            f"  ├── 探针 A: 前12s以30件轻装协防破墙 -> 破墙后100件全量保底 (timeout=(1.5s, 3.5s))\n"
+            f"  ├── 探针 B: 30 件轻量先锋 (死守第1页毫秒级突击，破墙瞬间联动探针C跃迁第2页)\n"
+            f"  ├── 探针 C: 30 件交替顺延 (B破第1页后直扑第2/3页，循环深挖至见老商品)\n"
+            f"  └── 探针 D: 高优关键词狙击手 ({d_desc})"
         )
 
         self._threads = [
             threading.Thread(target=self._worker_a_heavy, name="BurstWorker_A_Full100", daemon=True),
             threading.Thread(target=self._worker_b_light, name="BurstWorker_B_Fast30", daemon=True),
             threading.Thread(target=self._worker_c_light, name="BurstWorker_C_Fast30", daemon=True),
+            threading.Thread(target=self._worker_d_sniper, name="BurstWorker_D_Sniper", daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -177,42 +235,50 @@ class TriProbeBurstEngine:
             return
         self.running = False
         self._stop_event.set()
-        logger.info("🛑 [三路协同探测] 正在停止爆发期探针 A/B/C...")
+        logger.info("🛑 [四路协同探测] 正在停止爆发期探针 A/B/C/D...")
         for t in self._threads:
             t.join(timeout=0.8)
         self._threads.clear()
-        logger.info("✅ [三路协同探测] 探针 A/B/C 已全部安全退出。")
+        logger.info("✅ [四路协同探测] 探针 A/B/C/D 已全部安全退出。")
 
-    def _yield_if_checkout_active(self, probe_name: str) -> bool:
+    def _yield_if_checkout_active(self, probe_name: str, max_yield_sec: float = 25.0) -> bool:
         """
-        当有商品正在执行自动下单/结算冲刺时，爆发期探针主动短暂避让，
-        将同 IP 并发连接配额与网络带宽 100% 优先供给 /cart/customer、/cart/shipping、/cart/confirm 结算通道。
+        当有商品正在执行自动下单/结算冲刺时，爆发期探针主动降频/避让，
+        将同 IP 并发连接配额与网络带宽 90%+ 优先供给 /cart/customer、/cart/shipping、/cart/confirm 结算通道，
+        同时保留轻量护航探测以防同批或次秒放出第 2 件目标商品。
         返回 True 表示收到停止信号应当退出循环。
         """
         if not AutoOrderHook.is_checkout_active():
             return False
         t_yield = time.time()
-        logger.info(f"🛡️ [{probe_name}-抢购让路] 检测到下单通道正在冲刺结算，探针主动暂停避让以保障 100% 结算带宽...")
+        if max_yield_sec >= 5.0:
+            logger.info(f"🛡️ [{probe_name}-抢购让路] 检测到下单通道正在冲刺结算，探针主动暂停避让以保障结算带宽...")
         while AutoOrderHook.is_checkout_active() and not self._stop_event.is_set() and time.time() < self.burst_end_time:
-            if time.time() - t_yield > 25.0:
+            if time.time() - t_yield >= max_yield_sec:
                 break
             if self._stop_event.wait(timeout=0.10):
                 return True
         return self._stop_event.is_set()
 
     def _worker_a_heavy(self):
-        """探针 A：全量保底 100 件，循环翻页至第 5 页或看到老商品为止"""
-        session_a = requests.Session()
+        """
+        探针 A：
+        - 爆发启动前 12 秒且尚未有任何探针破墙 (_first_page_broken=False) 时：
+          自动降载为 30件/页 轻装协防突围，避免 100件/页 重查询卡死数据库或挤占同 IP 并发配额；
+        - 一旦任意探针破墙或超过 12 秒：
+          立即恢复 100件/页 全量保底覆盖，循环翻页至第 15 页或看到老商品为止。
+        """
+        session_a = self.session_a
         session_a.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
-        # 探针 A 提升深度至 15 页 (100件/页，可覆盖最多 1500 件超级大上新)，依然严格以遇到历史老商品为止提前早停
         max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_burst_a_pages", 15))
         max_a_pages = max(5, min(max_a_pages, 25))
 
         fail_streak_a = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
-            if self._yield_if_checkout_active("探针A"):
+            # 当有结算任务冲刺时，探针 A 自动降频为 1.5s 轻量护航扫描一次 (既削减 90%+ 并发争抢，又确保第 2 件新商品不漏检)
+            if self._yield_if_checkout_active("探针A", max_yield_sec=1.5):
                 break
             t0 = time.time()
             had_error_a = False
@@ -220,12 +286,17 @@ class TriProbeBurstEngine:
                 for page in range(1, max_a_pages + 1):
                     if self._stop_event.is_set() or time.time() >= self.burst_end_time:
                         break
-                    if self._yield_if_checkout_active("探针A"):
+                    if page > 1 and self._yield_if_checkout_active("探针A", max_yield_sec=1.0):
                         break
 
-                    logger.info(f"⚡ [探针A-全量保底] 正在抓取 /new 第 {page}/{max_a_pages} 页 (100件/页, timeout={timeout_sec}s)...")
+                    # 前 12 秒尚未破墙时，第 1 页使用 30 件轻装模式协助快速破墙
+                    in_early_wall = (not self._first_page_broken) and ((time.time() - self._burst_start_time) < 12.0)
+                    page_num_size = 30 if (page == 1 and in_early_wall) else 100
+                    mode_tag = "探针A-轻装破墙" if page_num_size == 30 else "探针A-全量保底"
+
+                    logger.info(f"⚡ [{mode_tag}] 正在抓取 /new 第 {page}/{max_a_pages} 页 ({page_num_size}件/页, timeout={timeout_sec}s)...")
                     items = self.monitor.scraper.fetch_new_arrivals(
-                        num=100, page=page, in_stock_only=True,
+                        num=page_num_size, page=page, in_stock_only=True,
                         timeout=timeout_sec, session=session_a, max_retries=0
                     )
                     if not items:
@@ -233,17 +304,28 @@ class TriProbeBurstEngine:
                         had_error_a = True
                         break
 
+                    if page == 1:
+                        self._first_page_broken = True
+
                     logger.info(f"✅ [探针A-第{page}页] 抓取成功: 获取 {len(items)} 条商品")
-                    self.monitor.process_stream_items(items, source_tag=f"探针A-第{page}页", is_burst=True)
+                    matches = self.monitor.process_stream_items(items, source_tag=f"探针A-第{page}页", is_burst=True)
 
                     # 判断是否看到老商品或触底
                     has_old = any(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
+                    is_all_old = all(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
+
+                    if page == 1 and page_num_size == 30:
+                        if (matches or self._drop_active or (self.baseline_seen_ids and not is_all_old)) and not is_all_old and len(items) >= 30:
+                            self._page1_cascade_ready = True
+                        # 轻装破墙拿到前 30 件后，下一轮立即切回 100 件/页拉取完整列表
+                        break
+
                     if has_old:
                         logger.info(f"🏁 [探针A-触达老商品] 第 {page} 页已检测到历史在库老商品，本轮上新流扫描接驳完毕，停止继续翻页。")
                         break
 
-                    if len(items) < 100:
-                        logger.info(f"🏁 [探针A-触底] 第 {page} 页商品数不足 100 件 ({len(items)} 件)，已触底全部上新。")
+                    if len(items) < page_num_size:
+                        logger.info(f"🏁 [探针A-触底] 第 {page} 页商品数不足 {page_num_size} 件 ({len(items)} 件)，已触底全部上新。")
                         break
 
             except Exception as e:
@@ -252,7 +334,6 @@ class TriProbeBurstEngine:
 
             if had_error_a:
                 fail_streak_a += 1
-                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
                 if fail_streak_a <= 5:
                     sleep_time = min(0.20, 0.08 + (fail_streak_a - 1) * 0.025)
                 else:
@@ -266,14 +347,9 @@ class TriProbeBurstEngine:
             if self._stop_event.wait(timeout=sleep_time):
                 break
 
-        try:
-            session_a.close()
-        except Exception:
-            pass
-
     def _worker_b_light(self):
-        """探针 B：轻量先锋 30 件，以极低服务端负载毫秒级抢占最新放出商品"""
-        session_b = requests.Session()
+        """探针 B：轻量先锋 30 件，死守第 1 页；一旦突破第 1 页且确认有上新，立即置位 _page1_cascade_ready 驱动探针 C 跳过第 1 页直取第 2 页"""
+        session_b = self.session_b
         session_b.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
@@ -291,8 +367,13 @@ class TriProbeBurstEngine:
                     timeout=timeout_sec, session=session_b, max_retries=0
                 )
                 if items:
+                    self._first_page_broken = True
                     logger.info(f"✅ [探针B-死守前30] 第 1 页抓取成功: 获取 {len(items)} 条商品")
-                    self.monitor.process_stream_items(items, source_tag="探针B-30件", is_burst=True)
+                    matches = self.monitor.process_stream_items(items, source_tag="探针B-30件", is_burst=True)
+                    is_all_old = all(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
+                    is_drop_active = self._drop_active and (time.time() - self._drop_detected_time < 45.0)
+                    if (matches or is_drop_active or (self.baseline_seen_ids and not is_all_old)) and not is_all_old and len(items) >= 30:
+                        self._page1_cascade_ready = True
                 else:
                     logger.debug("⚠️ [探针B] 未能获取数据，准备下一轮...")
                     had_error_b = True
@@ -302,7 +383,6 @@ class TriProbeBurstEngine:
 
             if had_error_b:
                 fail_streak_b += 1
-                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
                 if fail_streak_b <= 5:
                     sleep_time = min(0.20, 0.08 + (fail_streak_b - 1) * 0.025)
                 else:
@@ -316,20 +396,15 @@ class TriProbeBurstEngine:
             if self._stop_event.wait(timeout=sleep_time):
                 break
 
-        try:
-            session_b.close()
-        except Exception:
-            pass
-
     def _worker_c_light(self):
         """
         探针 C：轻量交替与顺延探针 (以 30 件极速轻量并发，一直循环顺延深挖至看到老商品为止)
         - 平常与探针 B 错峰交替死守第 1 页 (1~30件)
-        - 一旦捕获到上新 (或系统检测到放货)，探针 C 立即顺延往后拉取第 2 页 (31~60件)、第 3 页 (61~90件)...
+        - 一旦探针 B/A 已突破第 1 页并置位 _page1_cascade_ready，探针 C 立即跳过重复抓第 1 页，直接跃迁拉取第 2 页 (31~60件)！
         - 一直循环向后翻页深挖，直到在某页检测到历史在库老商品（或触底）
         - 顺延深挖全部接驳完毕后，自动返回第 1 页继续与探针 B 错峰守候
         """
-        session_c = requests.Session()
+        session_c = self.session_c
         session_c.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
@@ -344,7 +419,15 @@ class TriProbeBurstEngine:
         c_retry_count = 0
         fail_streak_c = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
-            if self._yield_if_checkout_active("探针C"):
+            # 若探针 A/B 已经突破第 1 页并发现上新，探针 C 无需再重复抓第 1 页，直接跃迁至第 2 页 (31~60件)！
+            if current_page == 1 and self._page1_cascade_ready:
+                self._page1_cascade_ready = False
+                current_page = 2
+                c_retry_count = 0
+                logger.info("🚀 [探针C-联动跃迁] 探针A/B已突破第 1 页并确认上新流，探针C免翻第 1 页直接跃迁拉取第 2 页 (31~60件)...")
+
+            # 若探针 C 正处于顺延深挖阶段 (current_page > 1)，允许其先把本轮上新流第 2/3 页扫完以防漏掉同批第 2 件商品；回到第 1 页后再主动避让
+            if current_page == 1 and self._yield_if_checkout_active("探针C", max_yield_sec=25.0):
                 break
             t0 = time.time()
             had_error_c = False
@@ -363,6 +446,8 @@ class TriProbeBurstEngine:
                 )
 
                 if items:
+                    if current_page == 1:
+                        self._first_page_broken = True
                     c_retry_count = 0
                     tag = "探针C-第1页(1~30件)" if current_page == 1 else f"探针C-第{current_page}页({item_start}~{item_end}件)"
                     logger.info(f"✅ [{tag}] 第 {current_page} 页抓取成功: 获取 {len(items)} 条商品")
@@ -372,29 +457,30 @@ class TriProbeBurstEngine:
                     is_drop_active = self._drop_active and (time.time() - self._drop_detected_time < 45.0)
 
                     if current_page == 1:
-                        # 第 1 页判定：若有放货迹象、规则命中或第 1 页包含新品，且满 30 件，立即启动顺延拉取第 2 页
-                        # 仅当整页全为已记录老商品时才不触发顺延
                         is_all_old = all(self.is_old_item(it) for it in items) if self.baseline_seen_ids else False
                         should_cascade = (matches or is_drop_active or (self.baseline_seen_ids and not is_all_old)) and not is_all_old
                         if should_cascade and len(items) >= 30:
                             logger.info(f"🔄 [探针C-顺延启动] 第 1 页已确认上新流，探针C立即顺延向后拉取第 2 页 (31~60件)...")
                             current_page = 2
+                            self._page1_cascade_ready = False
                         else:
                             current_page = 1
                     else:
-                        # 处于顺延翻页阶段 (第 2 页及以后)：一直循环向后翻页深挖，直到看到老商品为止！
                         if has_old:
                             logger.info(f"🏁 [探针C-顺延完成] 顺延深挖至第 {current_page} 页已遇到历史在库老商品，深挖接驳全部完毕，探针C回到第 1 页继续与探针B交替守候。")
                             current_page = 1
                             self._drop_active = False
+                            self._page1_cascade_ready = False
                         elif len(items) < 30:
                             logger.info(f"🏁 [探针C-顺延触底] 顺延至第 {current_page} 页商品数不足 30 件 ({len(items)} 件)，已触底，回到第 1 页。")
                             current_page = 1
                             self._drop_active = False
+                            self._page1_cascade_ready = False
                         elif current_page >= MAX_C_SAFETY_PAGES:
                             logger.info(f"🏁 [探针C-达到安全深度] 顺延已达到上限 {MAX_C_SAFETY_PAGES} 页 ({item_end} 件)，回到第 1 页。")
                             current_page = 1
                             self._drop_active = False
+                            self._page1_cascade_ready = False
                         else:
                             current_page += 1
                             logger.info(f"🔄 [探针C-继续顺延] 第 {current_page - 1} 页仍然满额且全为新品，继续顺延抓取第 {current_page} 页 ({(current_page - 1)*30 + 1}~{current_page*30}件)...")
@@ -402,7 +488,6 @@ class TriProbeBurstEngine:
                     had_error_c = True
                     logger.debug(f"⚠️ [探针C-第{current_page}页] 未能获取数据 (503/超时)")
                     if current_page > 1:
-                        # 顺延深挖过程中遇到 503/网络抖动，执行原地微重试 (最多2次)，防止轻易前功尽弃退回第1页
                         if c_retry_count < 2:
                             c_retry_count += 1
                             logger.warning(f"⚠️ [探针C-顺延深挖] 第 {current_page} 页请求遇繁忙/超时，原地快速重试 (第 {c_retry_count}/2 次)...")
@@ -420,7 +505,6 @@ class TriProbeBurstEngine:
 
             if had_error_c:
                 fail_streak_c += 1
-                # 调快节奏：前 5 次极速抢跑 (无抖动)，仅在连续 503 超过 5 次时才引入微量避退与轻量抖动
                 if fail_streak_c <= 5:
                     sleep_time = min(0.20, 0.08 + (fail_streak_c - 1) * 0.025)
                 else:
@@ -434,10 +518,80 @@ class TriProbeBurstEngine:
             if self._stop_event.wait(timeout=sleep_time):
                 break
 
-        try:
-            session_c.close()
-        except Exception:
-            pass
+    def _worker_d_sniper(self):
+        """
+        探针 D：高优关键词直达狙击手 (Sniper Probe)
+        - 仅当存在已启用且开启「🎯 优先 (priority=True)」的监控规则时发起请求（若未开启则静默休眠 0 网络开销）
+        - 直接请求 /product-list/?keyword=...&order=newdate&available=1&num=30
+        - 绕开 /new 翻页拥堵，不论目标商品排在 /new 第 1 页、第 2 页还是第 5 页，第 1 次突破 503 即刻命中！
+        """
+        session_d = self.session_d
+        session_d.headers.update(self.monitor.scraper.session.headers)
+        timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
+        interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
+
+        q_idx = 0
+        fail_streak_d = 0
+        while not self._stop_event.is_set() and time.time() < self.burst_end_time:
+            prio_rule = self.get_priority_rule()
+            if not prio_rule:
+                # 当前未开启任何优先规则，静默待命不发任何网络请求
+                if self._stop_event.wait(timeout=0.30):
+                    break
+                continue
+
+            if self._yield_if_checkout_active("探针D", max_yield_sec=25.0):
+                break
+
+            keywords = [k.strip() for k in prio_rule.get("keywords", []) if k.strip()]
+            if not keywords:
+                if self._stop_event.wait(timeout=0.30):
+                    break
+                continue
+
+            match_mode = prio_rule.get("match_mode", "all")
+            if match_mode == "all":
+                queries = [" ".join(keywords)]
+            else:
+                queries = keywords
+
+            kw_query = queries[q_idx % len(queries)]
+            q_idx += 1
+            rule_name = prio_rule.get("name", kw_query)
+
+            t0 = time.time()
+            had_error_d = False
+            try:
+                logger.info(f"🎯 [探针D-优先狙击] 正在直搜优先规则 [{rule_name}] 关键词 [{kw_query}] (30件/页, timeout={timeout_sec}s)...")
+                items = self.monitor.scraper.search_products(
+                    keyword=kw_query, num=30, page=1, in_stock_only=True,
+                    timeout=timeout_sec, session=session_d, max_retries=0
+                )
+                if items is not None and not self.monitor.scraper.last_fetch_failed:
+                    logger.info(f"✅ [探针D-优先狙击] 关键词 [{kw_query}] 抓取成功: 获取 {len(items)} 条候选商品")
+                    if items:
+                        self.monitor.process_stream_items(items, source_tag=f"探针D-优先狙击[{rule_name}]", is_burst=True)
+                else:
+                    logger.debug(f"⚠️ [探针D-优先狙击] 关键词 [{kw_query}] 遇繁忙/超时，准备下一轮...")
+                    had_error_d = True
+            except Exception as e:
+                logger.debug(f"⚠️ [探针D] 请求异常: {e}")
+                had_error_d = True
+
+            if had_error_d:
+                fail_streak_d += 1
+                if fail_streak_d <= 5:
+                    sleep_time = min(0.20, 0.08 + (fail_streak_d - 1) * 0.025)
+                else:
+                    backoff = min(0.35, 0.20 + (fail_streak_d - 5) * 0.03)
+                    sleep_time = backoff + random.uniform(0.02, 0.06)
+            else:
+                fail_streak_d = 0
+                elapsed = time.time() - t0
+                sleep_time = max(0.05, interval - elapsed)
+
+            if self._stop_event.wait(timeout=sleep_time):
+                break
 
 
 class DollyteriaMonitor:
@@ -484,6 +638,31 @@ class DollyteriaMonitor:
                     self.auto_order.preload_standby_workers()
             threading.Thread(target=_startup_login, name="AutoOrderStartupLogin", daemon=True).start()
 
+    def _normalize_watch_priorities(self, cfg: Dict):
+        """
+        确保监控规则中的「🎯 优先 (priority)」开关满足全局唯一互斥约束：
+        - 未启用的规则 (enabled=False) 自动取消 priority
+        - 全站最多只允许 1 条已启用规则同时保持 priority=True
+        """
+        watches = cfg.get("watches", [])
+        if not isinstance(watches, list):
+            return
+        found_priority = False
+        for rule in watches:
+            if not isinstance(rule, dict):
+                continue
+            if not rule.get("enabled", True):
+                rule["priority"] = False
+                continue
+            if bool(rule.get("priority", False)):
+                if not found_priority:
+                    rule["priority"] = True
+                    found_priority = True
+                else:
+                    rule["priority"] = False
+            else:
+                rule["priority"] = False
+
     def _load_config(self) -> Dict:
         if os.path.exists(CONFIG_PATH):
             try:
@@ -493,6 +672,7 @@ class DollyteriaMonitor:
                     for k, v in DEFAULT_CONFIG.items():
                         if k not in cfg:
                             cfg[k] = v
+                    self._normalize_watch_priorities(cfg)
                     return cfg
             except Exception as e:
                 logger.error(f"读取配置文件失败，使用默认配置: {e}")
@@ -503,6 +683,7 @@ class DollyteriaMonitor:
                     for k, v in DEFAULT_CONFIG.items():
                         if k not in cfg:
                             cfg[k] = v
+                    self._normalize_watch_priorities(cfg)
                     self._save_config(cfg)
                     logger.info(f"已自动从 config.example.json 模版初始化新配置: {CONFIG_PATH}")
                     return cfg
@@ -571,6 +752,7 @@ class DollyteriaMonitor:
 
     def update_config(self, new_cfg: Dict):
         """更新配置并同步组件"""
+        self._normalize_watch_priorities(new_cfg)
         self.config = new_cfg
         self._save_config(new_cfg)
         self.notifier.update_config(new_cfg.get("notifications", {}))
@@ -902,7 +1084,7 @@ class DollyteriaMonitor:
             stage_matches = []
             for it in page_new_items:
                 matched_rule = None
-                for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
+                for rule in sorted(active_rules, key=lambda r: (not r.get("priority", False), not r.get("auto_order", False))):
                     if not is_burst and rule.get("search_mode", "both") == "keyword_search":
                         continue
                     if self._matches_rule(it, rule):
@@ -956,16 +1138,23 @@ class DollyteriaMonitor:
             return [it for it, r in stage_matches]
 
     def start_burst_probes(self, duration_sec: float = 180):
-        """启动三路协同爆发探测引擎 (A:100件保底 | B:30件先锋 | C:30件交替)"""
+        """启动四路协同爆发探测引擎 (A:全量/轻装保底 | B:30件先锋 | C:30件顺延 | D:优先关键词狙击)"""
         self._burst_engine.start(duration_sec)
 
     def stop_burst_probes(self):
-        """停止三路协同爆发探测引擎"""
+        """停止四路协同爆发探测引擎"""
         self._burst_engine.stop()
 
     def is_burst_probes_running(self) -> bool:
-        """检查三路协同爆发探测引擎是否正在运行"""
+        """检查四路协同爆发探测引擎是否正在运行"""
         return self._burst_engine.running
+
+    def prewarm_burst_connections(self) -> int:
+        """在定点爆发前 3 秒预热爆发探针与下单 Worker 的底层 TLS 长连接池"""
+        warmed = self._burst_engine.prewarm_connections()
+        if hasattr(self, "auto_order") and self.auto_order and hasattr(self.auto_order, "warm_standby_connections"):
+            self.auto_order.warm_standby_connections()
+        return warmed
 
     def check_once(self, is_burst: bool = False) -> Dict:
         """
@@ -1095,7 +1284,7 @@ class DollyteriaMonitor:
                     if it_id in seen_set:
                         continue
                     matched_rule = None
-                    for rule in sorted(active_rules, key=lambda r: not r.get("auto_order", False)):
+                    for rule in sorted(active_rules, key=lambda r: (not r.get("priority", False), not r.get("auto_order", False))):
                         if self._matches_rule(it, rule):
                             matched_rule = rule
                             break

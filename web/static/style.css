@@ -718,6 +718,26 @@ input:checked+.slider.slider-emerald {
     box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
 }
 
+.slider.slider-amber {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+input:checked+.slider.slider-amber {
+    background-color: #f59e0b;
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.45);
+}
+
+.rule-status-badge.status-priority-sniper {
+    color: #fbbf24;
+    font-weight: 600;
+    margin-left: 6px;
+}
+
+.watch-card.priority-active {
+    border-color: rgba(245, 158, 11, 0.45);
+    box-shadow: 0 4px 20px rgba(245, 158, 11, 0.10);
+}
+
 .watch-name-row {
     margin-bottom: 8px;
 }

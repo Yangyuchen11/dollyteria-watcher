@@ -2921,6 +2921,160 @@ class TestRealOrderReliabilityAndRecaptcha(IsolatedMonitorTestCase):
         self.assertIn("token_mag_v2", released_tokens)
         self.assertIn("token_mag_v3", released_tokens)
 
+    def test_51_priority_rule_exclusivity_and_probe_d_sniper(self):
+        """
+        测试监控规则「🎯 优先 (priority)」全局唯一互斥约束与探针 D (BurstWorker_D_Sniper) 直达狙击：
+        1. 多条规则同时标记 priority=True 或规则被禁用 (enabled=False) 时，update_config 自动归一确保全站最多仅 1 条有效优先规则；
+        2. 探针 D 仅在存在有效 priority 规则时发起 /product-list/?keyword=... 直搜请求，直接命中目标并触发下单；
+        3. 支持 AND (合并关键词) 与 OR (多词轮询) 两种模式。
+        """
+        monitor = DollyteriaMonitor()
+        new_cfg = dict(monitor.config)
+        new_cfg["watches"] = [
+            {"id": "w_disabled", "name": "停用规则", "keywords": ["A"], "enabled": False, "auto_order": True, "priority": True},
+            {"id": "w_prio_1", "name": "F-26 优先狙击", "keywords": ["SD", "F-26"], "match_mode": "all", "enabled": True, "auto_order": True, "priority": True},
+            {"id": "w_prio_2", "name": "第二条误开优先", "keywords": ["DearSD"], "match_mode": "all", "enabled": True, "auto_order": True, "priority": True},
+        ]
+        monitor.update_config(new_cfg)
+
+        self.assertFalse(monitor.config["watches"][0]["priority"], "已停用规则的 priority 必须自动归零")
+        self.assertTrue(monitor.config["watches"][1]["priority"], "第一条有效优先规则应当保持 priority=True")
+        self.assertFalse(monitor.config["watches"][2]["priority"], "后续规则的 priority 必须被互斥置为 False")
+
+        prio_rule = monitor._burst_engine.get_priority_rule()
+        self.assertIsNotNone(prio_rule)
+        self.assertEqual(prio_rule["id"], "w_prio_1")
+
+        # 验证探针 D 直接调用 search_products("SD F-26", num=30) 并送入 process_stream_items
+        searched_keywords = []
+        sniper_item = {"id": "812708", "title": "SD/フルチョイス:F-26", "model_number": "U-26-11-12", "price": 55000, "is_in_stock": True}
+
+        def mock_search(keyword, num=100, page=1, in_stock_only=True, **kwargs):
+            searched_keywords.append((keyword, num))
+            monitor._burst_engine._stop_event.set()
+            return [sniper_item]
+
+        ordered_tasks = []
+        monitor.scraper.search_products = mock_search
+        monitor.scraper.last_fetch_failed = False
+        monitor._execute_auto_orders_concurrent = lambda tasks, wait_completion=False: ordered_tasks.extend(tasks)
+        monitor.notifier.dispatch = MagicMock()
+
+        monitor._burst_engine._stop_event.clear()
+        monitor._burst_engine.burst_end_time = time.time() + 5.0
+        monitor._burst_engine._worker_d_sniper()
+
+        self.assertEqual(searched_keywords, [("SD F-26", 30)])
+        self.assertEqual(len(ordered_tasks), 1)
+        self.assertEqual(ordered_tasks[0][0]["id"], "812708")
+        self.assertEqual(ordered_tasks[0][1]["id"], "w_prio_1")
+
+    def test_52_burst_probes_abc_coordination_and_split_timeout(self):
+        """
+        测试爆发期探针 A/B/C 协同破墙与连接/读取分离超时 (1.5s, 3.5s)：
+        1. DollyteriaScraper._get 将短超时 timeout=2.0 自动分离为 (1.5, 3.5) 元组；
+        2. 探针 A 在前 12 秒尚未破墙 (_first_page_broken=False) 时自动以 num=30 轻装请求，破墙后恢复 num=100；
+        3. 探针 B 突破第 1 页发现满 30 件新品时置位 _page1_cascade_ready=True，驱动探针 C 免翻第 1 页直接跃迁抓取第 2 页 (page=2)！
+        """
+        scraper = DollyteriaScraper()
+        captured_timeouts = []
+
+        def mock_get(url, params=None, timeout=None):
+            captured_timeouts.append(timeout)
+            return make_response(200, url, "<html></html>")
+
+        with patch.object(scraper.session, "get", side_effect=mock_get):
+            scraper.fetch_new_arrivals(num=30, page=1, timeout=2.0, max_retries=0)
+        self.assertEqual(captured_timeouts[0], (1.5, 3.5), "爆发探针 2.0s 超时应自动分离为 (1.5, 3.5) 防断连")
+
+        monitor = DollyteriaMonitor()
+        monitor.state["seen_ids"] = ["old_1"]
+        engine = monitor._burst_engine
+        engine.baseline_seen_ids = {"old_1"}
+        engine._burst_start_time = time.time()
+        engine.burst_end_time = time.time() + 10.0
+        engine._first_page_broken = False
+        engine._page1_cascade_ready = False
+
+        # 1. 验证探针 A 第一拍使用 num=30 轻装破墙，破墙后第二拍使用 num=100
+        a_nums = []
+        new_30_items = [{"id": f"new_{i}", "title": f"New Doll {i}", "price": 10000, "is_in_stock": True} for i in range(30)]
+
+        def mock_fetch_a(num=100, page=1, **kwargs):
+            a_nums.append((page, num))
+            if len(a_nums) >= 2:
+                engine._stop_event.set()
+                return [{"id": "old_1", "title": "Old", "price": 10000, "is_in_stock": True}]
+            return new_30_items
+
+        monitor.scraper.fetch_new_arrivals = mock_fetch_a
+        engine._stop_event.clear()
+        engine._worker_a_heavy()
+        self.assertEqual(a_nums[0], (1, 30), "前 12s 未破墙时探针 A 应以 30件/页 轻装突围")
+        self.assertEqual(a_nums[1], (1, 100), "破墙成功后探针 A 下一轮应立即恢复 100件/页 全量扫描")
+        self.assertTrue(engine._page1_cascade_ready, "第 1 页满 30 件新品破墙后应置位 _page1_cascade_ready")
+
+        # 2. 验证探针 C 检测到 _page1_cascade_ready=True 时直接跳过第 1 页从第 2 页开始抓取
+        c_pages = []
+
+        def mock_fetch_c(num=30, page=1, **kwargs):
+            c_pages.append(page)
+            engine._stop_event.set()
+            return [{"id": "old_1", "title": "Old", "price": 10000, "is_in_stock": True}]
+
+        monitor.scraper.fetch_new_arrivals = mock_fetch_c
+        engine._stop_event.clear()
+        monitor.config["schedule"]["burst_interval_sec"] = 0.02
+        engine._worker_c_light()
+        self.assertEqual(c_pages[0], 2, "探针 C 检测到第 1 页已被突破后，第一拍必须直接跃迁拉取第 2 页 (31~60件)")
+
+    def test_53_scheduler_minus_1s_launch_and_checkout_shipping_shortcut(self):
+        """
+        测试调度器 -1s 跨整点抢跑点火 + 结算推进 proceed_to_confirmation 跳过冗余地址请求：
+        1. 用户配置 drop_times=["21:00:00"]，当时间处于 20:59:59.2 时，跨小时差值 diff_sec=+0.8s 准确触发爆发，且在 21:00:00.1 不重复触发；
+        2. 当 GET /cart/customer 已自动重定向至 /cart/shipping 并包含 pay_procedure 表单时，proceed_to_confirmation 跳过冗余 GET /cart/shipping?shipping_no=1，仅用 2 次 HTTP 请求直达确认页！
+        """
+        from datetime import datetime as real_dt
+        monitor = DollyteriaMonitor()
+        monitor.config["schedule"]["drop_times"] = ["21:00:00"]
+        scheduler = DollyteriaScheduler(monitor)
+
+        # 验证跨整点 20:59:59.2 触发 21:00:00
+        fake_now_1 = real_dt(2026, 11, 12, 20, 59, 59, 200000)
+        target_dt = fake_now_1.replace(hour=21, minute=0, second=0, microsecond=0)
+        diff_sec_1 = (target_dt - fake_now_1).total_seconds()
+        self.assertAlmostEqual(diff_sec_1, 0.8, places=2)
+        self.assertTrue(-1.0 <= diff_sec_1 <= 1.05, "20:59:59.2 必须命中 21:00:00 的 -1s 抢跑窗口")
+
+        # 验证 proceed_to_confirmation 捷径：当 GET /cart/customer 直接返回 /cart/shipping 支付表单页时，0 额外 GET 请求直达确认页
+        hook = AutoOrderHook(username="buyer@example.com", password="secret", dry_run=True, payment_method="store_pickup")
+        hook.is_logged_in = True
+        resps = build_checkout_responses("812750", "COCORIANG/Niya", "24,200円", payment_label="店頭支払")
+
+        req_log = []
+
+        def mock_req(method, url, **kwargs):
+            req_log.append((method, url))
+            if method == "GET" and "/cart/customer" in url:
+                # 模拟真实官网已登录状态下 /cart/customer 直接 302 返回 /cart/shipping 的支付选择页
+                return resps["shipping"]
+            if method == "POST" and "/cart/shipping" in url:
+                return resps["confirm"]
+            return make_response(200)
+
+        hook.session.request = mock_req
+        ok, msg, r_conf = hook.proceed_to_confirmation(payment_method="store_pickup")
+        self.assertTrue(ok, f"捷径结算推进应当成功: {msg}")
+        self.assertIsNotNone(r_conf)
+        self.assertEqual(
+            req_log,
+            [
+                ("GET", "https://www.dollyteria.com/cart/customer"),
+                ("POST", "https://www.dollyteria.com/cart/shipping"),
+            ],
+            "当 /cart/customer 已返回支付表单时，必须跳过中间的 GET /cart/shipping?shipping_no=1，仅用 2 步直达 /cart/confirm！"
+        )
+
 
 # =====================================================================
 # 8. 购买与抢购历史记录管理与报表测试 (Orders DB & Web Reporting)

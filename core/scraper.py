@@ -6,8 +6,9 @@ import os
 import re
 import time
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Union
 import requests
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("dollyteria.scraper")
@@ -38,14 +39,34 @@ class DollyteriaScraper:
         self.timeout = timeout
         self.max_retries = max_retries
         self.last_fetch_failed = False
-        self.session = requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
+        self.session = self.create_probe_session()
+
+    def create_probe_session(self) -> requests.Session:
+        """创建带 Keep-Alive 连接池复用的独立探测 Session"""
+        sess = requests.Session()
+        sess.headers.update(DEFAULT_HEADERS)
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        return sess
+
+    def warm_session(self, session: Optional[requests.Session] = None, timeout: float = 2.0) -> bool:
+        """
+        向官网极轻量静态端点发起一次预建连请求，
+        确保底层 TCP + TLS 1.3 套接字在整点爆发前已处于 ESTABLISHED 热态。
+        """
+        req_session = session if session is not None else self.session
+        try:
+            resp = req_session.get(f"{BASE_URL}/robots.txt", timeout=(1.5, max(1.5, float(timeout))))
+            return resp.status_code < 500
+        except Exception:
+            return False
 
     def _get(
         self,
         url: str,
         params: Optional[dict] = None,
-        timeout: Optional[float] = None,
+        timeout: Optional[Union[float, Tuple[float, float]]] = None,
         session: Optional[requests.Session] = None,
         max_retries: Optional[int] = None,
     ) -> Optional[str]:
@@ -53,6 +74,12 @@ class DollyteriaScraper:
         self.last_fetch_failed = False
         last_exc = None
         req_timeout = timeout if timeout is not None else self.timeout
+        # 当爆发期传入短超时数值 (如 2.0s) 时，自动分离为 (connect=1.5s, read=3.5s)
+        # 既保证握手不通快速放弃，又防止请求已进入 MySQL 生成 HTML 时因差零点几秒被本地 ReadTimeout 掐断并销毁珍贵的 TLS 长连接
+        if isinstance(req_timeout, (int, float)) and 0 < float(req_timeout) <= 3.0:
+            conn_t = round(min(1.5, float(req_timeout)), 2)
+            read_t = round(max(3.5, float(req_timeout) * 1.75), 2)
+            req_timeout = (conn_t, read_t)
         req_session = session if session is not None else self.session
         retries = max_retries if max_retries is not None else self.max_retries
 
@@ -199,9 +226,19 @@ class DollyteriaScraper:
             it["is_new"] = True
         return items
 
-    def search_products(self, keyword: str, num: int = 100, page: int = 1, in_stock_only: bool = True) -> List[Dict]:
+    def search_products(
+        self,
+        keyword: str,
+        num: int = 100,
+        page: int = 1,
+        in_stock_only: bool = True,
+        timeout: Optional[Union[float, Tuple[float, float]]] = None,
+        session: Optional[requests.Session] = None,
+        max_retries: Optional[int] = None,
+    ) -> List[Dict]:
         """
         根据关键字在全站搜索有货商品 (/product-list/?keyword=...)
+        支持自定义 timeout / session / max_retries (供爆发期探针 D 优先狙击独立使用)
         """
         url = f"{BASE_URL}/product-list/"
         params = {
@@ -214,7 +251,7 @@ class DollyteriaScraper:
         if page > 1:
             params["page"] = str(page)
 
-        html = self._get(url, params=params)
+        html = self._get(url, params=params, timeout=timeout, session=session, max_retries=max_retries)
         return self.parse_items(html)
 
     def check_product_stock(self, product_id_or_url: str) -> Dict:

@@ -129,7 +129,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
     # 鉴权相关 API 路由
     @app.route("/api/debug/network")
     def api_debug_network():
-        import requests, socket, os, subprocess
+        import requests, socket, os, subprocess, time
         data = {}
         try:
             data["ipify"] = requests.get("https://api.ipify.org", timeout=5).text.strip()

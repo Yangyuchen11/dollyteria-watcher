@@ -183,6 +183,23 @@ class TriProbeBurstEngine:
         self._threads.clear()
         logger.info("✅ [三路协同探测] 探针 A/B/C 已全部安全退出。")
 
+    def _yield_if_checkout_active(self, probe_name: str) -> bool:
+        """
+        当有商品正在执行自动下单/结算冲刺时，爆发期探针主动短暂避让，
+        将同 IP 并发连接配额与网络带宽 100% 优先供给 /cart/customer、/cart/shipping、/cart/confirm 结算通道。
+        返回 True 表示收到停止信号应当退出循环。
+        """
+        if not AutoOrderHook.is_checkout_active():
+            return False
+        t_yield = time.time()
+        logger.info(f"🛡️ [{probe_name}-抢购让路] 检测到下单通道正在冲刺结算，探针主动暂停避让以保障 100% 结算带宽...")
+        while AutoOrderHook.is_checkout_active() and not self._stop_event.is_set() and time.time() < self.burst_end_time:
+            if time.time() - t_yield > 25.0:
+                break
+            if self._stop_event.wait(timeout=0.10):
+                return True
+        return self._stop_event.is_set()
+
     def _worker_a_heavy(self):
         """探针 A：全量保底 100 件，循环翻页至第 5 页或看到老商品为止"""
         session_a = requests.Session()
@@ -195,11 +212,15 @@ class TriProbeBurstEngine:
 
         fail_streak_a = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
+            if self._yield_if_checkout_active("探针A"):
+                break
             t0 = time.time()
             had_error_a = False
             try:
                 for page in range(1, max_a_pages + 1):
                     if self._stop_event.is_set() or time.time() >= self.burst_end_time:
+                        break
+                    if self._yield_if_checkout_active("探针A"):
                         break
 
                     logger.info(f"⚡ [探针A-全量保底] 正在抓取 /new 第 {page}/{max_a_pages} 页 (100件/页, timeout={timeout_sec}s)...")
@@ -259,6 +280,8 @@ class TriProbeBurstEngine:
 
         fail_streak_b = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
+            if self._yield_if_checkout_active("探针B"):
+                break
             t0 = time.time()
             had_error_b = False
             try:
@@ -321,6 +344,8 @@ class TriProbeBurstEngine:
         c_retry_count = 0
         fail_streak_c = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
+            if self._yield_if_checkout_active("探针C"):
+                break
             t0 = time.time()
             had_error_c = False
             try:

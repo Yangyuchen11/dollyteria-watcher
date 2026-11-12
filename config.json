@@ -190,19 +190,19 @@
       "search_mode": "new_stream"
     },
     {
+      "auto_order": false,
+      "enabled": true,
+      "exclude_keywords": [],
       "id": "w_1794389020099",
-      "name": "ＳＤ女の子/のの",
       "keywords": [
         "ＳＤ女の子/のの",
         "U-26-11-11"
       ],
-      "exclude_keywords": [],
-      "min_price": 0,
-      "max_price": 0,
-      "search_mode": "new_stream",
       "match_mode": "all",
-      "auto_order": true,
-      "enabled": true
+      "max_price": 0,
+      "min_price": 0,
+      "name": "ＳＤ女の子/のの",
+      "search_mode": "new_stream"
     }
   ],
   "web_password": ""

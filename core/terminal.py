@@ -1,7 +1,7 @@
 """
 实时运行终端日志管理模块 (Terminal Log Manager)
 捕获系统全量运行日志并维护高性能环形内存缓冲 (Ring Buffer)，
-支持动态分级检索、关键词即时过滤、100/300/1000 行限制切换与 SSE 实时广播。
+支持动态分级检索、关键词即时过滤、100/300/1000/8000 行限制切换与 SSE 实时广播。
 """
 import sys
 import time
@@ -111,7 +111,7 @@ class TerminalLogManager:
     _instance: Optional["TerminalLogManager"] = None
     _lock = threading.Lock()
 
-    def __init__(self, max_buffer_size: int = 2000):
+    def __init__(self, max_buffer_size: int = 10000):
         self.max_buffer_size = max_buffer_size
         self._buffer: deque[TerminalLogEntry] = deque(maxlen=max_buffer_size)
         self._seq_id = 0
@@ -261,13 +261,13 @@ class TerminalLogManager:
     ) -> Dict[str, Any]:
         """
         获取日志列表
-        - limit: 100, 300, 1000 等，上限 1000
+        - limit: 100, 300, 1000, 8000 等，上限 8000
         - level: ALL / INFO / WARNING / ERROR 筛选
         - keyword: 关键词匹配
         - since_id: 增量拉取
         """
-        # 强制上限最多 1000 行
-        limit = max(1, min(int(limit), 1000))
+        # 强制上限最多 8000 行
+        limit = max(1, min(int(limit), 8000))
         level_filter = level.strip().upper() if level and level.strip().upper() != "ALL" else None
         kw_filter = keyword.strip().lower() if keyword and keyword.strip() else None
 

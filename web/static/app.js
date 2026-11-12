@@ -2935,7 +2935,7 @@ function initTerminalModule() {
         });
     }
 
-    // 切换 100 / 300 / 1000 行限制
+    // 切换 100 / 300 / 1000 / 8000 行限制
     limitBtns.forEach(b => {
         b.addEventListener('click', () => {
             limitBtns.forEach(btn => btn.classList.remove('active'));
@@ -3037,7 +3037,7 @@ function renderTerminalLogs() {
 
     let html = `
         <div class="term-welcome-line">
-            <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100/300/1000 行切换与上下滚动查看。
+            <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100/300/1000/8000 行切换与上下滚动查看。
         </div>
     `;
 

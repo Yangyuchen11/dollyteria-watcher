@@ -887,7 +887,7 @@
                 <div class="pane-header">
                     <div>
                         <h2 class="pane-title">💻 实时运行终端</h2>
-                        <p class="pane-desc">实时显示终端的 log，最多可查看 1000 行（可切换 100 / 300 / 1000 行），通过上下滚动查看全部流水</p>
+                        <p class="pane-desc">实时显示终端的 log，最多可查看 8000 行（可切换 100 / 300 / 1000 / 8000 行），通过上下滚动查看全部流水</p>
                     </div>
                     <div class="header-actions">
                         <button id="btn-term-copy" class="btn btn-secondary btn-sm" title="复制所有已显示日志到剪贴板">
@@ -909,6 +909,7 @@
                                 <button class="btn-segment active" data-limit="100">100 行</button>
                                 <button class="btn-segment" data-limit="300">300 行</button>
                                 <button class="btn-segment" data-limit="1000">1000 行</button>
+                                <button class="btn-segment" data-limit="8000">8000 行</button>
                             </div>
                         </div>
 
@@ -938,7 +939,7 @@
                     <div class="terminal-viewport-wrapper">
                         <div id="terminal-screen" class="terminal-screen" tabindex="0">
                             <div class="term-welcome-line">
-                                <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100 / 300 / 1000 行切换，通过鼠标上下滚动查看。
+                                <span class="term-prefix">[SYSTEM]</span> 🎀 Dollyteria 智能上新监控与自动下单引擎终端已连接。支持 100 / 300 / 1000 / 8000 行切换，通过鼠标上下滚动查看。
                             </div>
                         </div>
                         <!-- 向上滚动时暂停滚动的提示浮条 -->
@@ -952,7 +953,7 @@
                         <div class="term-foot-left">
                             <span>当前显示: <strong id="term-rendered-count">0</strong> 行</span>
                             <span class="sep">|</span>
-                            <span>当前上限: <strong id="term-max-limit-label">100</strong> 行 (可切换 100 / 300 / 1000 行)</span>
+                            <span>当前上限: <strong id="term-max-limit-label">100</strong> 行 (可切换 100 / 300 / 1000 / 8000 行)</span>
                             <span class="sep">|</span>
                             <span id="term-buffer-badge">缓冲 0 行</span>
                         </div>

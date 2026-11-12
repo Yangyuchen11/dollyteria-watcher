@@ -253,18 +253,33 @@ class RecaptchaTokenProvider:
 
     @staticmethod
     def _get_configured_proxy() -> Optional[str]:
-        """读取系统或 config.json 中配置的代理 (支持 auto_order.proxy 或全局 proxy，规避云厂商数据中心 IP 被 Google v3 扣分)"""
+        """读取系统环境变量或 config.json 中配置的代理 (支持 ALL_PROXY, HTTP_PROXY, auto_order.proxy 等)"""
+        # 1. 优先读取系统环境变量
+        for env_k in ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]:
+            val = os.environ.get(env_k, "").strip()
+            if val:
+                return val
+
+        # 2. 依次读取持久化数据卷与根目录下的配置文件
         try:
             candidates = []
             data_dir = os.environ.get("DATA_DIR", "").strip()
             if data_dir:
                 candidates.append(os.path.join(data_dir, "config.json"))
             candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json")))
+            candidates.append(os.path.abspath("config.json"))
+            candidates.append("/app/data/config.json")
             for cfg_path in candidates:
                 if os.path.exists(cfg_path):
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         cdata = json.load(f)
-                        p = (cdata.get("auto_order", {}).get("proxy") or cdata.get("proxy") or "").strip()
+                        p = (
+                            cdata.get("auto_order", {}).get("proxy")
+                            or cdata.get("proxy")
+                            or cdata.get("network", {}).get("proxy")
+                            or cdata.get("scraper", {}).get("proxy")
+                            or ""
+                        ).strip()
                         if p:
                             return p
         except Exception:
@@ -1680,6 +1695,7 @@ class AutoOrderHook:
                         retry_delay=self.retry_delay,
                         max_retries=self.max_retries,
                         standby_workers=self.standby_workers_count,
+                        proxy=self.proxy,
                     )
                     w._is_standby_worker = True
                     ok, _ = w.login()
@@ -1710,6 +1726,7 @@ class AutoOrderHook:
                         retry_delay=self.retry_delay,
                         max_retries=self.max_retries,
                         standby_workers=self.standby_workers_count,
+                        proxy=self.proxy,
                     )
                     w._is_standby_worker = True
                     ok, _ = w.login()
@@ -1760,6 +1777,7 @@ class AutoOrderHook:
             retry_delay=self.retry_delay,
             max_retries=self.max_retries,
             standby_workers=self.standby_workers_count,
+            proxy=self.proxy,
         )
         worker._is_standby_worker = True
         worker._is_busy = True

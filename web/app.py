@@ -451,7 +451,8 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         payment_method = (data.get("payment_method") or monitor.config.get("auto_order", {}).get("payment_method", "cod")).strip()
 
         ao_cfg = monitor.config.get("auto_order", {})
-        from hooks.auto_order import AutoOrderHook
+        from hooks.auto_order import AutoOrderHook, RecaptchaTokenProvider
+        proxy_val = (ao_cfg.get("proxy") or monitor.config.get("proxy") or RecaptchaTokenProvider._get_configured_proxy() or "").strip()
         ao = AutoOrderHook(
             username=username,
             password=password,
@@ -459,6 +460,7 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
             payment_method=payment_method,
             retry_delay=float(ao_cfg.get("retry_delay_sec", 0.15)),
             max_retries=int(ao_cfg.get("max_retries", 35)),
+            proxy=proxy_val,
         )
         probe_recaptcha = bool(data.get("probe_recaptcha", True))
         res = ao.execute_checkout(

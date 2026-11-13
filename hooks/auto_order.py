@@ -658,7 +658,7 @@ class RecaptchaTokenProvider:
         """
         cdp = None
         try:
-            cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
+            cdp = _SimpleCDPClient(slot.ws_url, timeout=16.0)
             try:
                 cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
@@ -699,7 +699,7 @@ class RecaptchaTokenProvider:
             nav_committed = False
             for nav_url in nav_urls:
                 cdp.call("Page.navigate", {"url": nav_url})
-                for _ in range(35):
+                for _ in range(70):
                     time.sleep(0.05)
                     r_state = cdp.call("Runtime.evaluate", {
                         "expression": (
@@ -1003,13 +1003,15 @@ class RecaptchaTokenProvider:
             was_ready = self._is_ready
             target_count = len(self._slots)
 
-        # 在锁外并行预热所有尚未就绪的独立 Tab，缩短多 Tab 初始化耗时
+        # 在锁外并行预热所有尚未就绪的独立 Tab（多 Tab 冷启动轻微错峰，防止同毫秒并发走代理拥塞超时）
         if slots_to_prepare:
             prep_threads = []
             results = [False] * len(slots_to_prepare)
 
             def _prep_worker(idx: int, slot_obj: _RecaptchaTabSlot):
                 try:
+                    if idx > 0:
+                        time.sleep(idx * 0.35)
                     with slot_obj.lock:
                         if not slot_obj.is_fresh or slot_obj.sitekey != sitekey:
                             results[idx] = self._prepare_slot(slot_obj, sitekey)
@@ -1023,7 +1025,7 @@ class RecaptchaTokenProvider:
                 prep_threads.append(t)
                 t.start()
             for t in prep_threads:
-                t.join(timeout=12.0)
+                t.join(timeout=20.0)
 
         # 若同时存在由 set_pool_size 触发的异步扩容线程正在准备槽位，等待其准备完毕
         wait_deadline = time.time() + 10.0
@@ -1738,6 +1740,59 @@ class RecaptchaTokenProvider:
             if cdp:
                 cdp.close()
 
+    def ensure_prewarm_healthy(self, max_age_sec: float = 180.0, background: bool = True):
+        """
+        临战前或巡检期主动核验预热池健康状态：
+        1. 补齐因启动超时或异常掉线的标签页至 _target_pool_size
+        2. 修复 !is_fresh 异常槽位，并对超过 max_age_sec 的老旧槽位进行平滑重预热
+        3. 对健康空闲槽位注入光标微动熵保持活跃
+        """
+        def _heal():
+            try:
+                self._ensure_browser_and_pool_ready(self._sitekey)
+                now = time.time()
+                repair_slots = []
+                aged_slots = []
+                healthy_idle_slots = []
+                with self._lock:
+                    for s in self._slots:
+                        if s.in_use or s.is_preparing:
+                            continue
+                        if not s.is_fresh:
+                            s.is_preparing = True
+                            repair_slots.append(s)
+                        elif (now - s.prepared_at) > max_age_sec:
+                            s.is_preparing = True
+                            aged_slots.append(s)
+                        else:
+                            healthy_idle_slots.append(s)
+
+                for idx, s in enumerate(repair_slots + aged_slots):
+                    if idx > 0:
+                        time.sleep(0.3)
+                    was_broken = s in repair_slots
+                    try:
+                        with s.lock:
+                            if not s.in_use:
+                                ok = self._prepare_slot(s, self._sitekey, force_navigate=True)
+                                if ok and was_broken:
+                                    logger.info(f"🛡️ [reCAPTCHA] 掉线标签页 [{s.target_id[:6]}] 已自动修复就绪！")
+                    finally:
+                        s.is_preparing = False
+
+                for s in healthy_idle_slots:
+                    if not s.in_use and not s.is_preparing and (time.time() - getattr(s, "last_touch_at", 0)) > 20:
+                        with s.lock:
+                            if not s.in_use and s.is_fresh:
+                                self._touch_slot_keepalive(s)
+            except Exception as e:
+                logger.debug(f"[reCAPTCHA] 健康自愈核验异常: {e}")
+
+        if background:
+            threading.Thread(target=_heal, name="RecaptchaPoolHealThread", daemon=True).start()
+        else:
+            _heal()
+
     def start_prewarm(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY, pool_size: Optional[int] = None):
         """启动后台多标签页预热池与定时保活线程 (保持与 Standby Sessions 数量一致的独立 Tab 处于 grecaptcha.ready 状态)"""
         if pool_size is not None:
@@ -1746,7 +1801,7 @@ class RecaptchaTokenProvider:
         def _loop():
             self._ensure_browser_and_pool_ready(sitekey)
             while True:
-                time.sleep(35)
+                time.sleep(25)
                 try:
                     self._ensure_browser_and_pool_ready(self._sitekey)
                     now = time.time()
@@ -1760,26 +1815,34 @@ class RecaptchaTokenProvider:
                             if not s.is_fresh:
                                 s.is_preparing = True
                                 broken_slots.append(s)
-                            elif (now - s.prepared_at) > 480:
-                                # 超过 8 分钟的槽位采用错峰滚动刷新（每轮最多仅刷新 1 个最老槽位，绝不清空全池）
+                            elif (now - s.prepared_at) > 210:
+                                # 超过 3.5 分钟的槽位采用错峰滚动刷新（每轮最多刷新 1 个最老槽位，绝不清空全池）
                                 if oldest_aged_slot is None or s.prepared_at < oldest_aged_slot.prepared_at:
                                     oldest_aged_slot = s
                             else:
                                 healthy_idle_slots.append(s)
-                        if oldest_aged_slot is not None and not broken_slots:
+                        if oldest_aged_slot is not None:
                             oldest_aged_slot.is_preparing = True
-                            broken_slots.append(oldest_aged_slot)
 
                     for s in broken_slots:
                         try:
                             with s.lock:
                                 if not s.in_use:
-                                    self._prepare_slot(s, self._sitekey, force_navigate=True)
+                                    if self._prepare_slot(s, self._sitekey, force_navigate=True):
+                                        logger.info(f"🛡️ [reCAPTCHA] 掉线标签页 [{s.target_id[:6]}] 已自动修复就绪！")
                         finally:
                             s.is_preparing = False
 
+                    if oldest_aged_slot is not None:
+                        try:
+                            with oldest_aged_slot.lock:
+                                if not oldest_aged_slot.in_use:
+                                    self._prepare_slot(oldest_aged_slot, self._sitekey, force_navigate=True)
+                        finally:
+                            oldest_aged_slot.is_preparing = False
+
                     for s in healthy_idle_slots:
-                        if not s.in_use and not s.is_preparing and (time.time() - getattr(s, "last_touch_at", 0)) > 30:
+                        if not s.in_use and not s.is_preparing and (time.time() - getattr(s, "last_touch_at", 0)) > 25:
                             with s.lock:
                                 if not s.in_use and s.is_fresh:
                                     self._touch_slot_keepalive(s)
@@ -1797,22 +1860,35 @@ class RecaptchaTokenProvider:
 class AutoOrderHook:
     _active_checkouts_lock = threading.Lock()
     _active_checkouts = 0
+    _checkout_started_at = 0.0
 
     @classmethod
     def _begin_active_checkout(cls):
         with cls._active_checkouts_lock:
+            if cls._active_checkouts == 0:
+                cls._checkout_started_at = time.time()
             cls._active_checkouts += 1
 
     @classmethod
     def _end_active_checkout(cls):
         with cls._active_checkouts_lock:
             cls._active_checkouts = max(0, cls._active_checkouts - 1)
+            if cls._active_checkouts == 0:
+                cls._checkout_started_at = 0.0
 
     @classmethod
     def is_checkout_active(cls) -> bool:
         """检查当前是否有活跃的自动下单/结算任务正在冲刺"""
         with cls._active_checkouts_lock:
             return cls._active_checkouts > 0
+
+    @classmethod
+    def get_active_checkout_age(cls) -> float:
+        """返回当前活跃结算冲刺已持续的秒数 (未活跃时返回 0.0)"""
+        with cls._active_checkouts_lock:
+            if cls._active_checkouts <= 0 or cls._checkout_started_at <= 0:
+                return 0.0
+            return max(0.0, time.time() - cls._checkout_started_at)
 
     def __init__(
         self,
@@ -1860,6 +1936,9 @@ class AutoOrderHook:
         self._is_standby_worker = False
         self._pool_lock = threading.Lock()
         self._standby_workers: List['AutoOrderHook'] = []
+        # 缓存已解析的结算页表单字段，供二次下单/重试实现 1-step 直达 /cart/confirm
+        self._cached_shipping_params: Optional[Dict] = None
+        self._shared_shipping_params: Optional[Dict] = None
 
     def warm_standby_connections(self) -> int:
         """
@@ -1932,7 +2011,9 @@ class AutoOrderHook:
 
         # 同步启动 reCAPTCHA v3 后台多标签页预热池 (标签页数量与 standby_workers 保持一致)
         try:
-            RecaptchaTokenProvider.get_instance().start_prewarm(pool_size=target_count)
+            provider = RecaptchaTokenProvider.get_instance()
+            provider.start_prewarm(pool_size=target_count)
+            provider.ensure_prewarm_healthy(max_age_sec=180.0 if force_refresh else 150.0, background=True)
         except Exception as e:
             logger.debug(f"[Auto-Order] 启动 reCAPTCHA 预热异常: {e}")
 
@@ -2013,6 +2094,7 @@ class AutoOrderHook:
         - 若预热池为空：即时派生独立 Worker 并登录
         """
         with self._pool_lock:
+            shared_ship = dict(self._shared_shipping_params) if self._shared_shipping_params else None
             # 1. 优先看备用池中是否有已登录好的 Worker
             while self._standby_workers:
                 w = self._standby_workers.pop(0)
@@ -2021,11 +2103,15 @@ class AutoOrderHook:
                     w.retry_delay = self.retry_delay
                     w.dry_run = self.dry_run
                     w.payment_method = self.payment_method
+                    if shared_ship and not w._cached_shipping_params:
+                        w._cached_shipping_params = dict(shared_ship)
                     w._is_busy = True
                     return w
 
             # 2. 若备用池无，且主实例空闲已登录，则使用主实例
             if not self._is_busy and self.is_logged_in:
+                if shared_ship and not self._cached_shipping_params:
+                    self._cached_shipping_params = dict(shared_ship)
                 self._is_busy = True
                 return self
 
@@ -2039,6 +2125,8 @@ class AutoOrderHook:
             max_retries=self.max_retries,
             standby_workers=self.standby_workers_count,
         )
+        if shared_ship:
+            worker._cached_shipping_params = dict(shared_ship)
         worker._is_standby_worker = True
         worker._is_busy = True
         if self.username and self.password:
@@ -2047,6 +2135,12 @@ class AutoOrderHook:
 
     def release_worker(self, worker: 'AutoOrderHook'):
         """任务结束后释放回收 Worker"""
+        with self._pool_lock:
+            if getattr(worker, "_cached_shipping_params", None):
+                self._shared_shipping_params = dict(worker._cached_shipping_params)
+            elif worker is self and not self._cached_shipping_params:
+                self._shared_shipping_params = None
+
         if worker is self:
             with self._pool_lock:
                 self._is_busy = False
@@ -2312,6 +2406,35 @@ class AutoOrderHook:
             keywords = ["代金引換", "代引", "e-コレクト"]
 
         try:
+            # 0. 极速直连通道：若当前会话/Worker 池此前已解析并缓存过同账号的配送与支付表单字段，
+            #    直接 1 步 POST /cart/shipping 直达 /cart/confirm，跳过 GET /cart/customer 往返；
+            #    若服务端跳转未落到确认页（如登录过期或地址页变更），立即清空缓存并回退标准解析流程！
+            cached = self._cached_shipping_params
+            if cached:
+                pay_map = cached.get("pay_options", {})
+                fast_pay_val = pay_map.get(target_method_name, fallback_pay_val)
+                fast_payload = {
+                    "shippingCount": cached.get("shippingCount", "1"),
+                    "cart_payment_display": "t",
+                    "delivery[1][shipping_list]": cached.get("shipping_list", "99999999"),
+                    "delivery[1][shipping_method]": cached.get("shipping_method", "1"),
+                    "delivery[1][shippingdate_ymd]": "",
+                    "delivery[1][shippingdate_time]": "",
+                    "pay_procedure": fast_pay_val,
+                    "customer_comment": "",
+                    "go-next": "次へ",
+                }
+                fast_action = cached.get("action_url") or "https://www.dollyteria.com/cart/shipping"
+                r_fast = self._safe_request("POST", fast_action, data=fast_payload, timeout=12, allow_redirects=True)
+                if r_fast:
+                    fast_text = r_fast.content.decode("utf-8", "ignore")
+                    if "/cart/confirm" in (r_fast.url or "") or "ご購入内容の最終確認" in fast_text or "最終確認" in fast_text:
+                        logger.info(f"⚡ [Auto-Order] 极速直达最终确认页 (/cart/confirm)，跳过 /cart/customer 往返！支付方式: {target_method_name}")
+                        return True, "已成功抵达下单前确认页面", r_fast
+                logger.debug("[Auto-Order] 极速直达未命中确认页，清除缓存并回退标准结算流程...")
+                self._cached_shipping_params = None
+                self._shared_shipping_params = None
+
             # 1. 访问客户/结算入口 (/cart/customer)
             r_cust = self._safe_request("GET", "https://www.dollyteria.com/cart/customer", timeout=10, allow_redirects=True)
             if not r_cust:
@@ -2388,16 +2511,26 @@ class AutoOrderHook:
 
             # 查找并锁定对应的支付单选框 (代金引換 为 3，店頭支払 为 8)
             chosen_pay_value = fallback_pay_val
+            pay_options_map = {}
             for inp in form.find_all("input", {"name": "pay_procedure"}):
                 val = inp.get("value", "")
                 pid = inp.get("id")
                 lbl = soup_ship.find("label", {"for": pid})
                 lbl_text = lbl.get_text() if lbl else ""
                 row_text = inp.find_parent("tr").get_text() if inp.find_parent("tr") else inp.parent.get_text()
+                combined_txt = f"{lbl_text} {row_text}"
+                if val:
+                    if any(k in combined_txt for k in ["銀行振込", "振込"]):
+                        pay_options_map["銀行振込"] = val
+                    elif any(k in combined_txt for k in ["店頭支払", "店頭にてお支払", "店頭"]):
+                        pay_options_map["店頭支払"] = val
+                    elif any(k in combined_txt for k in ["代金引換", "代引", "e-コレクト"]):
+                        pay_options_map["代金引換"] = val
                 if any(k in lbl_text or k in row_text for k in keywords):
                     chosen_pay_value = val
                     logger.info(f"🎯 [Auto-Order] 精确锁定【{target_method_name}】选项: pay_procedure={val}")
-                    break
+                    if len(pay_options_map) >= 3:
+                        break
 
             # 组装完整的提交参数
             delivery_payload = {
@@ -2413,6 +2546,20 @@ class AutoOrderHook:
             }
 
             action_url = form.get("action") or "https://www.dollyteria.com/cart/shipping"
+            # 缓存本次账号确认有效的表单字段，供重试/多单并发/下次下单 1-step 直达
+            pay_options_map.setdefault(target_method_name, chosen_pay_value)
+            cached_info = {
+                "action_url": action_url,
+                "shippingCount": "1",
+                "shipping_list": shipping_list_val,
+                "shipping_method": shipping_method_val,
+                "pay_options": pay_options_map,
+            }
+            self._cached_shipping_params = cached_info
+            if not getattr(self, "_is_standby_worker", False):
+                with self._pool_lock:
+                    self._shared_shipping_params = dict(cached_info)
+
             logger.info(f"正在提交【{target_method_name}】结算配置，直达下单前确认页 (/cart/confirm)...")
             r_confirm = self._safe_request("POST", action_url, data=delivery_payload, timeout=12, allow_redirects=True)
             if not r_confirm:
@@ -2506,13 +2653,14 @@ class AutoOrderHook:
             "confirm_url": resp.url,
         }
 
-    def clear_cart(self):
+    def clear_cart(self, quiet_if_empty: bool = False):
         """清空当前会话购物车中的所有商品"""
         try:
             r = self._safe_request("GET", "https://www.dollyteria.com/cart", timeout=10)
             if not r:
                 return
             soup = BeautifulSoup(r.content.decode("utf-8", "ignore"), "html.parser")
+            removed = 0
             for inp in soup.find_all("input", {"type": "submit"}):
                 name = inp.get("name", "")
                 if name.startswith("cart_remove_"):
@@ -2520,7 +2668,9 @@ class AutoOrderHook:
                         "cart_operation_page": "step_zero_cart",
                         name: "削除"
                     }, timeout=5)
-            logger.info("🧹 [Auto-Order] 购物车已自动清空，未残留任何测试商品")
+                    removed += 1
+            if removed > 0 or not quiet_if_empty:
+                logger.info("🧹 [Auto-Order] 购物车已自动清空，未残留任何测试商品")
         except Exception as e:
             logger.debug(f"[Auto-Order] 清理购物车时异常: {e}")
 

@@ -45,8 +45,6 @@ const elements = {
     btnAddDropTime: document.getElementById('btn-add-drop-time'),
     schedBurstDuration: document.getElementById('sched-burst-duration'),
     schedBurstInterval: document.getElementById('sched-burst-interval'),
-    schedBurstProbeTimeout: document.getElementById('sched-burst-probe-timeout'),
-    schedMaxPages: document.getElementById('sched-max-pages'),
     schedIntervalEnabled: document.getElementById('sched-interval-enabled'),
     schedIntervalMinutes: document.getElementById('sched-interval-minutes'),
     schedDailySyncEnabled: document.getElementById('sched-daily-sync-enabled'),
@@ -827,8 +825,6 @@ function populateScheduleForm() {
     renderDropTimesChips();
     if (elements.schedBurstDuration) elements.schedBurstDuration.value = s.burst_duration_sec ?? 180;
     if (elements.schedBurstInterval) elements.schedBurstInterval.value = s.burst_interval_sec ?? 0.2;
-    if (elements.schedBurstProbeTimeout) elements.schedBurstProbeTimeout.value = s.burst_probe_timeout_sec ?? 2.0;
-    if (elements.schedMaxPages) elements.schedMaxPages.value = s.max_stream_pages ?? 5;
     if (elements.schedIntervalEnabled) elements.schedIntervalEnabled.checked = s.interval_enabled ?? true;
     if (elements.schedIntervalMinutes) elements.schedIntervalMinutes.value = s.interval_minutes ?? 5;
 
@@ -1420,8 +1416,7 @@ function bindEvents() {
             currentConfig.schedule.drop_times = [...currentDropTimes];
             currentConfig.schedule.burst_duration_sec = parseInt(elements.schedBurstDuration?.value) || 180;
             currentConfig.schedule.burst_interval_sec = parseFloat(elements.schedBurstInterval?.value) || 0.2;
-            currentConfig.schedule.burst_probe_timeout_sec = parseFloat(elements.schedBurstProbeTimeout?.value) || 2.0;
-            currentConfig.schedule.max_stream_pages = parseInt(elements.schedMaxPages?.value) || 5;
+            currentConfig.schedule.max_stream_pages = 20;
             currentConfig.schedule.interval_enabled = elements.schedIntervalEnabled?.checked ?? true;
             currentConfig.schedule.interval_minutes = parseFloat(elements.schedIntervalMinutes?.value) || 5;
             currentConfig.schedule.daily_stock_sync = {
@@ -2483,7 +2478,7 @@ function initArchiveModule() {
     const btnSyncNewStream = document.getElementById('btn-sync-new-stream');
     if (btnSyncNewStream) {
         btnSyncNewStream.addEventListener('click', async () => {
-            const maxPages = currentConfig?.schedule?.max_stream_pages || 5;
+            const maxPages = 20;
             try {
                 btnSyncNewStream.disabled = true;
                 btnSyncNewStream.innerHTML = '<span>⏳ 正在拉取新品档案...</span>';

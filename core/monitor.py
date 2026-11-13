@@ -71,10 +71,9 @@ DEFAULT_CONFIG = {
         "drop_times": ["20:00:00", "21:00:00"],  # 定点准时触发时间 (支持多个)
         "burst_duration_sec": 180,                 # 触发后密集轮询持续秒数
         "burst_interval_sec": 0.2,                 # 密集轮询间隔 (秒)
-        "burst_probe_timeout_sec": 2.0,            # 爆发期单次探针快速超时上限 (秒)
         "interval_minutes": 5,                     # 日常平缓轮询间隔 (分钟)
         "interval_enabled": True,                  # 是否开启日常平缓轮询
-        "max_stream_pages": 5,                     # 上新流最大翻页深度 (每页100件，默认5页覆盖500件)
+        "max_stream_pages": 20,                    # 上新流固定翻页深度 (每页100件，覆盖最多2000件)
     },
     "notifications": {
         "sound_enabled": True,
@@ -135,6 +134,7 @@ class TriProbeBurstEngine:
         self._first_page_broken = False
         self._page1_cascade_ready = False
         self.baseline_seen_ids: Set[str] = set()
+        self._yield_log_times: Dict[str, float] = {}
         # 持久复用的独立探针连接池 (支持在爆发前 -3s 预建连，开抢瞬间 0 握手直发)
         self.session_a = self.monitor.scraper.create_probe_session()
         self.session_b = self.monitor.scraper.create_probe_session()
@@ -241,23 +241,42 @@ class TriProbeBurstEngine:
         self._threads.clear()
         logger.info("✅ [四路协同探测] 探针 A/B/C/D 已全部安全退出。")
 
-    def _yield_if_checkout_active(self, probe_name: str, max_yield_sec: float = 25.0) -> bool:
+    def _yield_if_checkout_active(self, probe_name: str, initial_yield_sec: float = 2.0, throttle_sleep_sec: float = 0.55) -> bool:
         """
-        当有商品正在执行自动下单/结算冲刺时，爆发期探针主动降频/避让，
-        将同 IP 并发连接配额与网络带宽 90%+ 优先供给 /cart/customer、/cart/shipping、/cart/confirm 结算通道，
-        同时保留轻量护航探测以防同批或次秒放出第 2 件目标商品。
+        当有商品正在执行自动下单/结算冲刺时，采用「短避让 + 轻降频」策略：
+        - 冲刺起步前 initial_yield_sec (默认 2.0s) 内短暂暂停，把同 IP 连接配额与带宽全力让给加购与确认页提交；
+        - 若结算重试超过该窗口仍在继续，切换为轻降频护航 (每次微休眠 throttle_sleep_sec)，
+          既不长时间挤占结算带宽，也避免探针 B/D 休眠 25 秒漏掉同批后续上新。
         返回 True 表示收到停止信号应当退出循环。
         """
         if not AutoOrderHook.is_checkout_active():
+            self._yield_log_times.pop(probe_name, None)
             return False
-        t_yield = time.time()
-        if max_yield_sec >= 5.0:
-            logger.info(f"🛡️ [{probe_name}-抢购让路] 检测到下单通道正在冲刺结算，探针主动暂停避让以保障结算带宽...")
-        while AutoOrderHook.is_checkout_active() and not self._stop_event.is_set() and time.time() < self.burst_end_time:
-            if time.time() - t_yield >= max_yield_sec:
-                break
-            if self._stop_event.wait(timeout=0.10):
-                return True
+
+        now = time.time()
+        last_log = self._yield_log_times.get(probe_name, 0.0)
+        if now - last_log >= 4.0:
+            self._yield_log_times[probe_name] = now
+            logger.info(f"🛡️ [{probe_name}-抢购让路] 检测到下单通道正在冲刺结算，探针短避让/轻降频以保障结算带宽...")
+
+        checkout_age = AutoOrderHook.get_active_checkout_age()
+        if checkout_age < initial_yield_sec:
+            t_yield = time.time()
+            while (
+                AutoOrderHook.is_checkout_active()
+                and not self._stop_event.is_set()
+                and time.time() < self.burst_end_time
+            ):
+                if AutoOrderHook.get_active_checkout_age() >= initial_yield_sec:
+                    break
+                if time.time() - t_yield >= initial_yield_sec:
+                    break
+                if self._stop_event.wait(timeout=0.08):
+                    return True
+            return self._stop_event.is_set()
+
+        if throttle_sleep_sec > 0 and self._stop_event.wait(timeout=throttle_sleep_sec):
+            return True
         return self._stop_event.is_set()
 
     def _worker_a_heavy(self):
@@ -266,19 +285,19 @@ class TriProbeBurstEngine:
         - 爆发启动前 12 秒且尚未有任何探针破墙 (_first_page_broken=False) 时：
           自动降载为 30件/页 轻装协防突围，避免 100件/页 重查询卡死数据库或挤占同 IP 并发配额；
         - 一旦任意探针破墙或超过 12 秒：
-          立即恢复 100件/页 全量保底覆盖，循环翻页至第 15 页或看到老商品为止。
+          立即恢复 100件/页 全量保底覆盖，循环翻页至第 20 页或看到老商品为止。
         """
         session_a = self.session_a
         session_a.headers.update(self.monitor.scraper.session.headers)
         timeout_sec = float(self.monitor.config.get("schedule", {}).get("burst_probe_timeout_sec", 2.0))
         interval = float(self.monitor.config.get("schedule", {}).get("burst_interval_sec", 0.2))
-        max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_burst_a_pages", 15))
+        max_a_pages = int(self.monitor.config.get("schedule", {}).get("max_burst_a_pages", 20))
         max_a_pages = max(5, min(max_a_pages, 25))
 
         fail_streak_a = 0
         while not self._stop_event.is_set() and time.time() < self.burst_end_time:
-            # 当有结算任务冲刺时，探针 A 自动降频为 1.5s 轻量护航扫描一次 (既削减 90%+ 并发争抢，又确保第 2 件新商品不漏检)
-            if self._yield_if_checkout_active("探针A", max_yield_sec=1.5):
+            # 当有结算任务冲刺时，探针 A 短避让后降频轻护航，确保第 2 件新商品不漏检
+            if self._yield_if_checkout_active("探针A", initial_yield_sec=1.5, throttle_sleep_sec=0.85):
                 break
             t0 = time.time()
             had_error_a = False
@@ -286,7 +305,7 @@ class TriProbeBurstEngine:
                 for page in range(1, max_a_pages + 1):
                     if self._stop_event.is_set() or time.time() >= self.burst_end_time:
                         break
-                    if page > 1 and self._yield_if_checkout_active("探针A", max_yield_sec=1.0):
+                    if page > 1 and self._yield_if_checkout_active("探针A", initial_yield_sec=1.0, throttle_sleep_sec=0.6):
                         break
 
                     # 前 12 秒尚未破墙时，第 1 页使用 30 件轻装模式协助快速破墙
@@ -426,8 +445,8 @@ class TriProbeBurstEngine:
                 c_retry_count = 0
                 logger.info("🚀 [探针C-联动跃迁] 探针A/B已突破第 1 页并确认上新流，探针C免翻第 1 页直接跃迁拉取第 2 页 (31~60件)...")
 
-            # 若探针 C 正处于顺延深挖阶段 (current_page > 1)，允许其先把本轮上新流第 2/3 页扫完以防漏掉同批第 2 件商品；回到第 1 页后再主动避让
-            if current_page == 1 and self._yield_if_checkout_active("探针C", max_yield_sec=25.0):
+            # 若探针 C 正处于顺延深挖阶段 (current_page > 1)，允许其先把本轮上新流第 2/3 页扫完以防漏掉同批第 2 件商品；回到第 1 页后再短避让
+            if current_page == 1 and self._yield_if_checkout_active("探针C", initial_yield_sec=2.0, throttle_sleep_sec=0.55):
                 break
             t0 = time.time()
             had_error_c = False
@@ -540,7 +559,7 @@ class TriProbeBurstEngine:
                     break
                 continue
 
-            if self._yield_if_checkout_active("探针D", max_yield_sec=25.0):
+            if self._yield_if_checkout_active("探针D", initial_yield_sec=2.0, throttle_sleep_sec=0.55):
                 break
 
             keywords = [k.strip() for k in prio_rule.get("keywords", []) if k.strip()]
@@ -622,6 +641,13 @@ class DollyteriaMonitor:
         self._reorder_attempt_counts: Dict[str, int] = {}
         self._reorder_lock = threading.Lock()
         self._stream_lock = threading.Lock()
+        self._state_save_lock = threading.Lock()
+        self._last_state_save_at = 0.0
+        self._seen_cache_set: Set[str] = set()
+        self._seen_cache_list: Optional[List] = None
+        self._seen_cache_len = -1
+        self._seen_cache_head = None
+        self._seen_cache_tail = None
 
         # 三路协同并发爆发探测引擎 (A:100件保底 | B:30件先锋 | C:30件交替)
         self._burst_engine = TriProbeBurstEngine(self)
@@ -735,20 +761,52 @@ class DollyteriaMonitor:
             self._save_state()
         return stats
 
-    def _save_state(self):
-        try:
-            os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-            # 保留最近 80000 个 seen_id
-            if len(self.state.get("seen_ids", [])) > 80000:
-                self.state["seen_ids"] = self.state["seen_ids"][-80000:]
-            # 保留最近 100 条历史记录
-            if len(self.state.get("history", [])) > 100:
-                self.state["history"] = self.state["history"][:100]
+    def _get_seen_set_locked(self) -> Set[str]:
+        """在已持有 _stream_lock 时 O(1) 复用或按需同步 seen_ids 内存集合，避免高频 3w+ ID 重复构造"""
+        raw = self.state.get("seen_ids", [])
+        n = len(raw)
+        head = raw[0] if n else None
+        tail = raw[-1] if n else None
+        if (
+            raw is not self._seen_cache_list
+            or n != self._seen_cache_len
+            or head != self._seen_cache_head
+            or tail != self._seen_cache_tail
+        ):
+            self._seen_cache_set = {str(sid) for sid in raw}
+            self._seen_cache_list = raw
+            self._seen_cache_len = n
+            self._seen_cache_head = head
+            self._seen_cache_tail = tail
+        return self._seen_cache_set
 
-            with open(STATE_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"保存状态文件失败: {e}")
+    def _save_state(self, state_snapshot: Optional[Dict] = None, compact: bool = False):
+        with self._state_save_lock:
+            try:
+                os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+                data = state_snapshot if state_snapshot is not None else self.state
+                # 保留最近 80000 个 seen_id
+                seen_ids = data.get("seen_ids", [])
+                if len(seen_ids) > 80000:
+                    seen_ids = seen_ids[-80000:]
+                    data["seen_ids"] = seen_ids
+                    if state_snapshot is None:
+                        self._seen_cache_list = None
+                # 保留最近 100 条历史记录
+                history = data.get("history", [])
+                if len(history) > 100:
+                    data["history"] = history[:100]
+
+                tmp_path = f"{STATE_PATH}.tmp.{threading.get_ident()}"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    if compact or len(seen_ids) > 5000:
+                        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+                    else:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, STATE_PATH)
+                self._last_state_save_at = time.time()
+            except Exception as e:
+                logger.error(f"保存状态文件失败: {e}")
 
     def update_config(self, new_cfg: Dict):
         """更新配置并同步组件"""
@@ -1015,7 +1073,7 @@ class DollyteriaMonitor:
         if wait_completion:
             concurrent.futures.wait(futures, timeout=45)
 
-    def _spawn_immediate_reorder(self, item: Dict, rule: Dict, attempt_count: int, cooldown_sec: float = 2.0) -> None:
+    def _spawn_immediate_reorder(self, item: Dict, rule: Dict, attempt_count: int, cooldown_sec: float = 0.6) -> None:
         """
         无缝立即续抢调度器：
         在单轮极速冲刺因持续 503 等原因耗尽重试但商品尚未售罄时，
@@ -1054,22 +1112,25 @@ class DollyteriaMonitor:
 
     def process_stream_items(self, items: List[Dict], source_tag: str = "A", is_burst: bool = False) -> List[Dict]:
         """
-        线程安全地处理抓取到的商品列表 (供三路探针 A/B/C 并发比对与排重)：
-        1. 快速检查是否已有全新商品 (基于 seen_ids 内存原子排重)
-        2. 对全新商品执行规则匹配
-        3. 命中规则零延迟立即触发非阻塞多线程并发自动抢购流水线
-        4. 分发通知提醒、持久化历史记录与 seen_ids
+        线程安全地处理抓取到的商品列表 (供三路探针 A/B/C/D 并发比对与排重)：
+        1. 锁内仅执行 O(1) 内存 seen_ids 排重、规则匹配与非阻塞派单，立即释放 _stream_lock
+        2. 锁外再执行通知分发、SQLite 归档入库与 state.json 持久化，彻底消除爆发期 3w+ ID 落盘阻塞后续探针！
         """
         if not items:
             return []
 
+        page_new_items: List[Dict] = []
+        stage_matches: List[Tuple[Dict, Dict]] = []
+        rule_groups: Dict = {}
+        state_snapshot: Optional[Dict] = None
+        should_save_now = False
+
         with self._stream_lock:
-            seen_set = set(str(sid) for sid in self.state.get("seen_ids", []))
+            seen_set = self._get_seen_set_locked()
             active_rules = [r for r in self.config.get("watches", []) if r.get("enabled", True)]
             if not active_rules:
                 return []
 
-            page_new_items = []
             for it in items:
                 it_id = str(it.get("id", "")).strip()
                 if it_id and it_id not in seen_set:
@@ -1081,10 +1142,10 @@ class DollyteriaMonitor:
             if hasattr(self, "_burst_engine") and self._burst_engine:
                 self._burst_engine.notify_drop_detected()
 
-            stage_matches = []
+            sorted_rules = sorted(active_rules, key=lambda r: (not r.get("priority", False), not r.get("auto_order", False)))
             for it in page_new_items:
                 matched_rule = None
-                for rule in sorted(active_rules, key=lambda r: (not r.get("priority", False), not r.get("auto_order", False))):
+                for rule in sorted_rules:
                     if not is_burst and rule.get("search_mode", "both") == "keyword_search":
                         continue
                     if self._matches_rule(it, rule):
@@ -1105,37 +1166,57 @@ class DollyteriaMonitor:
                     for nr in non_ao_rules:
                         logger.info(f"ℹ️ 规则 [{nr}] 专属自动购买开关为关闭状态，仅执行消息提醒，不触发自动下单")
 
-                rule_groups = {}
                 for it, r in stage_matches:
                     rule_groups.setdefault(r["id"], {"rule": r, "items": []})["items"].append(it)
-                for r_data in rule_groups.values():
-                    try:
-                        self.notifier.dispatch(r_data["items"], r_data["rule"])
-                    except Exception as e:
-                        logger.error(f"分发通知异常: {e}")
 
+                hist_list = self.state.setdefault("history", [])
                 for it, r in stage_matches:
                     hist_entry = dict(it)
                     hist_entry["rule_name"] = r.get("name")
-                    self.state.setdefault("history", []).insert(0, hist_entry)
+                    hist_list.insert(0, hist_entry)
+                if len(hist_list) > 100:
+                    del hist_list[100:]
 
-            # 无论是否命中监控规则，抓取到的所有全新商品（包含目标与非目标商品）只要库中没有均全部自动入库归档数据库
-            if page_new_items:
-                try:
-                    ins_cnt, upd_cnt = self.archive_db.upsert_batch(page_new_items)
-                    if ins_cnt > 0:
-                        logger.info(f"📦 [新品入库 ({source_tag})] 成功将 {ins_cnt} 件新上线商品收录至全数据档案库 (更新 {upd_cnt} 件)")
-                except Exception as e:
-                    logger.warning(f"同步流式新品至归档库失败: {e}")
-
+            seen_list = self.state.setdefault("seen_ids", [])
             for it in page_new_items:
                 it_id = str(it.get("id", "")).strip()
-                if it_id:
+                if it_id and it_id not in seen_set:
                     seen_set.add(it_id)
+                    seen_list.append(it_id)
+            if len(seen_list) > 80000:
+                del seen_list[:-80000]
+                self._seen_cache_set = {str(sid) for sid in seen_list}
+            self._seen_cache_list = seen_list
+            self._seen_cache_len = len(seen_list)
+            self._seen_cache_head = seen_list[0] if seen_list else None
+            self._seen_cache_tail = seen_list[-1] if seen_list else None
 
-            self.state["seen_ids"] = list(seen_set)
-            self._save_state()
-            return [it for it, r in stage_matches]
+            should_save_now = (not is_burst) or bool(stage_matches) or ((time.time() - self._last_state_save_at) >= 1.5)
+            if should_save_now:
+                state_snapshot = {
+                    k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+                    for k, v in self.state.items()
+                }
+
+        # 以下通知、SQLite 归档与磁盘落盘均在 _stream_lock 锁外执行，零阻塞后续探针抓取
+        for r_data in rule_groups.values():
+            try:
+                self.notifier.dispatch(r_data["items"], r_data["rule"])
+            except Exception as e:
+                logger.error(f"分发通知异常: {e}")
+
+        if page_new_items:
+            try:
+                ins_cnt, upd_cnt = self.archive_db.upsert_batch(page_new_items)
+                if ins_cnt > 0:
+                    logger.info(f"📦 [新品入库 ({source_tag})] 成功将 {ins_cnt} 件新上线商品收录至全数据档案库 (更新 {upd_cnt} 件)")
+            except Exception as e:
+                logger.warning(f"同步流式新品至归档库失败: {e}")
+
+        if should_save_now and state_snapshot is not None:
+            self._save_state(state_snapshot=state_snapshot, compact=is_burst)
+
+        return [it for it, r in stage_matches]
 
     def start_burst_probes(self, duration_sec: float = 180):
         """启动四路协同爆发探测引擎 (A:全量/轻装保底 | B:30件先锋 | C:30件顺延 | D:优先关键词狙击)"""
@@ -1190,9 +1271,9 @@ class DollyteriaMonitor:
                 # 1. 抓取第 1 页 (最新 100 件) -> 本地内存比对 -> 命中则零延迟直接触发并发抢购与提醒！
                 # 2. 检查当前页是否有已记录过的历史商品 (seen_set)：
                 #    - 若当前页中途出现了已见商品，说明此次大上新全部在该页截断，无需继续翻页，毫秒级直接结束！
-                #    - 若当前页所有商品全部为全新商品 (说明上新数量超过 100 件溢出至下一页)，自动顺延拉取第 2 页、第 3 页 (最高可达 max_stream_pages，默认 5 页即 500 件)
+                #    - 若当前页所有商品全部为全新商品 (说明上新数量超过 100 件溢出至下一页)，自动顺延拉取第 2 页、第 3 页 (固定上限 20 页覆盖 2000 件)
                 # 每页一旦匹配到规则立即触发抢购，绝不等待后续页面！
-                max_pages = int(self.config.get("schedule", {}).get("max_stream_pages", 5))
+                max_pages = 20
                 stream_pages_fetched = 0
                 stream_items_fetched = 0
                 for page_idx in range(1, max_pages + 1):

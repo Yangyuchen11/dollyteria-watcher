@@ -158,9 +158,16 @@ class DollyteriaScheduler:
                     prewarm_60s_marker = f"{today_str}_{next_label}_warm60s"
                     if prewarm_60s_marker not in self._prewarmed_drop_markers:
                         self._prewarmed_drop_markers.add(prewarm_60s_marker)
-                        logger.info(f"⏳ 距离定点上新 [{next_label}] 剩余 {rem_drop_sec} 秒 (临战保鲜期)，强制执行备用 Worker 会话刷新与心跳探活...")
+                        logger.info(f"⏳ 距离定点上新 [{next_label}] 剩余 {rem_drop_sec} 秒 (临战保鲜期)，强制执行备用 Worker 会话刷新、购物车预清理与风控池自愈...")
                         if hasattr(self.monitor, "auto_order") and self.monitor.auto_order:
-                            self.monitor.auto_order.preload_standby_workers(force_refresh=True)
+                            ao = self.monitor.auto_order
+                            ao.preload_standby_workers(force_refresh=True)
+                            if getattr(ao, "username", "") and getattr(ao, "password", ""):
+                                threading.Thread(
+                                    target=lambda: ao.clear_cart(quiet_if_empty=True),
+                                    name="PreDropClearCart",
+                                    daemon=True,
+                                ).start()
 
                 # 阶段 2 (临战 15 秒)：平滑就绪与差额补齐校验
                 if next_label and 5 <= rem_drop_sec <= 15:

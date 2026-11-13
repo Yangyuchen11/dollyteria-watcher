@@ -800,10 +800,13 @@ class RecaptchaTokenProvider:
                     slot.is_warmed = False
 
                 slot.is_fresh = True
+                if force_navigate:
+                    slot.last_failed = False
                 slot.sitekey = sitekey
                 slot.prepared_at = time.time()
                 slot.last_touch_at = slot.prepared_at
                 return True
+            logger.debug(f"[reCAPTCHA] 标签页 [{slot.target_id[:6]}] 预热脚本未返回就绪: {res}")
             slot.is_fresh = False
             slot.is_warmed = False
             return False
@@ -1733,7 +1736,8 @@ class RecaptchaTokenProvider:
             my = random.randint(180, 320)
             cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
             slot.last_touch_at = time.time()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[reCAPTCHA] 标签页 [{slot.target_id[:6]}] 保活微动失败，标记待修复: {e}")
             slot.is_fresh = False
             slot.is_warmed = False
         finally:
@@ -1815,8 +1819,8 @@ class RecaptchaTokenProvider:
                             if not s.is_fresh:
                                 s.is_preparing = True
                                 broken_slots.append(s)
-                            elif (now - s.prepared_at) > 210:
-                                # 超过 3.5 分钟的槽位采用错峰滚动刷新（每轮最多刷新 1 个最老槽位，绝不清空全池）
+                            elif (now - s.prepared_at) > 480:
+                                # 超过 8 分钟的槽位采用错峰滚动刷新（降低日常空跑对 Google 的 pageview 噪声；临战前由 ensure_prewarm_healthy 兜底刷鲜）
                                 if oldest_aged_slot is None or s.prepared_at < oldest_aged_slot.prepared_at:
                                     oldest_aged_slot = s
                             else:

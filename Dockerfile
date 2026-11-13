@@ -17,18 +17,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Tokyo \
     DATA_DIR=/app/data
 
-# 安装基础系统依赖、时区数据与 Chromium + Xvfb (用于最终确认页 Google reCAPTCHA v3 令牌签发)
-# 同时安装常用中日文与西文字体，规避无头 Chromium 因缺失字体库被 Google BotGuard 判定为自动化沙箱降分
+# 安装基础系统依赖、时区数据与官方 Google Chrome + Xvfb (用于最终确认页 Google reCAPTCHA v3 令牌签发)
+# 同时安装常用中日文与西文字体，规避无头浏览器因缺失字体库或 Chromium 开源指纹特征被 Google BotGuard 降分
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     tzdata \
     curl \
-    chromium \
     xvfb \
     xauth \
     fonts-noto-cjk \
     fonts-ipafont-gothic \
     fonts-liberation \
     fonts-dejavu-core \
+    && ARCH="$(dpkg --print-architecture)" \
+    && if [ "$ARCH" = "amd64" ]; then \
+        curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/google-chrome.deb \
+        && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+        && rm -f /tmp/google-chrome.deb; \
+    else \
+        apt-get install -y --no-install-recommends chromium; \
+    fi \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 

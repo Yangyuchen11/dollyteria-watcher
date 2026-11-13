@@ -165,6 +165,7 @@ class _RecaptchaTabSlot:
         self.success_count: int = 0
         self.fail_count: int = 0
         self.last_failed: bool = False
+        self._stealth_installed: bool = False
 
 
 class RecaptchaTokenProvider:
@@ -524,40 +525,40 @@ class RecaptchaTokenProvider:
         except Exception:
             pass
 
-    def _prepare_slot(
-        self,
-        slot: _RecaptchaTabSlot,
-        sitekey: str = DEFAULT_RECAPTCHA_SITEKEY,
-        force_navigate: bool = True,
-    ) -> bool:
-        """
-        将单个 Tab 槽位导航至 www.dollyteria.com 极轻静态页并完成 grecaptcha v3 实例加载预热：
-        1. 开启 Emulation.setFocusEmulationEnabled 确保槽位始终保持 visible + focus 满信誉状态
-        2. 导航至带唯一序列号 ?_r={seq_tag} 的轻量 URL 并严格等待 document.readyState === 'complete'，
-           杜绝在旧页面未卸载完时抢先注入导致的令牌失效
-        3. 若官网在极端网络断连期无法完成导航，自动兜底复用当前已存在的 grecaptcha 上下文
-        """
-        cdp = None
-        try:
-            cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
-            try:
-                cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
-            except Exception:
-                pass
-
-                        # 注入底层反自动化指纹对抗 (Anti-Detect Stealth)，抹除无头特征提升 Google v3 评分
-            stealth_js = """
+    @staticmethod
+    def _build_stealth_js() -> str:
+        """构建跨平台一致的反自动化指纹对抗脚本（按系统区分 WebGL 显卡特征并保护原生 PluginArray）"""
+        return """
+        (() => {
             try {
-                // 1. 抹除自动化驱动标记
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+                if (window.__dollyStealthReady) return;
+                window.__dollyStealthReady = true;
 
-                // 2. 伪装浏览器原生插件列表 (标准 Chrome PDF 插件)
-                const pluginList = [
-                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-                ];
-                Object.defineProperty(navigator, 'plugins', { get: () => pluginList, configurable: true });
+                // 1. 仅在原生存在自动化标记时抹除，避免无谓覆盖原生 prototype 属性
+                if (navigator.webdriver === true) {
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+                }
+
+                // 2. 仅当原生 plugins 为空或非 PluginArray 时补齐（保留 Chrome 原生 PluginArray 原型链与方法）
+                const hasNativePlugins = (
+                    typeof PluginArray !== 'undefined' &&
+                    navigator.plugins instanceof PluginArray &&
+                    navigator.plugins.length > 0
+                );
+                if (!hasNativePlugins) {
+                    const fakePlugins = [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 0 },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 0 },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 0 }
+                    ];
+                    if (typeof PluginArray !== 'undefined') {
+                        try { Object.setPrototypeOf(fakePlugins, PluginArray.prototype); } catch (e) {}
+                    }
+                    fakePlugins.item = (i) => fakePlugins[i] || null;
+                    fakePlugins.namedItem = (n) => fakePlugins.find((p) => p.name === n) || null;
+                    fakePlugins.refresh = () => {};
+                    Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins, configurable: true });
+                }
 
                 // 3. 补齐 Chrome 专属运行时与性能指标 API (Google BotGuard 关键侦测项)
                 if (!window.chrome) { window.chrome = {}; }
@@ -599,15 +600,22 @@ class RecaptchaTokenProvider:
                 Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
                 Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
 
-                // 5. WebGL 真实显卡信息欺骗 (抹除 Linux Xvfb 下 llvmpipe / SwiftShader 纯软件渲染无头特征)
+                // 5. 按操作系统匹配的 WebGL 显卡特征 (Windows 用 Direct3D11，Linux 用 OpenGL/Mesa，避免 Linux+D3D11 自相矛盾)
+                const isWin = /win/i.test(navigator.platform || navigator.userAgent || '');
+                const spoofVendor = isWin ? 'Google Inc. (NVIDIA)' : 'Google Inc. (Intel)';
+                const spoofRenderer = isWin
+                    ? 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)'
+                    : 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)';
                 const patchWebGL = (proto) => {
-                    if (!proto || !proto.getParameter) return;
+                    if (!proto || !proto.getParameter || proto.getParameter.__dollyPatched) return;
                     const origGetParam = proto.getParameter;
-                    proto.getParameter = function(param) {
-                        if (param === 37445) return 'Google Inc. (NVIDIA)';
-                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    const wrapped = function(param) {
+                        if (param === 37445) return spoofVendor;
+                        if (param === 37446) return spoofRenderer;
                         return origGetParam.apply(this, arguments);
                     };
+                    wrapped.__dollyPatched = true;
+                    proto.getParameter = wrapped;
                 };
                 if (window.WebGLRenderingContext) patchWebGL(WebGLRenderingContext.prototype);
                 if (window.WebGL2RenderingContext) patchWebGL(WebGL2RenderingContext.prototype);
@@ -616,23 +624,53 @@ class RecaptchaTokenProvider:
                 if (window.AudioContext || window.webkitAudioContext) {
                     const AC = window.AudioContext || window.webkitAudioContext;
                     const origDestDesc = Object.getOwnPropertyDescriptor(AC.prototype, 'destination');
-                    if (origDestDesc && origDestDesc.get) {
+                    if (origDestDesc && origDestDesc.get && !origDestDesc.get.__dollyPatched) {
                         const origGet = origDestDesc.get;
-                        Object.defineProperty(AC.prototype, 'destination', {
-                            get: function() {
-                                const dest = origGet.apply(this);
-                                try { Object.defineProperty(dest, 'maxChannelCount', { value: 2 }); } catch(e) {}
-                                return dest;
-                            }
-                        });
+                        const wrappedGet = function() {
+                            const dest = origGet.apply(this);
+                            try {
+                                if (!dest.maxChannelCount || dest.maxChannelCount === 0) {
+                                    Object.defineProperty(dest, 'maxChannelCount', { value: 2 });
+                                }
+                            } catch (e) {}
+                            return dest;
+                        };
+                        wrappedGet.__dollyPatched = true;
+                        Object.defineProperty(AC.prototype, 'destination', { get: wrappedGet, configurable: true });
                     }
                 }
             } catch (e) {}
-            """
+        })();
+        """
+
+    def _prepare_slot(
+        self,
+        slot: _RecaptchaTabSlot,
+        sitekey: str = DEFAULT_RECAPTCHA_SITEKEY,
+        force_navigate: bool = True,
+    ) -> bool:
+        """
+        将单个 Tab 槽位导航至 www.dollyteria.com 极轻静态页并完成 grecaptcha v3 实例加载预热：
+        1. 开启 Emulation.setFocusEmulationEnabled 确保槽位始终保持 visible + focus 满信誉状态
+        2. 导航至带唯一序列号 ?_r={seq_tag} 的轻量 URL 并严格等待 document.readyState === 'complete'，
+           杜绝在旧页面未卸载完时抢先注入导致的令牌失效
+        3. 若官网在极端网络断连期无法完成导航，自动兜底复用当前已存在的 grecaptcha 上下文
+        """
+        cdp = None
+        try:
+            cdp = _SimpleCDPClient(slot.ws_url, timeout=12.0)
             try:
-                cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+                cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
             except Exception:
                 pass
+
+            stealth_js = self._build_stealth_js()
+            if not getattr(slot, "_stealth_installed", False):
+                try:
+                    cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+                    slot._stealth_installed = True
+                except Exception:
+                    pass
             try:
                 cdp.call("Runtime.evaluate", {"expression": stealth_js})
             except Exception:
@@ -839,12 +877,13 @@ class RecaptchaTokenProvider:
                     self._is_temp_profile = True
                 self._sitekey = sitekey
 
+                win_pos_arg = "--window-position=-32000,-32000" if os.name == "nt" else "--window-position=0,0"
                 args = [
                     exe,
                     f"--remote-debugging-port={self._port}",
                     "--remote-allow-origins=*",
                     f"--user-data-dir={self._user_data_dir}",
-                    "--window-position=-32000,-32000",
+                    win_pos_arg,
                     "--window-size=1280,900",
                     "--no-first-run",
                     "--no-default-browser-check",

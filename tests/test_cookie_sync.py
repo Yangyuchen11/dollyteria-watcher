@@ -103,6 +103,14 @@ class TestGoogleCookieSync(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_stealth_js_platform_consistent(self):
+        js = RecaptchaTokenProvider._build_stealth_js()
+        self.assertIn("Direct3D11", js)
+        self.assertIn("OpenGL 4.6", js)
+        self.assertIn("PluginArray", js)
+        self.assertIn("__dollyStealthReady", js)
+        self.assertIn("__dollyPatched", js)
+
     def test_flask_cookie_endpoints_auth_and_routing(self):
         mock_monitor = MagicMock()
         mock_monitor.config = {"web_password": "secret_pw", "watches": []}

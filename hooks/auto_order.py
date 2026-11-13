@@ -21,6 +21,7 @@ import socket
 import struct
 import base64
 import shutil
+import signal
 import atexit
 import tempfile
 import subprocess
@@ -265,27 +266,183 @@ class RecaptchaTokenProvider:
             pass
         return None
 
+    _GOOGLE_COOKIE_DOMAIN_SUFFIXES = ("google.com", "google.co.jp", "youtube.com")
+    _GOOGLE_LOGIN_COOKIE_NAMES = {
+        "SID", "HSID", "SSID", "APISID", "SAPISID",
+        "__Secure-1PSID", "__Secure-3PSID",
+        "__Secure-1PAPISID", "__Secure-3PAPISID",
+        "OSID", "__Secure-OSID",
+    }
+
+    @staticmethod
+    def _get_profile_dir() -> str:
+        """获取持久化浏览器配置目录路径（优先遵循 DATA_DIR 环境变量）"""
+        data_dir = os.environ.get("DATA_DIR", "").strip()
+        if data_dir:
+            return os.path.abspath(os.path.join(data_dir, "browser_profile"))
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+
+    @staticmethod
+    def _ensure_headless_signin_disabled(profile_base: str):
+        """关闭 Chromium DICE 浏览器级登录校验，避免无头环境下导入 Cookie 后重启被 AccountReconcilor 自动注销"""
+        try:
+            default_dir = os.path.join(profile_base, "Default")
+            os.makedirs(default_dir, exist_ok=True)
+            pref_path = os.path.join(default_dir, "Preferences")
+            prefs = {}
+            if os.path.isfile(pref_path):
+                try:
+                    with open(pref_path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            prefs = loaded
+                except Exception:
+                    prefs = {}
+            signin_cfg = prefs.get("signin") if isinstance(prefs.get("signin"), dict) else {}
+            if signin_cfg.get("allowed") is False and signin_cfg.get("allowed_on_next_startup") is False:
+                return
+            signin_cfg["allowed"] = False
+            signin_cfg["allowed_on_next_startup"] = False
+            prefs["signin"] = signin_cfg
+            with open(pref_path, "w", encoding="utf-8") as f:
+                json.dump(prefs, f, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"[reCAPTCHA] 写入 signin 禁用配置跳过: {e}")
+
+    @classmethod
+    def _is_google_trust_domain(cls, domain: str) -> bool:
+        """判断 Cookie 域名是否属于 Google / YouTube 信任体系"""
+        host = (domain or "").strip().lower().lstrip(".")
+        if not host:
+            return False
+        return any(host == s or host.endswith("." + s) for s in cls._GOOGLE_COOKIE_DOMAIN_SUFFIXES)
+
+    @classmethod
+    def _has_google_login_cookies(cls, cookies: List[Dict]) -> bool:
+        """检查 Cookie 列表中是否包含有效的 Google 账号登录态凭证"""
+        for c in cookies or []:
+            domain = str(c.get("domain", "")).strip().lower()
+            name = str(c.get("name", "")).strip()
+            value = str(c.get("value", ""))
+            if not value or name not in cls._GOOGLE_LOGIN_COOKIE_NAMES:
+                continue
+            host = domain.lstrip(".")
+            if host == "google.com" or host.endswith(".google.com") or host == "google.co.jp" or host.endswith(".google.co.jp"):
+                return True
+        return False
+
+    @classmethod
+    def _normalize_cookie_for_cdp(cls, raw: Dict) -> Optional[Dict]:
+        """将导出的 Cookie（兼容 CDP 与 Cookie-Editor/EditThisCookie 格式）标准化为 CDP Network.setCookie 参数"""
+        if not isinstance(raw, dict):
+            return None
+        name = str(raw.get("name") or "").strip()
+        value = raw.get("value")
+        domain = str(raw.get("domain") or "").strip()
+        if not name or value is None or not domain or not cls._is_google_trust_domain(domain):
+            return None
+
+        path = str(raw.get("path") or "/").strip() or "/"
+        secure = bool(raw.get("secure", False))
+        http_only = bool(raw.get("httpOnly", False))
+
+        params: Dict = {
+            "name": name,
+            "value": str(value),
+            "path": path,
+            "secure": secure,
+            "httpOnly": http_only,
+        }
+
+        # __Host- 前缀 Cookie 必须绑定精确 host URL 且不得传 domain，同时强制 secure=True, path="/"
+        if name.startswith("__Host-"):
+            params["url"] = f"https://{domain.lstrip('.')}/"
+            params["path"] = "/"
+            params["secure"] = True
+        else:
+            params["domain"] = domain
+            if name.startswith("__Secure-"):
+                params["secure"] = True
+
+        raw_ss = str(raw.get("sameSite") or "").strip().lower()
+        ss_map = {
+            "strict": "Strict",
+            "lax": "Lax",
+            "none": "None",
+            "no_restriction": "None",
+        }
+        if raw_ss in ss_map:
+            params["sameSite"] = ss_map[raw_ss]
+            if params["sameSite"] == "None":
+                params["secure"] = True
+
+        exp = raw.get("expires", raw.get("expirationDate"))
+        if exp is not None and not isinstance(exp, bool):
+            try:
+                exp_val = float(exp)
+                if exp_val > 0:
+                    params["expires"] = exp_val
+            except (TypeError, ValueError):
+                pass
+
+        return params
+
     def _cleanup_proc_unlocked(self):
+        first_ws = self._slots[0].ws_url if self._slots else None
+        port = self._port
         self._is_ready = False
         self._active_token_slots.clear()
         self._slots.clear()
         if self._proc:
             pid = self._proc.pid
+            # 先尝试优雅发送 Browser.close（优先使用 Browser 级调试端点），确保 SQLite Cookie/缓存完整落盘不丢失
+            if self._proc.poll() is None:
+                close_ws = None
+                if port:
+                    try:
+                        ver = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=0.8).json()
+                        close_ws = ver.get("webSocketDebuggerUrl") or None
+                    except Exception:
+                        pass
+                close_ws = close_ws or first_ws
+                if close_ws:
+                    cdp = None
+                    try:
+                        cdp = _SimpleCDPClient(close_ws, timeout=1.5)
+                        cdp.call("Browser.close", {})
+                        self._proc.wait(timeout=3.0)
+                    except Exception:
+                        pass
+                    finally:
+                        if cdp:
+                            cdp.close()
             try:
-                if os.name == "nt":
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=4,
-                    )
-                    self._proc.wait(timeout=2)
-                else:
-                    self._proc.terminate()
-                    self._proc.wait(timeout=3)
+                if self._proc.poll() is None:
+                    if os.name == "nt":
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=4,
+                        )
+                        self._proc.wait(timeout=2)
+                    else:
+                        try:
+                            os.killpg(os.getpgid(pid), signal.SIGTERM)
+                        except Exception:
+                            self._proc.terminate()
+                        try:
+                            self._proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                            except Exception:
+                                self._proc.kill()
+                            self._proc.wait(timeout=1.5)
             except Exception:
                 pass
             self._proc = None
+        self._port = 0
         if self._user_data_dir and getattr(self, "_is_temp_profile", False) and os.path.isdir(self._user_data_dir):
             shutil.rmtree(self._user_data_dir, ignore_errors=True)
             self._user_data_dir = None
@@ -639,7 +796,7 @@ class RecaptchaTokenProvider:
 
                 self._port = self._allocate_free_port()
                 # 持久化浏览器数据目录：沉淀 Google 账户会话缓存、TLS Session Tickets 与 Cookie 指纹，规避白板临时目录遭 Google v3 惩罚
-                profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+                profile_base = self._get_profile_dir()
                 # 清理因前序 Python 进程异常退出可能遗留的孤儿 Chrome 进程与锁文件
                 if os.name == "nt":
                     try:
@@ -673,6 +830,8 @@ class RecaptchaTokenProvider:
                     # 始终锁定并使用持久化 Profile 目录，彻底杜绝白板临时目录遭 Google v3 扣分惩罚
                     self._user_data_dir = profile_base
                     self._is_temp_profile = False
+                    if os.name != "nt":
+                        self._ensure_headless_signin_disabled(profile_base)
                 except Exception as e:
                     # 仅在磁盘物理权限严重异常且目录完全不可写时作为终极保底
                     logger.warning(f"⚠️ [reCAPTCHA] 初始化持久化数据目录异常: {e}，回退至隔离临时目录")
@@ -717,6 +876,7 @@ class RecaptchaTokenProvider:
                     si.wShowWindow = 0  # SW_HIDE: 完全隐藏窗口，不占用任务栏与前台焦点
                     kwargs["startupinfo"] = si
                 else:
+                    kwargs["start_new_session"] = True
                     if not os.environ.get("DISPLAY"):
                         xvfb = shutil.which("xvfb-run")
                         if xvfb:
@@ -1231,14 +1391,14 @@ class RecaptchaTokenProvider:
         if os.name != "nt" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             return {
                 "success": False,
-                "message": "当前云服务器处于无图形桌面的 Linux 环境，无法弹出桌面窗口。建议直接使用下方的「一键自动养号预热」，该功能在无头环境下同样会完整沉淀真实浏览缓存与 TLS 会话！",
+                "message": "当前云服务器处于无图形桌面的 Linux 环境，无法弹出桌面窗口。请在本地电脑浏览器登录 Google 后点击「📤 导出 Google 凭证」，再在本页面点击「📥 导入 Google 凭证」注入云端！",
             }
 
         exe = self._find_browser_executable()
         if not exe:
             return {"success": False, "message": "未找到本机可用的 Chrome / Edge / Chromium 浏览器"}
 
-        profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+        profile_base = self._get_profile_dir()
         os.makedirs(profile_base, exist_ok=True)
 
         # 尝试清理残余 lockfile (若无头 Chrome 已退出)
@@ -1334,20 +1494,187 @@ class RecaptchaTokenProvider:
             if cdp:
                 cdp.close()
 
+    def _read_live_google_cookies(self) -> Tuple[bool, List[Dict]]:
+        """通过 CDP 读取当前运行中浏览器内核里的 Google / YouTube 信任体系 Cookie"""
+        ws_url = None
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None and self._slots:
+                ws_url = self._slots[0].ws_url
+        if not ws_url:
+            return False, []
+        cdp = None
+        try:
+            cdp = _SimpleCDPClient(ws_url, timeout=5.0)
+            res = cdp.call("Network.getAllCookies", {})
+            raw = res.get("cookies", []) if isinstance(res, dict) else []
+            filtered = [c for c in raw if self._is_google_trust_domain(str(c.get("domain", "")))]
+            return True, filtered
+        except Exception as e:
+            logger.debug(f"[reCAPTCHA] 读取浏览器 Google Cookie 异常: {e}")
+            return False, []
+        finally:
+            if cdp:
+                cdp.close()
+
+    def export_google_cookies(self) -> Dict:
+        """从当前持久化浏览器环境导出解密后的 Google 登录态与信任 Cookie（用于跨平台同步到云端容器）"""
+        if not self._ensure_browser_and_pool_ready():
+            return {"success": False, "message": "无法启动后台浏览器内核以读取持久化 Cookie"}
+
+        ok, cookies = self._read_live_google_cookies()
+        if not ok:
+            return {"success": False, "message": "通过 CDP 读取浏览器 Cookie 失败，请重试"}
+
+        export_fields = ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
+        portable = []
+        for c in cookies:
+            item = {k: c[k] for k in export_fields if k in c}
+            if item.get("name") and item.get("domain"):
+                portable.append(item)
+
+        has_login = self._has_google_login_cookies(portable)
+        if not has_login:
+            return {
+                "success": True,
+                "has_google_login": False,
+                "count": len(portable),
+                "cookies": portable,
+                "message": "已读取浏览器 Cookie，但未检测到 Google 账号登录态（SID / __Secure-1PSID 等）。请先在本机点击「🌐 打开浏览器窗口」登录 Google 账号后再导出！",
+            }
+
+        return {
+            "success": True,
+            "has_google_login": True,
+            "count": len(portable),
+            "cookies": portable,
+            "message": f"成功导出 {len(portable)} 条 Google 信任凭证（已包含有效 Google 账号登录态）！",
+        }
+
+    def import_google_cookies(self, raw_cookies) -> Dict:
+        """将导出的明文 Google Cookie（兼容本工具导出及 Cookie-Editor JSON）注入云端持久化浏览器并立即刷新预热池"""
+        payload = raw_cookies
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload.strip())
+            except Exception as e:
+                return {"success": False, "message": f"Cookie JSON 解析失败: {e}"}
+        if isinstance(payload, dict) and "cookies" in payload:
+            payload = payload.get("cookies")
+        if not isinstance(payload, list):
+            return {"success": False, "message": "无效的 Cookie 数据格式，需要 JSON 数组或包含 cookies 字段的对象"}
+
+        normalized_list: List[Dict] = []
+        skipped = 0
+        for item in payload:
+            norm = self._normalize_cookie_for_cdp(item)
+            if norm:
+                normalized_list.append(norm)
+            else:
+                skipped += 1
+
+        if not normalized_list:
+            return {
+                "success": False,
+                "imported": 0,
+                "skipped": skipped,
+                "message": "未在导入数据中找到有效的 Google 域名 Cookie（需包含 .google.com / .google.co.jp / .youtube.com）",
+            }
+
+        if not self._ensure_browser_and_pool_ready():
+            return {"success": False, "message": "无法启动后台浏览器内核以写入 Cookie"}
+
+        ws_url = None
+        with self._lock:
+            if self._slots:
+                ws_url = self._slots[0].ws_url
+        if not ws_url:
+            return {"success": False, "message": "未找到可用的浏览器调试通道"}
+
+        injected = 0
+        failed = 0
+        cdp = None
+        try:
+            cdp = _SimpleCDPClient(ws_url, timeout=8.0)
+            for params in normalized_list:
+                res = cdp.call("Network.setCookie", params)
+                if isinstance(res, dict) and res.get("success"):
+                    injected += 1
+                else:
+                    failed += 1
+        except Exception as e:
+            return {"success": False, "message": f"通过 CDP 注入 Cookie 异常: {e}"}
+        finally:
+            if cdp:
+                cdp.close()
+
+        if injected == 0:
+            return {
+                "success": False,
+                "imported": 0,
+                "failed": failed,
+                "skipped": skipped,
+                "message": "所有 Cookie 注入均被浏览器拒绝，请检查 Cookie 格式与有效期",
+            }
+
+        # 优雅重启一次浏览器以确保 CDP 注入的内存 Cookie 立即完整落盘至 SQLite，并在新登录态下重新预热池
+        with self._lock:
+            self._cleanup_proc_unlocked()
+        self._ensure_headless_signin_disabled(self._get_profile_dir())
+        self._ensure_browser_and_pool_ready(self._sitekey)
+
+        _, live_cookies = self._read_live_google_cookies()
+        has_login = self._has_google_login_cookies(live_cookies)
+        logger.info(
+            f"🍪 [reCAPTCHA] 已向持久化浏览器注入 {injected} 条 Google Cookie "
+            f"(有效登录态: {'是' if has_login else '否'}, 跳过非Google/无效: {skipped}, 写入失败: {failed})"
+        )
+
+        if not has_login:
+            return {
+                "success": True,
+                "imported": injected,
+                "failed": failed,
+                "skipped": skipped,
+                "has_google_login": False,
+                "google_cookie_count": len(live_cookies),
+                "message": f"已注入 {injected} 条 Cookie 并刷新预热池，但未检测到 SID / __Secure-1PSID 登录态 Cookie，请确认导出时已登录 Google 账号。",
+            }
+
+        return {
+            "success": True,
+            "imported": injected,
+            "failed": failed,
+            "skipped": skipped,
+            "has_google_login": True,
+            "google_cookie_count": len(live_cookies),
+            "message": f"🎉 成功注入 {injected} 条 Google Cookie 并完成预热池刷新！（已确认携带有效 Google 登录态）",
+        }
+
     def get_profile_status(self) -> Dict:
         """检查当前持久化数据目录及 Google 登录状态"""
-        profile_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+        profile_base = self._get_profile_dir()
         has_dir = os.path.exists(profile_base)
         default_dir = os.path.join(profile_base, "Default")
         has_cookies = os.path.exists(os.path.join(default_dir, "Network", "Cookies")) or os.path.exists(os.path.join(default_dir, "Cookies"))
         has_accounts = os.path.exists(os.path.join(default_dir, "Accounts")) or os.path.exists(os.path.join(default_dir, "Login Data"))
+        is_running = (self._proc is not None and self._proc.poll() is None)
+
+        has_google_login = None
+        google_cookie_count = 0
+        if is_running:
+            ok, live_cookies = self._read_live_google_cookies()
+            if ok:
+                google_cookie_count = len(live_cookies)
+                has_google_login = self._has_google_login_cookies(live_cookies)
 
         return {
             "profile_dir": profile_base,
             "exists": has_dir,
             "has_cache": has_cookies,
             "has_accounts": has_accounts,
-            "is_headless_running": (self._proc is not None and self._proc.poll() is None),
+            "is_headless_running": is_running,
+            "has_google_login": has_google_login,
+            "google_cookie_count": google_cookie_count,
         }
 
     def _sync_pool_in_bg(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY):

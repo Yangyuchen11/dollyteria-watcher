@@ -83,6 +83,13 @@ const elements = {
     btnTestRecaptchaToken: document.getElementById('btn-test-recaptcha-token'),
     aoTestProbeToggle: document.getElementById('ao-test-probe-toggle'),
     btnOpenGuiBrowser: document.getElementById('btn-open-gui-browser'),
+    btnExportGoogleCookies: document.getElementById('btn-export-google-cookies'),
+    btnImportGoogleCookies: document.getElementById('btn-import-google-cookies'),
+    googleCookiesImportPanel: document.getElementById('google-cookies-import-panel'),
+    googleCookiesImportInput: document.getElementById('google-cookies-import-input'),
+    googleCookiesFileInput: document.getElementById('google-cookies-file-input'),
+    btnConfirmImportCookies: document.getElementById('btn-confirm-import-cookies'),
+    btnCancelImportCookies: document.getElementById('btn-cancel-import-cookies'),
     btnAutoWarmBrowser: document.getElementById('btn-auto-warm-browser'),
     browserProfileStatusBadge: document.getElementById('browser-profile-status-badge'),
     aoTestResult: document.getElementById('ao-test-result'),
@@ -402,6 +409,7 @@ function initMainApp() {
     try { initWatchesFilter(); } catch (e) { console.error('initWatchesFilter err:', e); }
     try { initFeedFilter(); } catch (e) { console.error('initFeedFilter err:', e); }
     try { initSSE(); } catch (e) { console.error('initSSE err:', e); }
+    try { refreshBrowserProfileStatus(true); } catch (e) { console.error('refreshBrowserProfileStatus err:', e); }
     try {
         pollStatus();
         if (pollTimer) clearInterval(pollTimer);
@@ -1664,6 +1672,137 @@ function bindEvents() {
             } finally {
                 elements.btnTestDryRunOrder.disabled = false;
                 elements.btnTestDryRunOrder.textContent = '🧪 仿真测试';
+            }
+        });
+    }
+
+    // 浏览器信誉与养号工具箱: 状态刷新助手
+    async function refreshBrowserProfileStatus(retryIfStarting = false) {
+        if (!elements.browserProfileStatusBadge) return;
+        try {
+            const res = await fetch('/api/browser/status');
+            if (!res.ok) return;
+            const st = await res.json();
+            if (st.has_google_login === true) {
+                elements.browserProfileStatusBadge.textContent = `🟢 已绑定 Google 登录态 (${st.google_cookie_count || 0} 条)`;
+                elements.browserProfileStatusBadge.style.background = 'rgba(52, 211, 153, 0.15)';
+                elements.browserProfileStatusBadge.style.color = '#34d399';
+            } else if (st.has_google_login === false) {
+                elements.browserProfileStatusBadge.textContent = '⚠️ 未登录 Google (风控易拒)';
+                elements.browserProfileStatusBadge.style.background = 'rgba(248, 113, 113, 0.15)';
+                elements.browserProfileStatusBadge.style.color = '#f87171';
+            } else if (retryIfStarting) {
+                elements.browserProfileStatusBadge.textContent = '⏳ 浏览器内核初始化中';
+                setTimeout(() => refreshBrowserProfileStatus(false), 3500);
+            }
+        } catch (e) { /* ignore */ }
+    }
+    window.refreshBrowserProfileStatus = refreshBrowserProfileStatus;
+
+    // 浏览器信誉与养号工具箱: 导出 Google 登录凭证 (JSON)
+    if (elements.btnExportGoogleCookies) {
+        elements.btnExportGoogleCookies.addEventListener('click', async () => {
+            elements.btnExportGoogleCookies.disabled = true;
+            const origText = elements.btnExportGoogleCookies.textContent;
+            elements.btnExportGoogleCookies.textContent = '⏳ 正在导出...';
+            try {
+                const res = await fetch('/api/browser/export_cookies');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (!data.success) {
+                    showToast(`导出失败: ${data.message || '未知错误'}`, 'error');
+                    return;
+                }
+                const jsonStr = JSON.stringify(data.cookies || [], null, 2);
+                let copied = false;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    try {
+                        await navigator.clipboard.writeText(jsonStr);
+                        copied = true;
+                    } catch (_) { }
+                }
+                const blob = new Blob([jsonStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'dollyteria_google_cookies.json';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+
+                if (data.has_google_login) {
+                    showToast(`🎉 已导出 ${data.count} 条 Google 登录凭证${copied ? '（已同时复制到剪贴板）' : ''}，请去云端点击「导入 Google 凭证」！`, 'success');
+                } else {
+                    showToast(`⚠️ 已导出 ${data.count} 条 Cookie，但未检测到 Google 登录态！请先在本机登录 Google 后再导出。`, 'warning');
+                }
+                refreshBrowserProfileStatus(false);
+            } catch (err) {
+                showToast(`导出异常: ${err.message}`, 'error');
+            } finally {
+                elements.btnExportGoogleCookies.disabled = false;
+                elements.btnExportGoogleCookies.textContent = origText;
+            }
+        });
+    }
+
+    // 浏览器信誉与养号工具箱: 打开/关闭导入面板 & 选择文件 & 提交导入
+    if (elements.btnImportGoogleCookies && elements.googleCookiesImportPanel) {
+        elements.btnImportGoogleCookies.addEventListener('click', () => {
+            const visible = elements.googleCookiesImportPanel.style.display !== 'none';
+            elements.googleCookiesImportPanel.style.display = visible ? 'none' : 'block';
+        });
+    }
+    if (elements.btnCancelImportCookies && elements.googleCookiesImportPanel) {
+        elements.btnCancelImportCookies.addEventListener('click', () => {
+            elements.googleCookiesImportPanel.style.display = 'none';
+        });
+    }
+    if (elements.googleCookiesFileInput && elements.googleCookiesImportInput) {
+        elements.googleCookiesFileInput.addEventListener('change', (ev) => {
+            const file = ev.target.files && ev.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                elements.googleCookiesImportInput.value = String(e.target.result || '');
+                showToast(`已载入文件 ${file.name}，请点击「确认注入并刷新预热池」`, 'info');
+            };
+            reader.readAsText(file, 'utf-8');
+        });
+    }
+    if (elements.btnConfirmImportCookies && elements.googleCookiesImportInput) {
+        elements.btnConfirmImportCookies.addEventListener('click', async () => {
+            const rawText = elements.googleCookiesImportInput.value.trim();
+            if (!rawText) {
+                showToast('请先粘贴或选择 Google Cookie JSON 数据', 'error');
+                return;
+            }
+            elements.btnConfirmImportCookies.disabled = true;
+            const origText = elements.btnConfirmImportCookies.textContent;
+            elements.btnConfirmImportCookies.textContent = '⏳ 正在注入并刷新预热池...';
+            try {
+                const res = await fetch('/api/browser/import_cookies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cookies_json: rawText })
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message || '导入成功', data.has_google_login ? 'success' : 'warning');
+                    if (data.has_google_login && elements.googleCookiesImportPanel) {
+                        elements.googleCookiesImportPanel.style.display = 'none';
+                        elements.googleCookiesImportInput.value = '';
+                    }
+                    refreshBrowserProfileStatus(false);
+                } else {
+                    showToast(`导入失败: ${data.message || '未知错误'}`, 'error');
+                }
+            } catch (err) {
+                showToast(`导入异常: ${err.message}`, 'error');
+            } finally {
+                elements.btnConfirmImportCookies.disabled = false;
+                elements.btnConfirmImportCookies.textContent = origText;
             }
         });
     }

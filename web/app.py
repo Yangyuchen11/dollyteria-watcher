@@ -510,6 +510,26 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = RecaptchaTokenProvider.get_instance().get_profile_status()
         return jsonify(res)
 
+    @app.route("/api/browser/export_cookies", methods=["GET"])
+    def api_browser_export_cookies():
+        from hooks.auto_order import RecaptchaTokenProvider
+        res = RecaptchaTokenProvider.get_instance().export_google_cookies()
+        return jsonify(res)
+
+    @app.route("/api/browser/import_cookies", methods=["POST"])
+    def api_browser_import_cookies():
+        from hooks.auto_order import RecaptchaTokenProvider
+        data = request.get_json(silent=True)
+        if data is None:
+            raw_text = (request.get_data(as_text=True) or "").strip()
+            payload = raw_text
+        elif isinstance(data, dict):
+            payload = data.get("cookies_json") if "cookies_json" in data else data.get("cookies", data)
+        else:
+            payload = data
+        res = RecaptchaTokenProvider.get_instance().import_google_cookies(payload)
+        return jsonify(res)
+
     @app.route("/api/auto_order/buy", methods=["POST"])
     def api_auto_order_buy():
         data = request.json or {}

@@ -89,6 +89,7 @@ const elements = {
     btnConfirmImportCookies: document.getElementById('btn-confirm-import-cookies'),
     btnCancelImportCookies: document.getElementById('btn-cancel-import-cookies'),
     btnAutoWarmBrowser: document.getElementById('btn-auto-warm-browser'),
+    btnResetBrowserProfile: document.getElementById('btn-reset-browser-profile'),
     browserProfileStatusBadge: document.getElementById('browser-profile-status-badge'),
     aoTestResult: document.getElementById('ao-test-result'),
     aoModeBanner: document.getElementById('ao-mode-banner'),
@@ -1909,6 +1910,52 @@ function bindEvents() {
             } finally {
                 elements.btnAutoWarmBrowser.disabled = false;
                 elements.btnAutoWarmBrowser.textContent = origText;
+            }
+        });
+    }
+
+    // 重置持久化浏览器环境（仅清理 browser_profile，保留配置与数据）
+    if (elements.btnResetBrowserProfile) {
+        elements.btnResetBrowserProfile.addEventListener('click', async () => {
+            const ok = window.confirm(
+                '确定要重置浏览器环境吗？\n\n'
+                + '此操作会关闭当前浏览器内核并彻底删除 data/browser_profile 目录下的旧 Cookie、Google 登录态与缓存，随后重建全新空白环境。\n'
+                + '您的监控规则、已抓商品记录与订单归档库均完全不受影响。'
+            );
+            if (!ok) return;
+
+            elements.btnResetBrowserProfile.disabled = true;
+            const origText = elements.btnResetBrowserProfile.textContent;
+            elements.btnResetBrowserProfile.textContent = '⏳ 正在重置环境...';
+            showToast('正在安全关闭浏览器内核并清理 browser_profile...', 'info');
+
+            try {
+                const res = await fetch('/api/browser/reset_profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error((data && data.message) || `服务器响应异常 (${res.status})`);
+                }
+                showToast(data.message || '浏览器环境已重置', 'success');
+                if (elements.aoTestResult) {
+                    elements.aoTestResult.style.display = 'block';
+                    elements.aoTestResult.innerHTML = `
+                        <div class="ao-res-header">
+                            <span class="ao-res-status success">🧹 浏览器环境已重置</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-primary); margin-top: 6px;">
+                            ${escapeHtml(data.message || '')}
+                        </div>
+                    `;
+                }
+                await refreshBrowserProfileStatus(false);
+            } catch (err) {
+                showToast(`重置浏览器环境失败: ${err.message}`, 'error');
+            } finally {
+                elements.btnResetBrowserProfile.disabled = false;
+                elements.btnResetBrowserProfile.textContent = origText;
             }
         });
     }

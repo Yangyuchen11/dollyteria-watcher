@@ -1600,6 +1600,65 @@ class RecaptchaTokenProvider:
             if cdp:
                 cdp.close()
 
+    def reset_browser_profile(self) -> Dict:
+        """
+        安全关闭当前浏览器内核并仅清理 data/browser_profile 目录，
+        清除冲突的旧 Cookie 与缓存指纹，不影响 config.json、state.json 与 archive.db。
+        清理完成后自动重建全新空白浏览器环境。
+        """
+        import shutil
+        profile_base = self._get_profile_dir()
+        with self._lock:
+            if self._gui_proc is not None:
+                try:
+                    if self._gui_proc.poll() is None:
+                        self._gui_proc.terminate()
+                        try:
+                            self._gui_proc.wait(timeout=3)
+                        except Exception:
+                            self._gui_proc.kill()
+                except Exception:
+                    pass
+                self._gui_proc = None
+
+            self._cleanup_proc_unlocked()
+            time.sleep(0.3)
+
+            if os.path.exists(profile_base):
+                shutil.rmtree(profile_base, ignore_errors=True)
+                if os.path.exists(profile_base):
+                    time.sleep(0.5)
+                    shutil.rmtree(profile_base, ignore_errors=True)
+                deleted = not os.path.exists(profile_base)
+            else:
+                deleted = True
+
+            if not deleted:
+                return {
+                    "success": False,
+                    "profile_dir": profile_base,
+                    "restarted": False,
+                    "message": f"无法完全删除 {profile_base}，请确认无其他浏览器进程占用后再试",
+                }
+
+        restarted = False
+        try:
+            sitekey = self._sitekey or DEFAULT_RECAPTCHA_SITEKEY
+            restarted = bool(self._ensure_browser_and_pool_ready(sitekey))
+        except Exception as e:
+            logger.warning(f"⚠️ 重置浏览器环境后拉起新池失败: {e}")
+
+        return {
+            "success": True,
+            "profile_dir": profile_base,
+            "restarted": restarted,
+            "message": (
+                "已清除 browser_profile 并重建全新空白浏览器环境"
+                if restarted
+                else "已清除 browser_profile（新浏览器环境将在下次使用时自动创建）"
+            ),
+        }
+
     def _read_live_google_cookies(self) -> Tuple[bool, List[Dict]]:
         """通过 CDP 读取当前运行中浏览器内核里的 Google / YouTube 信任体系 Cookie"""
         ws_url = None

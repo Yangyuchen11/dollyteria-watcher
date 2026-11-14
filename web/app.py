@@ -529,6 +529,12 @@ def create_app(monitor: DollyteriaMonitor, scheduler: DollyteriaScheduler) -> Fl
         res = RecaptchaTokenProvider.get_instance().import_google_cookies(payload)
         return jsonify(res)
 
+    @app.route("/api/browser/reset_profile", methods=["POST"])
+    def api_browser_reset_profile():
+        from hooks.auto_order import RecaptchaTokenProvider
+        res = RecaptchaTokenProvider.get_instance().reset_browser_profile()
+        return jsonify(res)
+
     @app.route("/api/auto_order/buy", methods=["POST"])
     def api_auto_order_buy():
         data = request.json or {}

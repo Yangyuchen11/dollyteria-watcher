@@ -149,6 +149,7 @@ class TestGoogleCookieSync(unittest.TestCase):
         # Unauthenticated requests must be rejected with 401
         self.assertEqual(client.get("/api/browser/export_cookies").status_code, 401)
         self.assertEqual(client.post("/api/browser/import_cookies", json={"cookies": []}).status_code, 401)
+        self.assertEqual(client.post("/api/browser/reset_profile").status_code, 401)
 
         # Login with configured password
         login_res = client.post("/api/auth/login", json={"password": "secret_pw"})
@@ -169,6 +170,50 @@ class TestGoogleCookieSync(unittest.TestCase):
             self.assertEqual(r_imp.status_code, 200)
             self.assertTrue(r_imp.get_json()["has_google_login"])
             mock_imp.assert_called_once()
+
+        with patch.object(RecaptchaTokenProvider, "reset_browser_profile", return_value={
+            "success": True, "profile_dir": "/app/data/browser_profile", "restarted": True, "message": "ok"
+        }) as mock_reset:
+            r_rst = client.post("/api/browser/reset_profile")
+            self.assertEqual(r_rst.status_code, 200)
+            self.assertTrue(r_rst.get_json()["success"])
+            self.assertTrue(r_rst.get_json()["restarted"])
+            mock_reset.assert_called_once()
+
+    def test_reset_browser_profile_only_deletes_browser_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = os.path.join(tmpdir, "browser_profile")
+            os.makedirs(os.path.join(profile_dir, "Default"), exist_ok=True)
+            cookie_file = os.path.join(profile_dir, "Default", "Cookies")
+            with open(cookie_file, "w", encoding="utf-8") as f:
+                f.write("old-conflicting-cookies")
+
+            # Sibling app data files that MUST NOT be deleted
+            config_file = os.path.join(tmpdir, "config.json")
+            state_file = os.path.join(tmpdir, "state.json")
+            db_file = os.path.join(tmpdir, "archive.db")
+            for p in (config_file, state_file, db_file):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("keep-me")
+
+            provider = RecaptchaTokenProvider.__new__(RecaptchaTokenProvider)
+            provider._lock = __import__("threading").Lock()
+            provider._proc = None
+            provider._gui_proc = None
+            provider._sitekey = "test-sitekey"
+            provider._cleanup_proc_unlocked = MagicMock()
+            provider._get_profile_dir = MagicMock(return_value=profile_dir)
+            provider._ensure_browser_and_pool_ready = MagicMock(return_value=True)
+
+            res = provider.reset_browser_profile()
+
+            self.assertTrue(res["success"])
+            self.assertTrue(res["restarted"])
+            self.assertFalse(os.path.exists(profile_dir))
+            provider._cleanup_proc_unlocked.assert_called_once()
+            provider._ensure_browser_and_pool_ready.assert_called_once_with("test-sitekey")
+            for p in (config_file, state_file, db_file):
+                self.assertTrue(os.path.exists(p), f"Sibling file {p} should never be deleted")
 
 
 if __name__ == "__main__":

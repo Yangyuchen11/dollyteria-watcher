@@ -193,6 +193,7 @@ class RecaptchaTokenProvider:
         self._lock = threading.Lock()
         self._focus_lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
+        self._gui_proc: Optional[subprocess.Popen] = None
         self._port: int = 0
         self._user_data_dir: Optional[str] = None
         self._is_temp_profile: bool = False
@@ -829,6 +830,9 @@ class RecaptchaTokenProvider:
     def _ensure_browser_and_pool_ready(self, sitekey: str = DEFAULT_RECAPTCHA_SITEKEY) -> bool:
         """确保 Chrome 进程存活且内部预热 Tab 池数量与 target_pool_size 对齐"""
         with self._lock:
+            if self._gui_proc is not None and self._gui_proc.poll() is None:
+                # 桌面可见浏览器窗口正在由用户交互使用中，暂停后台静默接管，防止抢占 Profile 锁或把窗口隐藏到屏幕外
+                return False
             need_restart = (
                 self._proc is None
                 or self._proc.poll() is not None
@@ -1440,8 +1444,22 @@ class RecaptchaTokenProvider:
         允许用户直观地登录 Google 账号或手动浏览以积攒信任指纹。
         """
         # 1. 释放后台可能占用的无头 Chrome 进程，解除 lockfile
+        profile_base = self._get_profile_dir()
         with self._lock:
+            if self._gui_proc is not None and self._gui_proc.poll() is None:
+                try:
+                    self._gui_proc.terminate()
+                    self._gui_proc.wait(timeout=2)
+                except Exception:
+                    pass
+                self._gui_proc = None
             self._cleanup_proc_unlocked()
+            if os.name == "nt":
+                try:
+                    kill_cmd = f'Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\' or Name = \'msedge.exe\'" | Where-Object {{ $_.CommandLine -like "*{os.path.basename(profile_base)}*" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}'
+                    subprocess.run(["powershell", "-NoProfile", "-Command", kill_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+                except Exception:
+                    pass
 
         # 无桌面环境防呆 (例如部署在 Linux 无头云服务器上)
         if os.name != "nt" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -1454,7 +1472,6 @@ class RecaptchaTokenProvider:
         if not exe:
             return {"success": False, "message": "未找到本机可用的 Chrome / Edge / Chromium 浏览器"}
 
-        profile_base = self._get_profile_dir()
         os.makedirs(profile_base, exist_ok=True)
 
         # 尝试清理残余 lockfile (若无头 Chrome 已退出)
@@ -1506,6 +1523,8 @@ class RecaptchaTokenProvider:
 
         try:
             p = subprocess.Popen(cmd)
+            with self._lock:
+                self._gui_proc = p
             return {
                 "success": True,
                 "pid": p.pid,

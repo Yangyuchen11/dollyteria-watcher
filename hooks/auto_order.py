@@ -768,8 +768,12 @@ class RecaptchaTokenProvider:
                             cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
                         except Exception:
                             pass
-                        for mx, my in [(140, 220), (210, 260), (295, 235), (350, 195)]:
-                            cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
+                        for base_x, base_y in [(140, 220), (210, 260), (295, 235), (350, 195)]:
+                            cdp.call("Input.dispatchMouseEvent", {
+                                "type": "mouseMoved",
+                                "x": base_x + random.randint(-25, 25),
+                                "y": base_y + random.randint(-20, 20),
+                            })
 
                     warmup_expr = (
                         f"new Promise((resolve) => {{"
@@ -794,14 +798,16 @@ class RecaptchaTokenProvider:
                         slot.is_warmed = True
 
                     # 热身握手完成后再预埋两段平滑光标事件，供正式下单签发时直接打包高熵行为信号
-                    for mx, my in [(310, 240), (245, 275)]:
-                        cdp.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": mx, "y": my})
+                    for base_x, base_y in [(310, 240), (245, 275)]:
+                        cdp.call("Input.dispatchMouseEvent", {
+                            "type": "mouseMoved",
+                            "x": base_x + random.randint(-25, 25),
+                            "y": base_y + random.randint(-20, 20),
+                        })
                 except Exception:
                     slot.is_warmed = False
 
                 slot.is_fresh = True
-                if force_navigate:
-                    slot.last_failed = False
                 slot.sitekey = sitekey
                 slot.prepared_at = time.time()
                 slot.last_touch_at = slot.prepared_at
@@ -1168,12 +1174,13 @@ class RecaptchaTokenProvider:
                         s.borrow_seq += 1
                         self._rr_index = idx  # 成功槽位保持粘性
                         return s
-                # 2. 找任意已预热好的槽位
+                # 2. 找任意已预热好的槽位（当所有槽位均被标记过 last_failed 时兜底轮换，并重置其 last_failed 标记开启新一轮）
                 for offset in range(n):
                     idx = (start + offset) % n
                     s = self._slots[idx]
                     if not s.in_use and not s.is_preparing and s.is_fresh and s.sitekey == sitekey:
                         s.in_use = True
+                        s.last_failed = False
                         s.borrow_seq += 1
                         self._rr_index = (idx + 1) % n
                         return s
@@ -1183,6 +1190,7 @@ class RecaptchaTokenProvider:
                     s = self._slots[idx]
                     if not s.in_use:
                         s.in_use = True
+                        s.last_failed = False
                         s.borrow_seq += 1
                         self._rr_index = (idx + 1) % n
                         return s
@@ -1212,8 +1220,12 @@ class RecaptchaTokenProvider:
                     else:
                         slot.fail_count += 1
                         slot.last_failed = True
-                        # 遭遇官网拒绝拦截，立即强制该槽位下线重置刷新
+                        # 遭遇官网拒绝拦截，立即强制该槽位下线重置刷新，并将轮询游标推进到下一槽位避免死磕同一 Tab
                         slot.is_fresh = False
+                        if slot in self._slots and len(self._slots) > 1:
+                            failed_idx = self._slots.index(slot)
+                            if self._rr_index == failed_idx:
+                                self._rr_index = (failed_idx + 1) % len(self._slots)
 
     def release_slots(
         self,
@@ -1251,7 +1263,7 @@ class RecaptchaTokenProvider:
                     if exp_seq is not None and slot.borrow_seq != exp_seq:
                         continue
                     try:
-                        need_refresh = (not slot.is_fresh or slot.last_failed or (time.time() - getattr(slot, "prepared_at", 0) > 900))
+                        need_refresh = (not slot.is_fresh or slot.last_failed or (time.time() - getattr(slot, "prepared_at", 0) > 3600))
                         if need_refresh:
                             slot.is_preparing = True
                             self._prepare_slot(slot, sitekey, force_navigate=True)
@@ -1524,7 +1536,8 @@ class RecaptchaTokenProvider:
 
             # 4. 重新初始化为就绪状态
             with slot.lock:
-                self._prepare_slot(slot, self._sitekey, force_navigate=True)
+                if self._prepare_slot(slot, self._sitekey, force_navigate=True):
+                    slot.last_failed = False
             steps.append("已重新就绪 reCAPTCHA v3 独立预热通道")
 
             return {
@@ -1779,6 +1792,8 @@ class RecaptchaTokenProvider:
                         with s.lock:
                             if not s.in_use:
                                 ok = self._prepare_slot(s, self._sitekey, force_navigate=True)
+                                if ok:
+                                    s.last_failed = False
                                 if ok and was_broken:
                                     logger.info(f"🛡️ [reCAPTCHA] 掉线标签页 [{s.target_id[:6]}] 已自动修复就绪！")
                     finally:
@@ -1819,8 +1834,8 @@ class RecaptchaTokenProvider:
                             if not s.is_fresh:
                                 s.is_preparing = True
                                 broken_slots.append(s)
-                            elif (now - s.prepared_at) > 480:
-                                # 超过 8 分钟的槽位采用错峰滚动刷新（降低日常空跑对 Google 的 pageview 噪声；临战前由 ensure_prewarm_healthy 兜底刷鲜）
+                            elif (now - s.prepared_at) > 3600:
+                                # 超过 1 小时（3600s）的槽位采用错峰滚动刷新（降低日常空跑对 Google 的 pageview 噪声；临战前由 ensure_prewarm_healthy 兜底刷鲜）
                                 if oldest_aged_slot is None or s.prepared_at < oldest_aged_slot.prepared_at:
                                     oldest_aged_slot = s
                             else:
@@ -1833,6 +1848,7 @@ class RecaptchaTokenProvider:
                             with s.lock:
                                 if not s.in_use:
                                     if self._prepare_slot(s, self._sitekey, force_navigate=True):
+                                        s.last_failed = False
                                         logger.info(f"🛡️ [reCAPTCHA] 掉线标签页 [{s.target_id[:6]}] 已自动修复就绪！")
                         finally:
                             s.is_preparing = False
@@ -1841,7 +1857,8 @@ class RecaptchaTokenProvider:
                         try:
                             with oldest_aged_slot.lock:
                                 if not oldest_aged_slot.in_use:
-                                    self._prepare_slot(oldest_aged_slot, self._sitekey, force_navigate=True)
+                                    if self._prepare_slot(oldest_aged_slot, self._sitekey, force_navigate=True):
+                                        oldest_aged_slot.last_failed = False
                         finally:
                             oldest_aged_slot.is_preparing = False
 

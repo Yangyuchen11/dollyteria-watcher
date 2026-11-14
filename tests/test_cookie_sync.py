@@ -84,6 +84,29 @@ class TestGoogleCookieSync(unittest.TestCase):
         self.assertFalse(r2["success"])
         self.assertEqual(r2["imported"], 0)
 
+    def test_import_preserves_existing_cookies_and_storage(self):
+        provider = RecaptchaTokenProvider.get_instance()
+        slot_mock = MagicMock()
+        slot_mock.ws_url = "ws://127.0.0.1:9222/devtools/page/test"
+        cdp_mock = MagicMock()
+        cdp_mock.call.return_value = {"success": True}
+
+        with (
+            patch.object(provider, "_ensure_browser_and_pool_ready", return_value=True),
+            patch.object(provider, "_cleanup_proc_unlocked"),
+            patch.object(provider, "_ensure_headless_signin_disabled"),
+            patch.object(provider, "_read_live_google_cookies", return_value=(True, [{"name": "SID", "value": "v", "domain": ".google.com"}])),
+            patch.object(provider, "_slots", [slot_mock]),
+            patch("hooks.auto_order._SimpleCDPClient", return_value=cdp_mock),
+        ):
+            res = provider.import_google_cookies([{"name": "SID", "value": "v", "domain": ".google.com"}])
+
+        self.assertTrue(res["success"])
+        called_methods = [c.args[0] for c in cdp_mock.call.call_args_list]
+        self.assertIn("Network.setCookie", called_methods)
+        self.assertNotIn("Network.clearBrowserCookies", called_methods)
+        self.assertNotIn("Storage.clearDataForOrigin", called_methods)
+
     def test_ensure_headless_signin_disabled(self):
         tmp_dir = tempfile.mkdtemp(prefix="dolly_pref_test_")
         try:

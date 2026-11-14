@@ -1701,19 +1701,6 @@ class RecaptchaTokenProvider:
         cdp = None
         try:
             cdp = _SimpleCDPClient(ws_url, timeout=8.0)
-            # 先彻底清空旧的 Cookie 及 Google/Dollyteria 站点 LocalStorage (rc::a / rc::f 等历史低分指纹标记)
-            try:
-                cdp.call("Network.clearBrowserCookies", {})
-            except Exception:
-                pass
-            for origin in ("https://www.google.com", "https://www.google.co.jp", "https://accounts.google.com", "https://www.dollyteria.com"):
-                try:
-                    cdp.call("Storage.clearDataForOrigin", {
-                        "origin": origin,
-                        "storageTypes": "local_storage,session_storage,indexeddb,service_workers",
-                    })
-                except Exception:
-                    pass
             for params in normalized_list:
                 res = cdp.call("Network.setCookie", params)
                 if isinstance(res, dict) and res.get("success"):

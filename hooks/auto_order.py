@@ -1465,12 +1465,38 @@ class RecaptchaTokenProvider:
             except Exception:
                 pass
 
+        # 修正可能被后台静默模式写入的屏幕外坐标 (-32000,-32000)，确保桌面窗口在屏幕中央可见
+        pref_path = os.path.join(profile_base, "Default", "Preferences")
+        if os.path.isfile(pref_path):
+            try:
+                with open(pref_path, "r", encoding="utf-8") as f:
+                    prefs = json.load(f)
+                if isinstance(prefs, dict):
+                    bp = prefs.setdefault("browser", {})
+                    if isinstance(bp, dict):
+                        bp["window_placement"] = {
+                            "bottom": 880,
+                            "left": 120,
+                            "maximized": False,
+                            "right": 1320,
+                            "top": 80,
+                            "work_area_bottom": 1040,
+                            "work_area_left": 0,
+                            "work_area_right": 1920,
+                            "work_area_top": 0,
+                        }
+                        with open(pref_path, "w", encoding="utf-8") as f:
+                            json.dump(prefs, f, ensure_ascii=False)
+            except Exception:
+                pass
+
         # 启动可见界面的桌面浏览器
         cmd = [
             exe,
             f"--user-data-dir={profile_base}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--window-position=120,80",
             "--window-size=1200,800",
             start_url,
         ]

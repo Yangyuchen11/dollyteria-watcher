@@ -341,7 +341,7 @@ class RecaptchaTokenProvider:
         name = str(raw.get("name") or "").strip()
         value = raw.get("value")
         domain = str(raw.get("domain") or "").strip()
-        if not name or value is None or not domain or not cls._is_google_trust_domain(domain):
+        if not name or name == "_GRECAPTCHA" or value is None or not domain or not cls._is_google_trust_domain(domain):
             return None
 
         path = str(raw.get("path") or "/").strip() or "/"
@@ -386,6 +386,9 @@ class RecaptchaTokenProvider:
                     params["expires"] = exp_val
             except (TypeError, ValueError):
                 pass
+        if "expires" not in params:
+            # 将会话级登录凭证 (如 OSID / __Secure-OSID / __Host-GAPSTS) 赋予 30 天持久化寿命，防止重启落盘时被 Chromium 丢弃
+            params["expires"] = time.time() + 86400 * 30
 
         return params
 
@@ -904,6 +907,7 @@ class RecaptchaTokenProvider:
                     "--disable-background-timer-throttling",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
+                    "--disable-quic",
                     "--enable-webgl",
                     "--ignore-gpu-blocklist",
                     "--lang=ja-JP,ja",
@@ -1697,6 +1701,19 @@ class RecaptchaTokenProvider:
         cdp = None
         try:
             cdp = _SimpleCDPClient(ws_url, timeout=8.0)
+            # 先彻底清空旧的 Cookie 及 Google/Dollyteria 站点 LocalStorage (rc::a / rc::f 等历史低分指纹标记)
+            try:
+                cdp.call("Network.clearBrowserCookies", {})
+            except Exception:
+                pass
+            for origin in ("https://www.google.com", "https://www.google.co.jp", "https://accounts.google.com", "https://www.dollyteria.com"):
+                try:
+                    cdp.call("Storage.clearDataForOrigin", {
+                        "origin": origin,
+                        "storageTypes": "local_storage,session_storage,indexeddb,service_workers",
+                    })
+                except Exception:
+                    pass
             for params in normalized_list:
                 res = cdp.call("Network.setCookie", params)
                 if isinstance(res, dict) and res.get("success"):
